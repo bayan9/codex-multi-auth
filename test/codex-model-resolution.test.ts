@@ -124,7 +124,7 @@ describe("codex.js wrapper — GPT-6 Astra and Daybreak resolution", () => {
 		// `gpt-5.1` is retired and runs on `gpt-5.6-sol`, so it reports that family.
 		expect(wrapper.resolveModelFamilyForStatus("openai/gpt-5.1")).toBe("gpt-5.2");
 		expect(wrapper.resolveModelFamilyForStatus("models/gpt-5.3-codex")).toBe(
-			"codex",
+			"gpt-5.2",
 		);
 	});
 
@@ -254,13 +254,19 @@ describe("codex.js wrapper — parity with lib/request/helpers/model-map", () =>
 	}
 });
 
-describe("codex.js wrapper — GPT-6 status family does not swallow codex ids", () => {
-	it("leaves a `gpt-6-codex` id in the codex status bucket", () => {
-		// This function returns the rate-limit bucket, which is `codex` for every
-		// codex id (`/codex/responses` buckets there), not the prompt family lib's
-		// profile reports. The GPT-6 branch must not claim a codex id off it.
-		expect(wrapper.resolveModelFamilyForStatus("gpt-6-codex")).toBe("codex");
-		expect(wrapper.resolveModelFamilyForStatus("gpt-5.3-codex")).toBe("codex");
+describe("codex.js wrapper — status family for codex ids", () => {
+	it("reports the family the proxy keys a codex request under", () => {
+		// The proxy builds a /codex/responses context with
+		// `family: getModelFamily(model)`, so status must read the same key. This
+		// test used to pin `codex` on the belief that /codex/responses buckets
+		// there; the proxy never did (it wrote `gpt-5-codex` before the codex
+		// models were retired and writes `gpt-5.2` now), so status read a key
+		// nothing updated.
+		for (const id of ["gpt-6-codex", "gpt-5.3-codex", "codex-max", "gpt-5.1-codex-mini", "codex-mini-latest"]) {
+			expect(wrapper.resolveModelFamilyForStatus(id), id).toBe(
+				getModelProfile(id).promptFamily,
+			);
+		}
 		// Routing still sends it to the model codex ids run on, same as lib. With
 		// every codex model retired that is 5.6 Sol, on the gpt-5.2 prompt family.
 		expect(wrapper.normalizeRequestedModel("gpt-6-codex")).toBe(

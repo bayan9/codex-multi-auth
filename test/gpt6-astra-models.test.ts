@@ -415,12 +415,12 @@ describe("unsupported-model fallback chain", () => {
 	it("ends the walk at a model with no row, which is what stranded it", () => {
 		// This is the mechanism behind the bug the `gpt-5.6-sol` row fixes: a
 		// model with no row returns undefined and the walk stops there, however
-		// many entries the row that pointed at it listed. Terra still has no
-		// row, deliberately, because nothing steps into it. Luna got one when
-		// `gpt-6-luna` started stepping into it (test/gpt6-sol-luna-models.test.ts).
+		// many entries the row that pointed at it listed. Luna and Terra got
+		// rows once something stepped into them (`gpt-6-luna`, and the retired
+		// codex minis / `gpt-5-mini`; see test/retired-models.test.ts).
 		// `gpt-5.5` is the floor and has no row of its own, so every walk that
 		// reaches it stops there.
-		expect(walk("gpt-5.6-terra")).toEqual([]);
+		expect(walk("gpt-5.6-terra")).toEqual(["gpt-5.5"]);
 		expect(walk("gpt-5.6-luna")).toEqual(["gpt-5.5"]);
 		expect(walk("gpt-5.5")).toEqual([]);
 		expect(walk("gpt-5.5-pro")).toEqual([]);

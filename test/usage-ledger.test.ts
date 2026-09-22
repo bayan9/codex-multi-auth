@@ -223,25 +223,25 @@ describe("usage ledger core", () => {
 			"../lib/usage/index.js"
 		);
 
-		expect(Object.keys(listUsageModelPricing())).toContain("gpt-5.3-codex");
+		expect(Object.keys(listUsageModelPricing())).toContain("gpt-5.5");
 		expect(
-			estimateUsageCostUsd("gpt-5.3-codex", {
+			estimateUsageCostUsd("gpt-5.5", {
 				inputTokens: 1_000_000,
 				outputTokens: 1_000_000,
 				cachedInputTokens: 1_000_000,
 				reasoningTokens: 1_000_000,
 				totalTokens: 4_000_000,
 			}),
-		).toBe(20.125);
+		).toBe(24.2);
 		expect(
-			estimateUsageCostUsd("gpt-5.3-codex", {
+			estimateUsageCostUsd("gpt-5.5", {
 				inputTokens: 1_000,
 				outputTokens: 200,
 				cachedInputTokens: 50,
 				reasoningTokens: 25,
 				totalTokens: 1_225,
 			}),
-		).toBe(0.00344375);
+		).toBe(0.00461);
 		expect(
 			estimateUsageCostUsd(null, {
 				inputTokens: 1,

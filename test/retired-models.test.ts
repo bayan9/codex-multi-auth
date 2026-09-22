@@ -12,6 +12,7 @@ import {
 	resolveUnsupportedCodexFallbackModel,
 } from "../lib/request/error-classification.js";
 import { getUsageModelPricing } from "../lib/usage/pricing.js";
+import { normalizeUsageLedgerRow } from "../lib/usage/redaction.js";
 
 /**
  * Retired models: every id OpenAI's deprecations page lists as shut down, and
@@ -119,6 +120,52 @@ describe("retired models", () => {
 		}
 	});
 
+	it("walks every retired id down to the gpt-5.5 floor, Terra included", () => {
+		// Terra had no row, so the codex minis and `gpt-5-mini` (which step into
+		// it) stopped there while every other retired id reached `gpt-5.5`.
+		const body = {
+			error: {
+				message:
+					"'x' model is not supported when using codex with a chatgpt account",
+			},
+		};
+		for (const retired of RETIRED) {
+			const attempted = new Set([retired]);
+			let model: string | undefined = retired;
+			let last = retired;
+			for (let i = 0; i < 10 && model; i += 1) {
+				model = resolveUnsupportedCodexFallbackModel({
+					requestedModel: model,
+					errorBody: body,
+					attemptedModels: attempted,
+					fallbackOnUnsupportedCodexModel: true,
+					fallbackToGpt52OnUnsupportedGpt53: true,
+				});
+				if (model) {
+					attempted.add(model);
+					last = model;
+				}
+			}
+			expect(["gpt-5.5", "gpt-5.5-pro"], `${retired} ends at ${last}`).toContain(last);
+		}
+	});
+
+	it("does not read a `codex-minimal` effort suffix as a codex mini", () => {
+		expect(resolveNormalizedModel("gpt_5_codex-minimal")).toBe("gpt-5.6-sol");
+		expect(wrapper.normalizeRequestedModel("gpt_5_codex-minimal")).toBe("gpt-5.6-sol");
+		expect(resolveNormalizedModel("my-codex-mini-build")).toBe("gpt-5.6-terra");
+	});
+
+	it("resolves `-max`/`-ultra` forms of retired ids to the replacement", () => {
+		// These efforts are not generated as aliases for pre-5.6 ids, so the
+		// general GPT-5 resolver used to claim them and return gpt-5.5.
+		for (const id of ["gpt-5-chat-latest-max", "gpt-5.3-chat-latest-ultra", "gpt-5.2-max", "gpt-5.4-ultra"]) {
+			const expected = RETIRED_MODEL_REPLACEMENTS[id.replace(/-(max|ultra)$/, "")];
+			expect(resolveNormalizedModel(id), id).toBe(expected);
+			expect(wrapper.normalizeRequestedModel(id), id).toBe(expected);
+		}
+	});
+
 	it("never falls back onto a retired model", () => {
 		for (const [from, targets] of Object.entries(
 			DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN,
@@ -129,13 +176,31 @@ describe("retired models", () => {
 		}
 	});
 
-	it("keeps pricing for retired ids that already had a rate", () => {
-		// Historical ledger rows keep the model string they were recorded under;
-		// dropping these rows would turn that usage into unknown cost and make a
-		// maxCostUsd budget fail closed for the whole window.
-		for (const model of ["gpt-5-codex", "gpt-5.1-codex", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4"]) {
-			expect(getUsageModelPricing(model), model).not.toBeNull();
+	it("prices a retired id at its replacement's rate", () => {
+		// The proxy records the raw client model, so a new `gpt-5-codex` row ran
+		// on `gpt-5.6-sol`. It used to be priced at the retired $1.25/$10 rate,
+		// under-counting a maxCostUsd budget 4x on input.
+		for (const [retired, replacement] of Object.entries(
+			RETIRED_MODEL_REPLACEMENTS,
+		)) {
+			expect(getUsageModelPricing(retired), retired).toEqual(
+				getUsageModelPricing(replacement),
+			);
 		}
+		expect(getUsageModelPricing("gpt-5-codex")?.inputUsdPerMillion).toBe(5);
+	});
+
+	it("leaves costs already written to the ledger alone", () => {
+		// History is safe without the retired rows: a stored costUsd is read
+		// back as-is, never re-priced.
+		const row = normalizeUsageLedgerRow({
+			outcome: "success",
+			model: "gpt-5.3-codex",
+			inputTokens: 1_000_000,
+			outputTokens: 0,
+			costUsd: 1.25,
+		});
+		expect(row.costUsd).toBe(1.25);
 	});
 
 	it("lists no retired model in either config template", () => {
