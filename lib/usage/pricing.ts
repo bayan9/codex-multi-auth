@@ -138,6 +138,11 @@ const MODEL_PRICING: Record<string, UsageModelPricing> = {
 			},
 		},
 	},
+	// Rows for retired models (`gpt-5-codex` through `gpt-5.4`) stay on purpose.
+	// The ledger keeps the model string each request was recorded under, so
+	// deleting a row would turn every historical row for it into unknown cost and
+	// make a `maxCostUsd` budget fail closed for as long as that usage is in the
+	// window.
 	"gpt-5-codex": {
 		inputUsdPerMillion: 1.25,
 		outputUsdPerMillion: 10,
@@ -218,14 +223,7 @@ export const UNPRICED_ROUTABLE_MODELS = [
 	"gpt-6-astra-aeon",
 	"gpt-daybreak-blue-latest",
 	"gpt-daybreak-red-latest",
-	"gpt-5.1",
-	"gpt-5.2-pro",
-	"gpt-5.4-mini",
-	"gpt-5.4-nano",
-	"gpt-5.4-pro",
 	"gpt-5.5-pro",
-	"gpt-5-mini",
-	"gpt-5-nano",
 ] as const;
 
 function normalizeModelName(model: string | null | undefined): string | null {

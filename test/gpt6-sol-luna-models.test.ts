@@ -86,7 +86,10 @@ describe("GPT-6 Sol and Luna", () => {
 		});
 
 		it("defers a `codex` token to the codex resolver", () => {
-			expect(resolveNormalizedModel("gpt-6-sol-codex")).toBe("gpt-5.3-codex");
+			// A codex id runs on the retired-codex replacement (5.6 Sol), not on
+			// the GPT-6 model its other tokens name.
+			expect(resolveNormalizedModel("gpt-6-sol-codex")).toBe("gpt-5.6-sol");
+			expect(resolveNormalizedModel("gpt-6-luna-codex")).toBe("gpt-5.6-sol");
 		});
 	});
 
@@ -274,11 +277,12 @@ describe("GPT-6 Sol and Luna", () => {
 		}
 
 		it("walks Sol down through the 5.6 tier it replaces", () => {
-			expect(walk("gpt-6-sol")).toEqual(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4"]);
+			// `gpt-5.5` is the floor now that `gpt-5.4` is retired.
+			expect(walk("gpt-6-sol")).toEqual(["gpt-5.6-sol", "gpt-5.5"]);
 		});
 
 		it("walks Luna down through 5.6 Luna instead of stranding there", () => {
-			expect(walk("gpt-6-luna")).toEqual(["gpt-5.6-luna", "gpt-5.5", "gpt-5.4"]);
+			expect(walk("gpt-6-luna")).toEqual(["gpt-5.6-luna", "gpt-5.5"]);
 		});
 
 		it("never steps sideways into Astra", () => {

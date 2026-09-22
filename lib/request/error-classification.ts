@@ -6,6 +6,7 @@
 
 import { isRecord } from "../utils.js";
 import { HTTP_STATUS, stripModelEffortSuffix } from "../constants.js";
+import { RETIRED_MODEL_REPLACEMENTS } from "./helpers/model-map.js";
 
 export interface EntitlementError {
         isEntitlement: true;
@@ -38,11 +39,12 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	//
 	// Depth is not free: every hop spends one of the shared per-request outbound
 	// attempts (`tryConsumeOutboundRequestAttempt`). A single-account balanced
-	// session gets a budget of 5, and the aeon walk needs exactly 5, so it fits
-	// with nothing spare. Spend an attempt on a retry or a stream failover and
-	// the tail hops become unreachable, ending as an attempt-budget-exhausted
-	// 503 rather than `gpt-5.4`. Hops are ordered most-valuable-first so what is
-	// lost first matters least. Do not add a hop to a GPT-6 row without
+	// session gets a budget of 5, and the aeon walk needs 4 (it needed all 5
+	// until `gpt-5.4` was retired as the floor), leaving one attempt for a retry
+	// or a stream failover. Spend two and the tail hop becomes unreachable,
+	// ending as an attempt-budget-exhausted 503 rather than `gpt-5.5`. Hops are
+	// ordered most-valuable-first so what is lost first matters least. Do not
+	// add a hop to a GPT-6 row without
 	// re-checking that budget; `test/gpt6-astra-models.test.ts` asserts it.
 	"gpt-6-astra": ["gpt-5.6-sol", "gpt-5.5"],
 	// aeon steps to the flagship first: still GPT-6, still Astra, just without
@@ -68,23 +70,23 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	"gpt-5.6-luna": ["gpt-5.5"],
 	"gpt-5": ["gpt-5.5"],
 	"gpt-5-pro": ["gpt-5.5-pro"],
-	"gpt-5-chat-latest": ["gpt-5.5"],
-	"gpt-5.5": ["gpt-5.4"],
-	"gpt-5.5-pro": ["gpt-5.4"],
-	"gpt-5.5-2026-04-23": ["gpt-5.4"],
-	"gpt-5.5-pro-2026-04-23": ["gpt-5.4"],
-	"gpt-5.5-20260423": ["gpt-5.4"],
-	"gpt-5.5-pro-20260423": ["gpt-5.4"],
-	"gpt-5.3-codex-spark": ["gpt-5.3-codex", "gpt-5.2-codex"],
-	"gpt-5.3-codex": ["gpt-5.2-codex"],
-	"codex-max": ["gpt-5.3-codex"],
-	"gpt-5.1-codex-max": ["gpt-5.3-codex"],
-	"codex-mini-latest": ["gpt-5.3-codex"],
-	"gpt-5-codex-mini": ["gpt-5.3-codex"],
-	"gpt-5.1-codex-mini": ["gpt-5.3-codex"],
-	"gpt-5-codex": ["gpt-5.3-codex", "gpt-5.2-codex"],
-	"gpt-5.2-codex": ["gpt-5.3-codex"],
-	"gpt-5.1-codex": ["gpt-5.3-codex"],
+	"gpt-5.5-2026-04-23": ["gpt-5.5"],
+	"gpt-5.5-20260423": ["gpt-5.5"],
+	"gpt-5.5-pro-2026-04-23": ["gpt-5.5-pro"],
+	"gpt-5.5-pro-20260423": ["gpt-5.5-pro"],
+	// `gpt-5.5` and `gpt-5.5-pro` are the floor: they used to step to `gpt-5.4`,
+	// which the Codex backend no longer serves (`retirement_at: 2026-08-31` in
+	// the upstream catalog), so that hop could only ever fail.
+	//
+	// A retired id still reaches the backend verbatim through the pass-through
+	// rotation proxy, and the backend rejects it as unsupported. One hop to the
+	// replacement OpenAI names for it turns that into a working request.
+	...Object.fromEntries(
+		Object.entries(RETIRED_MODEL_REPLACEMENTS).map(([retired, replacement]) => [
+			retired,
+			[replacement],
+		]),
+	),
 };
 
 export interface UnsupportedCodexModelInfo {

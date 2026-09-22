@@ -87,31 +87,33 @@ describe('Configuration Parsing', () => {
 			const emptyConfig = getModelConfig('gpt-5-codex', { global: {}, models: {} });
 			const defaultReasoning = getReasoningConfig('gpt-5-codex', emptyConfig);
 
-			expect(defaultReasoning.effort).toBe('high');
+			// Retired gpt-5-codex runs on gpt-5.6-sol, whose default is low.
+			expect(defaultReasoning.effort).toBe('low');
 			expect(defaultReasoning.summary).toBe('auto');
 		});
 
-		it('should keep lightweight general models on their fixed medium reasoning tier', () => {
+		it('should give retired gpt-5-nano the medium default of gpt-5.6-luna, its replacement', () => {
 			const nanoReasoning = getReasoningConfig('gpt-5-nano', {});
 
 			expect(nanoReasoning.effort).toBe('medium');
 			expect(nanoReasoning.summary).toBe('auto');
 		});
 
-		it('should warn when a lightweight model reasoning request is coerced', () => {
+		it('should warn when a reasoning request is coerced to a supported effort', () => {
 			const warnSpy = vi.spyOn(logger, 'logWarn').mockImplementation(() => {});
 
 			try {
-				const miniReasoning = getReasoningConfig('gpt-5-mini', {
-					reasoningEffort: 'high',
+				// gpt-5.5-pro accepts only medium/high/xhigh.
+				const proReasoning = getReasoningConfig('gpt-5.5-pro', {
+					reasoningEffort: 'low',
 				});
 
-				expect(miniReasoning.effort).toBe('medium');
+				expect(proReasoning.effort).toBe('medium');
 				expect(warnSpy).toHaveBeenCalledWith(
 					'Coercing unsupported reasoning effort for model',
 					expect.objectContaining({
-						model: 'gpt-5-mini',
-						requestedEffort: 'high',
+						model: 'gpt-5.5-pro',
+						requestedEffort: 'low',
 						effectiveEffort: 'medium',
 					}),
 				);
@@ -135,9 +137,9 @@ describe('Configuration Parsing', () => {
 			expect(gpt5MinimalReasoning.effort).toBe('low');
 		});
 
-		it('should default GPT-5.4 general models to none reasoning', () => {
+		it('should give retired GPT-5.4 the medium default of GPT-6 Sol, its replacement', () => {
 			const gpt54Reasoning = getReasoningConfig('gpt-5.4', {});
-			expect(gpt54Reasoning.effort).toBe('none');
+			expect(gpt54Reasoning.effort).toBe('medium');
 		});
 
 		it('should default the GPT-5.5 release alias to none reasoning', () => {
@@ -160,12 +162,12 @@ describe('Configuration Parsing', () => {
 				expect(detailedReasoning.summary).toBe('detailed');
 			});
 
-			it('should route deprecated codex-mini aliases to the current Codex default', () => {
+			it('should give retired codex-mini aliases the default of gpt-5.6-terra, their replacement', () => {
 				const codexMiniReasoning = getReasoningConfig('gpt-5-codex-mini', {});
-				expect(codexMiniReasoning.effort).toBe('high');
+				expect(codexMiniReasoning.effort).toBe('medium');
 			});
 
-			it('should use current Codex reasoning bounds for deprecated codex-mini aliases', () => {
+			it('should use the replacement model reasoning bounds for retired codex-mini aliases', () => {
 				const minimal = getReasoningConfig('gpt-5-codex-mini', {
 					reasoningEffort: 'minimal',
 				});
@@ -184,18 +186,18 @@ describe('Configuration Parsing', () => {
 			expect(high.effort).toBe('high');
 		});
 
-		it('should preserve xhigh for deprecated codex-mini aliases routed to current Codex', () => {
+		it('should preserve xhigh for retired codex-mini aliases routed to gpt-5.6-terra', () => {
 			const xhigh = getReasoningConfig('gpt-5-codex-mini', {
 				reasoningEffort: 'xhigh',
 			});
 			expect(xhigh.effort).toBe('xhigh');
 		});
 
-		it('should clamp codex-mini unknown effort to the current Codex default', () => {
+		it('should clamp codex-mini unknown effort to the replacement model default', () => {
 			const unknown = getReasoningConfig('gpt-5-codex-mini', {
 				reasoningEffort: 'invalid-effort' as never,
 			});
-			expect(unknown.effort).toBe('high');
+			expect(unknown.effort).toBe('medium');
 		});
 	});
 

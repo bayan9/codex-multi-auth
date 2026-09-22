@@ -38,7 +38,7 @@ const openManagers: AccountManager[] = [];
 
 /**
  * 205k of carried context (input + non-reasoning output) against the 260k
- * estimate for the codex family: 78.8%, comfortably past the 69% default hard
+ * estimate for gpt-5.5: 78.8%, comfortably past the 69% default hard
  * threshold. The 60k of `reasoning_tokens` is deliberately large — it is in
  * `total_tokens` but is NOT resent as context next turn, so a guard that read
  * `total_tokens` would score this turn at 102% and a guard that reads
@@ -153,7 +153,7 @@ describe("context budget guard on the rotation proxy path", () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
 		const { calls, fetchImpl } = createRecordingFetch(HEAVY_USAGE_STREAM);
 		const proxy = await startProxy(accountManager, fetchImpl);
-		const turn = { model: "gpt-5-codex", stream: true, prompt_cache_key: "sess-1" };
+		const turn = { model: "gpt-5.5", stream: true, prompt_cache_key: "sess-1" };
 
 		const first = await postResponses(proxy, turn);
 		expect(first.status).toBe(HTTP_STATUS.OK);
@@ -183,7 +183,7 @@ describe("context budget guard on the rotation proxy path", () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
 		const { calls, fetchImpl } = createRecordingFetch(HEAVY_USAGE_STREAM);
 		const proxy = await startProxy(accountManager, fetchImpl);
-		const turn = { model: "gpt-5-codex", stream: true, prompt_cache_key: "sess-2" };
+		const turn = { model: "gpt-5.5", stream: true, prompt_cache_key: "sess-2" };
 
 		await postResponses(proxy, turn);
 		const second = await postResponses(proxy, turn);
@@ -199,12 +199,12 @@ describe("context budget guard on the rotation proxy path", () => {
 		const proxy = await startProxy(accountManager, fetchImpl);
 
 		await postResponses(proxy, {
-			model: "gpt-5-codex",
+			model: "gpt-5.5",
 			stream: true,
 			previous_response_id: "resp_a",
 		});
 		const second = await postResponses(proxy, {
-			model: "gpt-5-codex",
+			model: "gpt-5.5",
 			stream: true,
 			previous_response_id: "resp_a",
 		});
@@ -222,7 +222,7 @@ describe("context budget guard on the rotation proxy path", () => {
 		const proxy = await startProxy(accountManager, fetchImpl);
 
 		await postResponses(proxy, {
-			model: "gpt-5-codex",
+			model: "gpt-5.5",
 			stream: true,
 			prompt_cache_key: "sess-switch",
 		});
@@ -240,7 +240,7 @@ describe("context budget guard on the rotation proxy path", () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
 		const { calls, fetchImpl } = createRecordingFetch(HEAVY_USAGE_STREAM);
 		const proxy = await startProxy(accountManager, fetchImpl);
-		const turn = { model: "gpt-5-codex", stream: true, prompt_cache_key: "sess-3" };
+		const turn = { model: "gpt-5.5", stream: true, prompt_cache_key: "sess-3" };
 
 		await postResponses(proxy, turn);
 		const second = await postResponses(proxy, turn);

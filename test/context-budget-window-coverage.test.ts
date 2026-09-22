@@ -70,12 +70,11 @@ describe("context budget window coverage", () => {
 	 */
 	it("resolves the raw client model strings the runtime actually passes", () => {
 		for (const raw of [
-			"gpt-5-codex",
-			"gpt-5.1-codex",
-			"gpt-5.2-codex",
-			"gpt-5.3-codex",
-			"gpt-5.3-codex-high",
-			"gpt-5.1-codex-max",
+			"gpt-5",
+			"gpt-5-high",
+			"gpt-5.5-high",
+			"gpt-5.5-2026-04-23",
+			"gpt-5-pro",
 			"GPT-5.5",
 			"openai/gpt-5.5",
 		]) {
@@ -83,6 +82,19 @@ describe("context budget window coverage", () => {
 				getEffectiveContextWindow(raw, undefined),
 				`${raw} resolved to no window; the guard silently no-ops for it`,
 			).toEqual({ tokens: 260_000, source: "estimate" });
+		}
+	});
+
+	it("does not estimate a retired id from the model it now runs on", () => {
+		// Retired codex ids run on gpt-5.6-sol, which is deliberately unestimated,
+		// so they resolve to no window rather than the retired model's 260k.
+		for (const raw of [
+			"gpt-5-codex",
+			"gpt-5.1-codex",
+			"gpt-5.3-codex-high",
+			"gpt-5.1-codex-max",
+		]) {
+			expect(getEffectiveContextWindow(raw, undefined), raw).toBeNull();
 		}
 	});
 
@@ -125,7 +137,11 @@ describe("context budget window coverage", () => {
 
 	it("applies an override keyed by the canonical id to an alias of it", () => {
 		expect(
-			getEffectiveContextWindow("gpt-5-codex", { "gpt-5.3-codex": 88_000 }),
+			getEffectiveContextWindow("gpt-5", { "gpt-5.5": 88_000 }),
+		).toEqual({ tokens: 88_000, source: "override" });
+		// A retired id picks up an override keyed by its replacement.
+		expect(
+			getEffectiveContextWindow("gpt-5-codex", { "gpt-5.6-sol": 88_000 }),
 		).toEqual({ tokens: 88_000, source: "override" });
 	});
 });

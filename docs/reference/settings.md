@@ -213,7 +213,7 @@ These fields live in `pluginConfig` and are commonly overridden via environment 
 | `codexTuiGlyphMode` | `ascii` | `ascii`, `unicode`, or `auto` |
 | `unsupportedCodexPolicy` | `strict` | How unsupported Codex model requests are handled |
 | `fallbackOnUnsupportedCodexModel` | `false` | Whether to fall back when a Codex model is unsupported |
-| `fallbackToGpt52OnUnsupportedGpt53` | `true` | Compatibility fallback for unsupported gpt-5.3-class requests |
+| `fallbackToGpt52OnUnsupportedGpt53` | `true` | No effect. Kept for config compatibility; it gated a `gpt-5.3-codex` to `gpt-5.2-codex` hop, and both models are retired |
 | `unsupportedCodexFallbackChain` | `{}` | Per-model ordered fallback chain consulted before the generic unsupported-model policy. Empty by default; keys are model ids, values are ordered candidate lists |
 | `rateLimitToastDebounceMs` | `60000` | Debounce window for rate-limit toast spam |
 | `toastDurationMs` | `5000` | Dashboard toast display duration |

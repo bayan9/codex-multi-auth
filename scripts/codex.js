@@ -686,15 +686,14 @@ function resolveModelFamilyForStatus(model) {
 		return "gpt-5.2";
 	}
 	if (normalized.includes("daybreak")) return "gpt-5.2";
-	// GPT-5.6 general tiers share the gpt-5.2 prompt family (see
-	// lib/request/helpers/model-map.ts MODEL_PROFILES). Check before the generic
-	// gpt-5 catch-all, which would otherwise mis-bucket them as codex.
-	if (normalized.startsWith("gpt-5.6")) return "gpt-5.2";
-	if (normalized.startsWith("gpt-5.2")) return "gpt-5.2";
-	if (normalized.startsWith("gpt-5.1")) return "gpt-5.1";
 	if (normalized.includes("codex-max")) return "codex-max";
 	if (normalized.includes("codex")) return "codex";
-	if (normalized.startsWith("gpt-5")) return "gpt-5-codex";
+	// Every live general GPT-5 model (5.5, 5.5-pro, the 5.6 tiers) is in the
+	// gpt-5.2 prompt family, and every retired one (`gpt-5.1`, `gpt-5.2`, the
+	// 5.4 family, `gpt-5-mini`/`nano`, `gpt-5`) now runs on a replacement in
+	// that family too. The old per-version branches reported `gpt-5.1` and
+	// `gpt-5-codex` for ids that no longer run under those families.
+	if (normalized.startsWith("gpt-5")) return "gpt-5.2";
 	return null;
 }
 
@@ -1368,8 +1367,36 @@ const MODEL_ACCESS_DENIED_PATTERN =
 	/the model [`'"]([^`'"]+)[`'"] does not exist or you do not have access to it/i;
 const DIRECT_UNSUPPORTED_MODEL_PATTERN =
 	/['"]([^'"]+)['"]\s+model is not supported when using codex with a chatgpt account/i;
-const CURRENT_CODEX_MODEL = "gpt-5.3-codex";
-const LEGACY_CODEX_MODEL = "gpt-5-codex";
+// Every codex model is retired; codex ids run on the replacement OpenAI names
+// for them. Mirrors lib/request/helpers/model-map.ts CURRENT_CODEX_MODEL and
+// RETIRED_MODEL_REPLACEMENTS, pinned in parity by test/retired-models.test.ts.
+const CURRENT_CODEX_MODEL = "gpt-5.6-sol";
+const CODEX_MINI_REPLACEMENT_MODEL = "gpt-5.6-terra";
+const RETIRED_MODEL_REPLACEMENTS = {
+	"gpt-5.4": "gpt-6-sol",
+	"gpt-5.4-mini": "gpt-6-luna",
+	"gpt-5.4-nano": "gpt-6-luna",
+	"gpt-5.4-pro": "gpt-5.5-pro",
+	"gpt-5.2": "gpt-5.6-sol",
+	"gpt-5.2-pro": "gpt-5.5-pro",
+	"gpt-5.1": "gpt-5.6-sol",
+	"gpt-5-mini": "gpt-5.6-terra",
+	"gpt-5-nano": "gpt-5.6-luna",
+	"gpt-5-chat-latest": "gpt-5.6-sol",
+	"gpt-5.1-chat-latest": "gpt-5.6-sol",
+	"gpt-5.2-chat-latest": "gpt-5.6-sol",
+	"gpt-5.3-chat-latest": "gpt-5.6-sol",
+	"gpt-5.3-codex": CURRENT_CODEX_MODEL,
+	"gpt-5.3-codex-spark": CURRENT_CODEX_MODEL,
+	"gpt-5.2-codex": CURRENT_CODEX_MODEL,
+	"gpt-5.1-codex": CURRENT_CODEX_MODEL,
+	"gpt-5.1-codex-max": CURRENT_CODEX_MODEL,
+	"gpt-5-codex": CURRENT_CODEX_MODEL,
+	"codex-max": CURRENT_CODEX_MODEL,
+	"gpt-5.1-codex-mini": CODEX_MINI_REPLACEMENT_MODEL,
+	"gpt-5-codex-mini": CODEX_MINI_REPLACEMENT_MODEL,
+	"codex-mini-latest": CODEX_MINI_REPLACEMENT_MODEL,
+};
 // Mirrors the GPT-6 rows of lib/request/error-classification.ts
 // `DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN`. This table is walked differently
 // from lib's: `resolveUnsupportedModelRetryTarget` keys on the model named in
@@ -1387,22 +1414,18 @@ const WRAPPER_UNSUPPORTED_MODEL_FALLBACK_CHAIN = {
 	"gpt-5.6-luna": ["gpt-5.5"],
 	"gpt-5": ["gpt-5.5"],
 	"gpt-5-pro": ["gpt-5.5-pro"],
-	"gpt-5-chat-latest": ["gpt-5.5"],
-	"gpt-5.5": ["gpt-5.4"],
-	"gpt-5.5-pro": ["gpt-5.4"],
-	"gpt-5.5-2026-04-23": ["gpt-5.4"],
-	"gpt-5.5-pro-2026-04-23": ["gpt-5.4"],
-	"gpt-5.5-20260423": ["gpt-5.4"],
-	"gpt-5.5-pro-20260423": ["gpt-5.4"],
-	"gpt-5.3-codex-spark": [CURRENT_CODEX_MODEL],
-	"codex-max": [CURRENT_CODEX_MODEL],
-	"gpt-5.1-codex-max": [CURRENT_CODEX_MODEL],
-	"codex-mini-latest": [CURRENT_CODEX_MODEL],
-	"gpt-5-codex-mini": [CURRENT_CODEX_MODEL],
-	"gpt-5.1-codex-mini": [CURRENT_CODEX_MODEL],
-	[LEGACY_CODEX_MODEL]: [CURRENT_CODEX_MODEL],
-	"gpt-5.2-codex": [CURRENT_CODEX_MODEL],
-	"gpt-5.1-codex": [CURRENT_CODEX_MODEL],
+	"gpt-5.5-2026-04-23": ["gpt-5.5"],
+	"gpt-5.5-20260423": ["gpt-5.5"],
+	"gpt-5.5-pro-2026-04-23": ["gpt-5.5-pro"],
+	"gpt-5.5-pro-20260423": ["gpt-5.5-pro"],
+	// `gpt-5.5`/`gpt-5.5-pro` are the floor; `gpt-5.4` is retired. A retired id
+	// steps once to its replacement.
+	...Object.fromEntries(
+		Object.entries(RETIRED_MODEL_REPLACEMENTS).map(([retired, replacement]) => [
+			retired,
+			[replacement],
+		]),
+	),
 };
 
 function canonicalizeRequestedModelName(model) {
@@ -2025,7 +2048,6 @@ function hasCliAuthCredentialsStoreOverride(args) {
 // and its GPT-5 normalization helpers.
 // This wrapper runs before the TypeScript build, so it cannot import that source.
 const SUPPORTED_REASONING_EFFORTS_BY_MODEL = {
-	[CURRENT_CODEX_MODEL]: ["low", "medium", "high", "xhigh"],
 	"gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
 	"gpt-6-astra-aeon": ["low", "medium", "high", "xhigh", "max", "ultra"],
 	"gpt-6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -2037,15 +2059,6 @@ const SUPPORTED_REASONING_EFFORTS_BY_MODEL = {
 	"gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
 	"gpt-5.5": ["none", "low", "medium", "high", "xhigh"],
 	"gpt-5.5-pro": ["medium", "high", "xhigh"],
-	"gpt-5.4": ["none", "low", "medium", "high", "xhigh"],
-	"gpt-5.4-pro": ["medium", "high", "xhigh"],
-	"gpt-5.4-mini": ["medium"],
-	"gpt-5.4-nano": ["medium"],
-	"gpt-5.2-pro": ["medium", "high", "xhigh"],
-	"gpt-5.2": ["none", "low", "medium", "high", "xhigh"],
-	"gpt-5.1": ["none", "low", "medium", "high"],
-	"gpt-5-mini": ["medium"],
-	"gpt-5-nano": ["medium"],
 };
 
 const REASONING_FALLBACKS = {
@@ -2109,33 +2122,35 @@ const GPT_6_LUNA_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const DAYBREAK_BLUE_MODEL = "gpt-daybreak-blue-latest";
 const DAYBREAK_RED_MODEL = "gpt-daybreak-red-latest";
 const DAYBREAK_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
+// Retired minors map to the replacement OpenAI names for them. Mirrors lib.
 const GENERAL_GPT5_VERSION_CATALOG = {
 	1: {
-		base: "gpt-5.1",
+		base: GPT_5_6_SOL_MODEL,
+		pro: GPT_5_5_PRO_CANONICAL_MODEL,
 	},
 	2: {
-		base: "gpt-5.2",
-		pro: "gpt-5.2-pro",
+		base: GPT_5_6_SOL_MODEL,
+		pro: GPT_5_5_PRO_CANONICAL_MODEL,
 	},
 	4: {
-		base: DEFAULT_GENERAL_GPT5_MODEL,
-		pro: "gpt-5.4-pro",
-		mini: "gpt-5.4-mini",
-		nano: "gpt-5.4-nano",
+		base: GPT_6_SOL_MODEL,
+		pro: GPT_5_5_PRO_CANONICAL_MODEL,
+		mini: GPT_6_LUNA_MODEL,
+		nano: GPT_6_LUNA_MODEL,
 	},
 	5: {
 		base: GPT_5_5_CANONICAL_MODEL,
 		pro: GPT_5_5_PRO_CANONICAL_MODEL,
-		mini: "gpt-5-mini",
-		nano: "gpt-5-nano",
+		mini: GPT_5_6_TERRA_MODEL,
+		nano: GPT_5_6_LUNA_MODEL,
 	},
 };
 const GENERAL_GPT5_STABLE_VARIANTS = GENERAL_GPT5_VERSION_CATALOG[5];
 const GENERAL_GPT5_GENERIC_VARIANTS = {
 	base: DEFAULT_GENERAL_GPT5_MODEL,
 	pro: GPT_5_5_PRO_CANONICAL_MODEL,
-	mini: "gpt-5-mini",
-	nano: "gpt-5-nano",
+	mini: GPT_5_6_TERRA_MODEL,
+	nano: GPT_5_6_LUNA_MODEL,
 };
 
 function addRequestedModelAlias(alias, normalizedModel) {
@@ -2279,19 +2294,8 @@ function seedRequestedModelAliases() {
 		GPT_5_5_PRO_RELEASE_COMPAT_MODEL,
 		GPT_5_5_PRO_CANONICAL_MODEL,
 	);
-	addRequestedModelReasoningAliases("gpt-5.4", "gpt-5.4");
-	addRequestedModelReasoningAliases("gpt-5.4-pro", "gpt-5.4-pro");
-	addRequestedModelReasoningAliases("gpt-5.4-mini", "gpt-5.4-mini");
-	addRequestedModelReasoningAliases("gpt-5.4-nano", "gpt-5.4-nano");
-	addRequestedModelReasoningAliases("gpt-5.2-pro", "gpt-5.2-pro");
 	addRequestedModelReasoningAliases("gpt-5-pro", GPT_5_5_PRO_CANONICAL_MODEL);
-	addRequestedModelReasoningAliases("gpt-5.2", "gpt-5.2");
-	addRequestedModelReasoningAliases("gpt-5.1", "gpt-5.1");
 	addRequestedModelReasoningAliases("gpt-5", DEFAULT_GENERAL_GPT5_MODEL);
-	addRequestedModelReasoningAliases("gpt-5-mini", "gpt-5-mini");
-	addRequestedModelReasoningAliases("gpt-5-nano", "gpt-5-nano");
-	addRequestedModelReasoningAliases("gpt-5.1-chat-latest", "gpt-5.1");
-	addRequestedModelReasoningAliases("gpt-5-chat-latest", DEFAULT_GENERAL_GPT5_MODEL);
 	addRequestedModelEffortAliases(
 		GPT_5_6_SOL_MODEL,
 		GPT_5_6_SOL_MODEL,
@@ -2360,17 +2364,10 @@ function seedRequestedModelAliases() {
 		DAYBREAK_RED_MODEL,
 		DAYBREAK_EFFORTS,
 	);
-	addRequestedModelReasoningAliases(CURRENT_CODEX_MODEL, CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases("gpt-5.3-codex-spark", CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases(LEGACY_CODEX_MODEL, CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases("gpt-5.2-codex", CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases("gpt-5.1-codex", CURRENT_CODEX_MODEL);
+	for (const [retired, replacement] of Object.entries(RETIRED_MODEL_REPLACEMENTS)) {
+		addRequestedModelReasoningAliases(retired, replacement);
+	}
 	addRequestedModelAlias("gpt_5_codex", CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases("codex-max", CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases("gpt-5.1-codex-max", CURRENT_CODEX_MODEL);
-	addRequestedModelAlias("codex-mini-latest", CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases("gpt-5-codex-mini", CURRENT_CODEX_MODEL);
-	addRequestedModelReasoningAliases("gpt-5.1-codex-mini", CURRENT_CODEX_MODEL);
 }
 
 seedRequestedModelAliases();
@@ -2423,39 +2420,13 @@ function resolveStableGeneralGpt5Variant(variant) {
 // between the two, which is exactly what test/codex-model-resolution.test.ts
 // exists to prevent.
 function resolveCodexRequestedModel(normalized) {
-	if (
-		normalized.includes("gpt-5.1-codex-max") ||
-		normalized.includes("gpt 5.1 codex max") ||
-		normalized.includes("codex-max")
-	) {
-		return CURRENT_CODEX_MODEL;
+	// Every codex model is retired: a mini codex id goes to Terra, any other id
+	// carrying `codex` to Sol. Mirrors lib resolveCodexCatalogModel.
+	if (!normalized.includes("codex")) return "";
+	if (normalized.includes("codex-mini") || normalized.includes("codex mini")) {
+		return CODEX_MINI_REPLACEMENT_MODEL;
 	}
-	if (
-		normalized.includes("gpt-5.1-codex-mini") ||
-		normalized.includes("gpt 5.1 codex mini") ||
-		normalized.includes("gpt-5-codex-mini") ||
-		normalized.includes("gpt 5 codex mini") ||
-		normalized.includes("codex-mini-latest")
-	) {
-		return CURRENT_CODEX_MODEL;
-	}
-	if (
-		normalized.includes("gpt-5.3-codex-spark") ||
-		normalized.includes("gpt 5.3 codex spark") ||
-		normalized.includes("gpt-5.3-codex") ||
-		normalized.includes("gpt 5.3 codex") ||
-		normalized.includes("gpt-5.2-codex") ||
-		normalized.includes("gpt 5.2 codex") ||
-		normalized.includes("gpt-5.1-codex") ||
-		normalized.includes("gpt 5.1 codex") ||
-		normalized.includes("gpt-5-codex") ||
-		normalized.includes("gpt 5 codex") ||
-		normalized.includes("codex")
-	) {
-		return CURRENT_CODEX_MODEL;
-	}
-
-	return "";
+	return CURRENT_CODEX_MODEL;
 }
 
 // Resolve GPT-5.6 identifiers, including ones that are not exact aliases (e.g. a
@@ -6570,6 +6541,7 @@ export {
 	resolveModelFamilyForStatus,
 	canonicalizeRequestedModelName,
 	WRAPPER_UNSUPPORTED_MODEL_FALLBACK_CHAIN,
+	RETIRED_MODEL_REPLACEMENTS,
 };
 
 // Run the wrapper only when actually launched (as the `codex-multi-auth-codex`

@@ -188,7 +188,7 @@ describe("getReasoningConfig property tests", () => {
     );
   });
 
-  it("deprecated codex-mini aliases route to current Codex reasoning", () => {
+  it("retired codex-mini aliases get their replacement's reasoning bounds", () => {
     fc.assert(
       fc.property(
         fc.constantFrom("gpt-5.1-codex-mini", "codex-mini-latest"),
@@ -203,13 +203,15 @@ describe("getReasoningConfig property tests", () => {
     );
   });
 
-  it("models without xhigh support downgrade xhigh to high", () => {
+  // Every live model accepts xhigh, so the one-rung step-down is exercised
+  // through `max`, which the pre-5.6 models lack.
+  it("models without max support downgrade max to xhigh", () => {
     fc.assert(
       fc.property(
-        fc.constantFrom("gpt-5.1"),
+        fc.constantFrom("gpt-5.5", "gpt-5.5-pro"),
         (model) => {
-          const result = getReasoningConfig(model, { reasoningEffort: "xhigh" });
-          expect(result.effort).toBe("high");
+          const result = getReasoningConfig(model, { reasoningEffort: "max" });
+          expect(result.effort).toBe("xhigh");
           return true;
         }
       )
@@ -234,13 +236,26 @@ describe("getReasoningConfig property tests", () => {
     );
   });
 
-  it("gpt-5.1 and gpt-5.2 general support none effort", () => {
+  it("gpt-5.5 general supports none effort", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("gpt-5.5", "gpt-5"),
+        (model) => {
+          const result = getReasoningConfig(model, { reasoningEffort: "none" });
+          expect(result.effort).toBe("none");
+          return true;
+        }
+      )
+    );
+  });
+
+  it("retired gpt-5.1 and gpt-5.2 upgrade none to low on gpt-5.6-sol", () => {
     fc.assert(
       fc.property(
         fc.constantFrom("gpt-5.1", "gpt-5.2"),
         (model) => {
           const result = getReasoningConfig(model, { reasoningEffort: "none" });
-          expect(result.effort).toBe("none");
+          expect(result.effort).toBe("low");
           return true;
         }
       )

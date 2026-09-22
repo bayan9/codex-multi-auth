@@ -74,7 +74,8 @@ describe("GPT-6 Astra", () => {
 			expect(getNormalizedModel("gpt-5")).toBe("gpt-5.5");
 			expect(getNormalizedModel("gpt-5.6")).toBe("gpt-5.6-sol");
 			expect(resolveNormalizedModel("gpt-5.6-terra-fast")).toBe("gpt-5.6-terra");
-			expect(getNormalizedModel("codex-max")).toBe("gpt-5.3-codex");
+			// Retired codex-max runs on 5.6 Sol, not on an Astra model.
+			expect(getNormalizedModel("codex-max")).toBe("gpt-5.6-sol");
 		});
 
 		it("does not claim an `astra` token that names a different GPT version", () => {
@@ -94,8 +95,10 @@ describe("GPT-6 Astra", () => {
 
 		it("defers ids carrying a `codex` token to the codex resolver", () => {
 			// Same rule the 5.6 resolver follows. Astra has no codex variant, and
-			// claiming one here would route a codex request onto a general model.
-			expect(resolveNormalizedModel("gpt-6-codex")).toBe("gpt-5.3-codex");
+			// claiming one here would route a codex request onto the frontier model
+			// instead of the named replacement for retired codex ids.
+			expect(resolveNormalizedModel("gpt-6-codex")).toBe("gpt-5.6-sol");
+			expect(resolveNormalizedModel("gpt-6-astra-codex")).toBe("gpt-5.6-sol");
 		});
 	});
 
@@ -363,7 +366,8 @@ describe("unsupported-model fallback chain", () => {
 	}
 
 	it("walks the flagship down to a model every account has", () => {
-		expect(walk("gpt-6-astra")).toEqual(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4"]);
+		// `gpt-5.5` is the floor now that `gpt-5.4` is retired.
+		expect(walk("gpt-6-astra")).toEqual(["gpt-5.6-sol", "gpt-5.5"]);
 	});
 
 	it("walks aeon through the flagship first", () => {
@@ -372,7 +376,6 @@ describe("unsupported-model fallback chain", () => {
 			"gpt-6-astra",
 			"gpt-5.6-sol",
 			"gpt-5.5",
-			"gpt-5.4",
 		]);
 	});
 
@@ -415,23 +418,25 @@ describe("unsupported-model fallback chain", () => {
 		// many entries the row that pointed at it listed. Terra still has no
 		// row, deliberately, because nothing steps into it. Luna got one when
 		// `gpt-6-luna` started stepping into it (test/gpt6-sol-luna-models.test.ts).
+		// `gpt-5.5` is the floor and has no row of its own, so every walk that
+		// reaches it stops there.
 		expect(walk("gpt-5.6-terra")).toEqual([]);
-		expect(walk("gpt-5.6-luna")).toEqual(["gpt-5.5", "gpt-5.4"]);
+		expect(walk("gpt-5.6-luna")).toEqual(["gpt-5.5"]);
+		expect(walk("gpt-5.5")).toEqual([]);
+		expect(walk("gpt-5.5-pro")).toEqual([]);
 	});
 
-	it("fits the single-account attempt budget, with no headroom to spare", () => {
+	it("fits the single-account attempt budget, with one attempt to spare", () => {
 		// Every fallback hop is a separate outbound attempt against the shared
 		// per-request budget (index.ts tryConsumeOutboundRequestAttempt), so chain
 		// depth is not free. For the common single-account balanced session the
-		// budget is 5, and the aeon walk needs exactly 5: the initial attempt plus
-		// four hops. It fits, and nothing is left over.
+		// budget is 5, and the aeon walk needs 4: the initial attempt plus three
+		// hops. It needed all 5 until `gpt-5.4` was retired as the floor.
 		//
-		// The consequence is real and worth stating rather than hiding: if that
-		// session also spends an attempt on an ordinary retry or a stream failover,
-		// the tail hops become unreachable and the request ends as an
-		// attempt-budget-exhausted 503 instead of reaching `gpt-5.4`. That needs an
-		// account entitled to none of aeon, Astra, Sol or 5.5. The hops are ordered
-		// so the ones lost first are the least valuable.
+		// The one spare attempt covers a single ordinary retry or stream failover.
+		// Spend two and the tail hop becomes unreachable, ending as an
+		// attempt-budget-exhausted 503 instead of reaching `gpt-5.5`. The hops are
+		// ordered so the ones lost first are the least valuable.
 		//
 		// This assertion exists to fail loudly if anyone deepens a GPT-6 row: the
 		// added hop would be dead for every single-account user.
@@ -444,7 +449,7 @@ describe("unsupported-model fallback chain", () => {
 		expect(budget).toBe(5);
 
 		const attemptsForDeepestWalk = walk("gpt-6-astra-aeon").length + 1;
-		expect(attemptsForDeepestWalk).toBe(5);
+		expect(attemptsForDeepestWalk).toBe(4);
 		expect(attemptsForDeepestWalk).toBeLessThanOrEqual(budget);
 	});
 

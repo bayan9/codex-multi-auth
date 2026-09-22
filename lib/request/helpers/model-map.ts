@@ -99,7 +99,22 @@ const TOOL_CAPABILITIES = {
 	},
 } as const satisfies Record<string, ModelCapabilities>;
 
-export const CURRENT_CODEX_MODEL = "gpt-5.3-codex";
+/**
+ * Where every codex-named id routes. No codex model is left: upstream Codex
+ * dropped `gpt-5.3-codex` from its catalog on 2026-07-08, and OpenAI's
+ * deprecations page names `gpt-5.6-sol` as the replacement for every retired
+ * codex id (`gpt-5-codex`, `gpt-5.1-codex*`, `gpt-5.2-codex`). The export
+ * keeps its name so callers that mean "the model a codex request runs on"
+ * still read naturally.
+ */
+export const CURRENT_CODEX_MODEL = "gpt-5.6-sol";
+
+/**
+ * The retired codex mini ids (`gpt-5.1-codex-mini`, `gpt-5-codex-mini`,
+ * `codex-mini-latest`) go to Terra, OpenAI's named replacement for
+ * `gpt-5.1-codex-mini`, rather than up to Sol.
+ */
+const CODEX_MINI_REPLACEMENT_MODEL = "gpt-5.6-terra";
 export const DEFAULT_MODEL = "gpt-5.5";
 
 // Model used for diagnostic live/quota probes (`check`, `report`, `best`).
@@ -119,19 +134,18 @@ export const DEFAULT_PROBE_MODEL = "gpt-5.6-sol";
 
 // Single source of truth for the live/quota probe fallback chain. Both the
 // manager probe (lib/quota-probe.ts) and the runtime probe (lib/runtime/quota-probe.ts)
-// import this so the ordered candidate list cannot drift between them. It leads
-// with GPT-5.6 and steps down so accounts without 5.6 entitlement still resolve
-// a working probe model.
+// import this so the ordered candidate list cannot drift between them.
+//
+// Every entry must be a model the Codex backend still serves. The chain used to
+// end on `gpt-5.4` and three codex models; all four are gone from the upstream
+// catalog (`gpt-5.4` carries `retirement_at: 2026-08-31`), so a probe that
+// reached them spent requests on guaranteed failures. `gpt-6-luna` closes it
+// because it is offered on the most plans of any catalog model (24).
 export const QUOTA_PROBE_MODEL_CHAIN = [
 	DEFAULT_PROBE_MODEL,
 	DEFAULT_MODEL,
-	"gpt-5.4",
-	"gpt-5.3-codex",
-	"gpt-5.2-codex",
-	"gpt-5-codex",
+	"gpt-6-luna",
 ] as const;
-
-const LEGACY_CODEX_MODEL = "gpt-5-codex";
 
 /**
  * GPT-5.6 tiers, per the upstream Codex catalog
@@ -248,38 +262,48 @@ const GPT_5_5_PRO_RELEASE_MODEL = "gpt-5.5-pro-2026-04-23";
 const GPT_5_5_RELEASE_COMPAT_MODEL = "gpt-5.5-20260423";
 const GPT_5_5_PRO_RELEASE_COMPAT_MODEL = "gpt-5.5-pro-20260423";
 
+/**
+ * Where an unrecognised `gpt-5.<minor>` id lands. Every minor below 5.5 is
+ * retired (OpenAI deprecations page, upstream catalog removals), so each maps
+ * to the replacement OpenAI names for it rather than to a model that no longer
+ * answers: 5.1/5.2 to Sol, 5.4 to GPT-6 Sol/Luna as upstream Codex migrates it,
+ * and every `pro` to the one live pro model.
+ */
 const GENERAL_GPT5_VERSION_CATALOG: Record<
 	GeneralGpt5KnownMinor,
 	GeneralGpt5VariantCatalog
 > = {
 	1: {
-		base: "gpt-5.1",
+		base: GPT_5_6_SOL_MODEL,
+		pro: GPT_5_5_PRO_CANONICAL_MODEL,
 	},
 	2: {
-		base: "gpt-5.2",
-		pro: "gpt-5.2-pro",
+		base: GPT_5_6_SOL_MODEL,
+		pro: GPT_5_5_PRO_CANONICAL_MODEL,
 	},
 	4: {
-		base: DEFAULT_MODEL,
-		pro: "gpt-5.4-pro",
-		mini: "gpt-5.4-mini",
-		nano: "gpt-5.4-nano",
+		base: GPT_6_SOL_MODEL,
+		pro: GPT_5_5_PRO_CANONICAL_MODEL,
+		mini: GPT_6_LUNA_MODEL,
+		nano: GPT_6_LUNA_MODEL,
 	},
 	5: {
 		base: GPT_5_5_CANONICAL_MODEL,
 		pro: GPT_5_5_PRO_CANONICAL_MODEL,
-		mini: "gpt-5-mini",
-		nano: "gpt-5-nano",
+		mini: GPT_5_6_TERRA_MODEL,
+		nano: GPT_5_6_LUNA_MODEL,
 	},
 };
 
 const GENERAL_GPT5_STABLE_VARIANTS = GENERAL_GPT5_VERSION_CATALOG[5];
 
+// `gpt-5-mini`/`gpt-5-nano` point at snapshots OpenAI retires on 2026-12-11;
+// the deprecations page names Terra and Luna as their replacements.
 const GENERAL_GPT5_GENERIC_VARIANTS: Record<GeneralGpt5Variant, string> = {
 	base: DEFAULT_MODEL,
 	pro: GPT_5_5_PRO_CANONICAL_MODEL,
-	mini: "gpt-5-mini",
-	nano: "gpt-5-nano",
+	mini: GPT_5_6_TERRA_MODEL,
+	nano: GPT_5_6_LUNA_MODEL,
 };
 
 /**
@@ -291,41 +315,6 @@ const GENERAL_GPT5_GENERIC_VARIANTS: Record<GeneralGpt5Variant, string> = {
  * present in the latest upstream release.
  */
 export const MODEL_PROFILES: Record<string, ModelProfile> = {
-	[CURRENT_CODEX_MODEL]: {
-		normalizedModel: CURRENT_CODEX_MODEL,
-		promptFamily: "gpt-5-codex",
-		defaultReasoningEffort: "high",
-		supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
-		capabilities: TOOL_CAPABILITIES.basic,
-	},
-	"gpt-5.4": {
-		normalizedModel: "gpt-5.4",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "none",
-		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh"],
-		capabilities: TOOL_CAPABILITIES.full,
-	},
-	"gpt-5.4-pro": {
-		normalizedModel: "gpt-5.4-pro",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "high",
-		supportedReasoningEfforts: ["medium", "high", "xhigh"],
-		capabilities: TOOL_CAPABILITIES.computerAndCompact,
-	},
-	"gpt-5.4-mini": {
-		normalizedModel: "gpt-5.4-mini",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "medium",
-		supportedReasoningEfforts: ["medium"],
-		capabilities: TOOL_CAPABILITIES.compactOnly,
-	},
-	"gpt-5.4-nano": {
-		normalizedModel: "gpt-5.4-nano",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "medium",
-		supportedReasoningEfforts: ["medium"],
-		capabilities: TOOL_CAPABILITIES.compactOnly,
-	},
 	// Like GPT-5.6, GPT-6 Astra ships its base instructions inline in the
 	// upstream model catalog rather than as a `gpt_6_prompt.md`, so it stays on
 	// the GPT-5.2 prompt family with every other post-5.2 general model. Adding
@@ -412,41 +401,12 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
 		supportedReasoningEfforts: ["medium", "high", "xhigh"],
 		capabilities: TOOL_CAPABILITIES.computerAndCompact,
 	},
-	"gpt-5.2-pro": {
-		normalizedModel: "gpt-5.2-pro",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "high",
-		supportedReasoningEfforts: ["medium", "high", "xhigh"],
-		capabilities: TOOL_CAPABILITIES.basic,
-	},
-	"gpt-5.2": {
-		normalizedModel: "gpt-5.2",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "none",
-		supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh"],
-		capabilities: TOOL_CAPABILITIES.basic,
-	},
-	"gpt-5.1": {
-		normalizedModel: "gpt-5.1",
-		promptFamily: "gpt-5.1",
-		defaultReasoningEffort: "none",
-		supportedReasoningEfforts: ["none", "low", "medium", "high"],
-		capabilities: TOOL_CAPABILITIES.basic,
-	},
-	"gpt-5-mini": {
-		normalizedModel: "gpt-5-mini",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "medium",
-		supportedReasoningEfforts: ["medium"],
-		capabilities: TOOL_CAPABILITIES.compactOnly,
-	},
-	"gpt-5-nano": {
-		normalizedModel: "gpt-5-nano",
-		promptFamily: "gpt-5.2",
-		defaultReasoningEffort: "medium",
-		supportedReasoningEfforts: ["medium"],
-		capabilities: TOOL_CAPABILITIES.compactOnly,
-	},
+	// Every model older than 5.5 is retired: `gpt-5.1`, `gpt-5.2` and the whole
+	// 5.4 family left the upstream Codex catalog, the codex models and the
+	// chat-latest snapshots are past their shutdown date on OpenAI's
+	// deprecations page, and `gpt-5-mini`/`gpt-5-nano` shut down 2026-12-11.
+	// Their ids stay accepted as aliases of the named replacement (below) so an
+	// old config keeps working, but no request is sent under a dead name.
 } as const;
 
 const MODEL_MAP: Record<string, string> = {};
@@ -543,40 +503,68 @@ function addGeneralAliases(): void {
 		GPT_5_5_PRO_RELEASE_COMPAT_MODEL,
 		GPT_5_5_PRO_CANONICAL_MODEL,
 	);
-	addReasoningAliases("gpt-5.4", "gpt-5.4");
-	addReasoningAliases("gpt-5.4-pro", "gpt-5.4-pro");
-	addReasoningAliases("gpt-5.4-mini", "gpt-5.4-mini");
-	addReasoningAliases("gpt-5.4-nano", "gpt-5.4-nano");
-	addReasoningAliases("gpt-5.2-pro", "gpt-5.2-pro");
 	addReasoningAliases("gpt-5-pro", GPT_5_5_PRO_CANONICAL_MODEL);
-	addReasoningAliases("gpt-5.2", "gpt-5.2");
-	addReasoningAliases("gpt-5.1", "gpt-5.1");
 	addReasoningAliases("gpt-5", DEFAULT_MODEL);
-	addReasoningAliases("gpt-5-mini", "gpt-5-mini");
-	addReasoningAliases("gpt-5-nano", "gpt-5-nano");
-
-	addReasoningAliases("gpt-5.1-chat-latest", "gpt-5.1");
-	addReasoningAliases("gpt-5-chat-latest", DEFAULT_MODEL);
 }
 
-function addCodexAliases(): void {
-	addReasoningAliases(CURRENT_CODEX_MODEL, CURRENT_CODEX_MODEL);
-	addReasoningAliases("gpt-5.3-codex-spark", CURRENT_CODEX_MODEL);
-	addReasoningAliases(LEGACY_CODEX_MODEL, CURRENT_CODEX_MODEL);
-	addReasoningAliases("gpt-5.2-codex", CURRENT_CODEX_MODEL);
-	addReasoningAliases("gpt-5.1-codex", CURRENT_CODEX_MODEL);
+/**
+ * Retired general ids, each kept as an alias of the replacement OpenAI names
+ * for it: the upstream Codex catalog's migration target where it has one
+ * (`gpt-5.4` -> GPT-6 Sol, `gpt-5.4-mini` -> GPT-6 Luna), otherwise the
+ * deprecations page's recommended replacement. The effort-suffixed forms
+ * (`gpt-5.4-high`, `gpt-5.1-none`, ...) come along so old configs resolve;
+ * efforts the replacement does not accept are coerced as for any request.
+ */
+const RETIRED_GENERAL_MODEL_REPLACEMENTS: Readonly<Record<string, string>> = {
+	"gpt-5.4": GPT_6_SOL_MODEL,
+	"gpt-5.4-mini": GPT_6_LUNA_MODEL,
+	"gpt-5.4-nano": GPT_6_LUNA_MODEL,
+	"gpt-5.4-pro": GPT_5_5_PRO_CANONICAL_MODEL,
+	"gpt-5.2": GPT_5_6_SOL_MODEL,
+	"gpt-5.2-pro": GPT_5_5_PRO_CANONICAL_MODEL,
+	"gpt-5.1": GPT_5_6_SOL_MODEL,
+	"gpt-5-mini": GPT_5_6_TERRA_MODEL,
+	"gpt-5-nano": GPT_5_6_LUNA_MODEL,
+	"gpt-5-chat-latest": GPT_5_6_SOL_MODEL,
+	"gpt-5.1-chat-latest": GPT_5_6_SOL_MODEL,
+	"gpt-5.2-chat-latest": GPT_5_6_SOL_MODEL,
+	"gpt-5.3-chat-latest": GPT_5_6_SOL_MODEL,
+};
+
+/**
+ * Retired codex ids. All shut down on OpenAI's deprecations page or left the
+ * upstream Codex catalog; OpenAI names `gpt-5.6-sol` as the replacement for
+ * the full-size ones and `gpt-5.6-terra` for `gpt-5.1-codex-mini`.
+ */
+const RETIRED_CODEX_MODEL_REPLACEMENTS: Readonly<Record<string, string>> = {
+	"gpt-5.3-codex": CURRENT_CODEX_MODEL,
+	"gpt-5.3-codex-spark": CURRENT_CODEX_MODEL,
+	"gpt-5.2-codex": CURRENT_CODEX_MODEL,
+	"gpt-5.1-codex": CURRENT_CODEX_MODEL,
+	"gpt-5.1-codex-max": CURRENT_CODEX_MODEL,
+	"gpt-5-codex": CURRENT_CODEX_MODEL,
+	"codex-max": CURRENT_CODEX_MODEL,
+	"gpt-5.1-codex-mini": CODEX_MINI_REPLACEMENT_MODEL,
+	"gpt-5-codex-mini": CODEX_MINI_REPLACEMENT_MODEL,
+	"codex-mini-latest": CODEX_MINI_REPLACEMENT_MODEL,
+};
+
+/** Every retired id and its replacement, for diagnostics and tests. */
+export const RETIRED_MODEL_REPLACEMENTS: Readonly<Record<string, string>> = {
+	...RETIRED_GENERAL_MODEL_REPLACEMENTS,
+	...RETIRED_CODEX_MODEL_REPLACEMENTS,
+};
+
+function addRetiredAliases(): void {
+	for (const [retired, replacement] of Object.entries(
+		RETIRED_MODEL_REPLACEMENTS,
+	)) {
+		addReasoningAliases(retired, replacement);
+	}
 	addAlias("gpt_5_codex", CURRENT_CODEX_MODEL);
-
-	addReasoningAliases("codex-max", CURRENT_CODEX_MODEL);
-	addReasoningAliases("gpt-5.1-codex-max", CURRENT_CODEX_MODEL);
-	addAlias("codex-max", CURRENT_CODEX_MODEL);
-
-	addAlias("codex-mini-latest", CURRENT_CODEX_MODEL);
-	addReasoningAliases("gpt-5-codex-mini", CURRENT_CODEX_MODEL);
-	addReasoningAliases("gpt-5.1-codex-mini", CURRENT_CODEX_MODEL);
 }
 
-addCodexAliases();
+addRetiredAliases();
 addGeneralAliases();
 addGpt56Aliases();
 addGpt6Aliases();
@@ -629,53 +617,23 @@ function resolveStableGeneralGpt5Variant(
 	throw new Error(`Stable GPT-5 fallback is missing for variant ${variant}`);
 }
 
+/**
+ * Any id carrying a `codex` token. Every codex model is retired, so this only
+ * picks the replacement: a `mini` codex id goes to Terra, everything else to
+ * Sol (see RETIRED_CODEX_MODEL_REPLACEMENTS).
+ */
 function resolveCodexCatalogModel(modelId: string): string | undefined {
 	const normalized = modelId.toLowerCase();
-
-	if (
-		normalized.includes("gpt-5.3-codex-spark") ||
-		normalized.includes("gpt 5.3 codex spark")
-	) {
-		return CURRENT_CODEX_MODEL;
+	if (!normalized.includes("codex")) {
+		return undefined;
 	}
 	if (
-		normalized.includes("gpt-5.3-codex") ||
-		normalized.includes("gpt 5.3 codex")
+		normalized.includes("codex-mini") ||
+		normalized.includes("codex mini")
 	) {
-		return CURRENT_CODEX_MODEL;
+		return CODEX_MINI_REPLACEMENT_MODEL;
 	}
-	if (
-		normalized.includes("gpt-5.2-codex") ||
-		normalized.includes("gpt 5.2 codex")
-	) {
-		return CURRENT_CODEX_MODEL;
-	}
-	if (
-		normalized.includes("gpt-5.1-codex-max") ||
-		normalized.includes("gpt 5.1 codex max")
-	) {
-		return CURRENT_CODEX_MODEL;
-	}
-	if (
-		normalized.includes("gpt-5.1-codex-mini") ||
-		normalized.includes("gpt 5.1 codex mini") ||
-		normalized.includes("codex-mini-latest") ||
-		normalized.includes("gpt-5-codex-mini") ||
-		normalized.includes("gpt 5 codex mini")
-	) {
-		return CURRENT_CODEX_MODEL;
-	}
-	if (
-		normalized.includes("gpt-5-codex") ||
-		normalized.includes("gpt 5 codex") ||
-		normalized.includes("gpt-5.1-codex") ||
-		normalized.includes("gpt 5.1 codex") ||
-		normalized.includes("codex")
-	) {
-		return CURRENT_CODEX_MODEL;
-	}
-
-	return undefined;
+	return CURRENT_CODEX_MODEL;
 }
 
 /**
