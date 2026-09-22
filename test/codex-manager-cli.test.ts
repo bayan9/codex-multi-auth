@@ -4015,13 +4015,13 @@ describe("codex manager cli commands", () => {
 		quotaProbeMocks.fetchCodexQuotaSnapshot
 			.mockResolvedValueOnce({
 				status: 429,
-				model: "gpt-5-mini",
+				model: "gpt-5.6-terra",
 				primary: {},
 				secondary: {},
 			})
 			.mockResolvedValueOnce({
 				status: 200,
-				model: "gpt-5-mini",
+				model: "gpt-5.6-terra",
 				primary: {
 					usedPercent: 10,
 					windowMinutes: 300,
@@ -4040,18 +4040,18 @@ describe("codex manager cli commands", () => {
 			"auth",
 			"best",
 			"--live",
-			"--model=gpt-5-mini",
+			"--model=gpt-5.6-terra",
 		]);
 
 		expect(exitCode).toBe(0);
 		expect(quotaProbeMocks.fetchCodexQuotaSnapshot).toHaveBeenCalledTimes(2);
 		expect(quotaProbeMocks.fetchCodexQuotaSnapshot).toHaveBeenNthCalledWith(
 			1,
-			expect.objectContaining({ model: "gpt-5-mini" }),
+			expect.objectContaining({ model: "gpt-5.6-terra" }),
 		);
 		expect(quotaProbeMocks.fetchCodexQuotaSnapshot).toHaveBeenNthCalledWith(
 			2,
-			expect.objectContaining({ model: "gpt-5-mini" }),
+			expect.objectContaining({ model: "gpt-5.6-terra" }),
 		);
 		expect(codexCliWriterMocks.setCodexCliActiveSelection).toHaveBeenCalledTimes(1);
 	});
@@ -4077,7 +4077,7 @@ describe("codex manager cli commands", () => {
 		});
 		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValueOnce({
 			status: 200,
-			model: "gpt-5.1",
+			model: "gpt-5.5",
 			primary: {
 				usedPercent: 10,
 				windowMinutes: 300,
@@ -4097,12 +4097,12 @@ describe("codex manager cli commands", () => {
 			"best",
 			"--live",
 			"--model",
-			"gpt-5.1",
+			"gpt-5.5",
 		]);
 
 		expect(exitCode).toBe(0);
 		expect(quotaProbeMocks.fetchCodexQuotaSnapshot).toHaveBeenCalledWith(
-			expect.objectContaining({ model: "gpt-5.1" }),
+			expect.objectContaining({ model: "gpt-5.5" }),
 		);
 		expect(storageMocks.saveAccounts).not.toHaveBeenCalled();
 		expect(codexCliWriterMocks.setCodexCliActiveSelection).not.toHaveBeenCalled();
@@ -10365,14 +10365,15 @@ describe("codex manager cli commands", () => {
 				};
 			};
 		};
+		// Retired gpt-5.4-mini runs on GPT-6 Luna, its named replacement.
 		expect(payload.modelSelection).toEqual({
 			requested: "gpt-5.4-mini",
-			normalized: "gpt-5.4-mini",
-			remapped: false,
+			normalized: "gpt-6-luna",
+			remapped: true,
 			promptFamily: "gpt-5.2",
 			capabilities: {
-				toolSearch: false,
-				computerUse: false,
+				toolSearch: true,
+				computerUse: true,
 				compaction: true,
 			},
 		});
@@ -10411,7 +10412,7 @@ describe("codex manager cli commands", () => {
 		});
 		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
 			status: 200,
-			model: "gpt-5.4-mini",
+			model: "gpt-6-luna",
 			primary: {
 				usedPercent: 10,
 				windowMinutes: 300,
@@ -10441,8 +10442,9 @@ describe("codex manager cli commands", () => {
 
 			expect(exitCode).toBe(0);
 			expect(quotaProbeMocks.fetchCodexQuotaSnapshot).toHaveBeenCalled();
+			// Retired gpt-5.4-mini-high resolves to its replacement, GPT-6 Luna.
 			for (const [request] of quotaProbeMocks.fetchCodexQuotaSnapshot.mock.calls) {
-				expect(request).toMatchObject({ model: "gpt-5.4-mini" });
+				expect(request).toMatchObject({ model: "gpt-6-luna" });
 			}
 		}
 

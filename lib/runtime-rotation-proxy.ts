@@ -703,10 +703,9 @@ function buildResponsesRequestContext(
 		method: "POST",
 		upstreamPath: URL_PATHS.CODEX_RESPONSES,
 		model,
-		// The /codex/responses path is codex-family. A model-less request must
-		// bucket into the codex family (rotation/cooldown/budget), so fall back to
-		// the current codex model — NOT the general DEFAULT_MODEL (gpt-5.5), whose
-		// family is gpt-5.2 and would mis-account a pass-through codex request.
+		// A model-less request buckets under the model a codex request runs on.
+		// With every codex model retired that is `gpt-5.6-sol`, whose family is
+		// gpt-5.2, the same family as DEFAULT_MODEL.
 		family: getModelFamily(model ?? CURRENT_CODEX_MODEL),
 		stream: parsedBody?.stream === true,
 		sessionKey: resolveSessionKey(headers, parsedBody),

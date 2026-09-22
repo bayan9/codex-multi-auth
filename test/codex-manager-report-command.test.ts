@@ -136,12 +136,29 @@ describe("runReportCommand", () => {
 			),
 		).toBe(true);
 
-		// A codex-family model is not gated by that record.
+		// A record under another family does not gate it. Every live model is
+		// on gpt-5.2 now, so the other family is the legacy `codex` key an
+		// existing storage file can still carry.
+		const otherFamilyStorage = createStorage([
+			{
+				email: "one@example.com",
+				refreshToken: "refresh-token-1",
+				accessToken: "access-token-1",
+				expiresAt: 10,
+				addedAt: 1,
+				lastUsed: 1,
+				enabled: true,
+				rateLimitResetTimes: { codex: 31_000 },
+			},
+		]);
+		(deps.loadAccounts as ReturnType<typeof vi.fn>).mockImplementation(
+			async () => otherFamilyStorage,
+		);
 		await expect(
-			runReportCommand(["--json", "--model", "gpt-5.3-codex"], deps),
+			runReportCommand(["--json", "--model", "gpt-5.6-sol"], deps),
 		).resolves.toBe(0);
-		const codex = readForecast();
-		expect(codex.accounts[0]?.availability).toBe("ready");
+		const otherFamily = readForecast();
+		expect(otherFamily.accounts[0]?.availability).toBe("ready");
 	});
 
 	it("keeps a bare report on the codex family", async () => {

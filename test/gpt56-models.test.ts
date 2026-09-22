@@ -91,8 +91,8 @@ describe("GPT-5.6 (Sol / Terra / Luna)", () => {
 		});
 
 		it("does not disturb the Codex Max alias, which also ends in `-max`", () => {
-			expect(getNormalizedModel("gpt-5.1-codex-max")).toBe("gpt-5.3-codex");
-			expect(getNormalizedModel("codex-max")).toBe("gpt-5.3-codex");
+			expect(getNormalizedModel("gpt-5.1-codex-max")).toBe("gpt-5.6-sol");
+			expect(getNormalizedModel("codex-max")).toBe("gpt-5.6-sol");
 		});
 	});
 
@@ -137,8 +137,16 @@ describe("GPT-5.6 (Sol / Terra / Luna)", () => {
 				getReasoningConfig("gpt-5.5", { reasoningEffort: "ultra" }).effort,
 			).toBe("xhigh");
 			expect(
+				getReasoningConfig("gpt-5.5-pro", { reasoningEffort: "ultra" }).effort,
+			).toBe("xhigh");
+		});
+
+		it("gives a retired id its replacement's effort ceiling", () => {
+			// `gpt-5.1` topped out at `high`; it now runs on 5.6 Sol, which
+			// accepts `ultra` and sends it as `max`.
+			expect(
 				getReasoningConfig("gpt-5.1", { reasoningEffort: "ultra" }).effort,
-			).toBe("high");
+			).toBe("max");
 		});
 
 		it("upgrades `none` to a supported effort, since no 5.6 tier accepts it", () => {

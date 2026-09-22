@@ -227,6 +227,7 @@ import {
 	normalizeRequestInit,
 	parseRequestBodyFromInit,
 } from "./lib/request/request-init.js";
+import { CURRENT_CODEX_MODEL } from "./lib/request/helpers/model-map.js";
 import { applyFastSessionDefaults } from "./lib/request/request-transformer.js";
 import { applyResponseCompaction } from "./lib/request/response-compaction.js";
 import { isEmptyResponse } from "./lib/request/response-handler.js";
@@ -1947,7 +1948,7 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 													});
 
 												if (fallbackModel) {
-													const previousModel = model ?? "gpt-5.3-codex";
+													const previousModel = model ?? CURRENT_CODEX_MODEL;
 													const previousModelFamily = modelFamily;
 													attemptedUnsupportedFallbackModels.add(previousModel);
 													attemptedUnsupportedFallbackModels.add(fallbackModel);

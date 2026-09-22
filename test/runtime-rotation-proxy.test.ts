@@ -1675,9 +1675,10 @@ describe("runtime rotation proxy", () => {
 		// precedence, but recovery is bounded by whichever record ends last —
 		// here a server-error cooldown that outlives the limit by 50s. The
 		// sentence must not attribute that later timestamp to the rate limit.
-		// The record is keyed by the requested model's family ("gpt-5-codex"
-		// maps to its own family, not "codex"), or it would not gate at all.
-		pinned.rateLimitResetTimes = { "gpt-5-codex": now + 10_000 };
+		// The record is keyed by the requested model's family (retired
+		// "gpt-5-codex" runs on gpt-5.6-sol, family "gpt-5.2", not "codex"), or
+		// it would not gate at all.
+		pinned.rateLimitResetTimes = { "gpt-5.2": now + 10_000 };
 		pinned.coolingDownUntil = now + 60_000;
 		pinned.cooldownReason = "server-error";
 		const { calls, fetchImpl } = createRecordingFetch(() =>
@@ -2289,7 +2290,7 @@ describe("runtime rotation proxy", () => {
 			const storage = createStorage(now, 2);
 			const firstAccount = storage.accounts[0];
 			if (firstAccount) {
-				firstAccount.rateLimitResetTimes = { "gpt-5-codex": now + 60_000 };
+				firstAccount.rateLimitResetTimes = { "gpt-5.2": now + 60_000 };
 			}
 			const accountManager = new AccountManager(undefined, storage);
 			const { calls, fetchImpl } = createRecordingFetch(() =>
@@ -2308,7 +2309,7 @@ describe("runtime rotation proxy", () => {
 			expect(calls[0]?.headers.get(OPENAI_HEADERS.ACCOUNT_ID)).toBe("acc_2");
 			expect(persisted.at(-1)).toMatchObject({
 				activeIndex: 0,
-				activeIndexByFamily: { codex: 0, "gpt-5-codex": 1 },
+				activeIndexByFamily: { codex: 0, "gpt-5.2": 1 },
 			});
 			expect(persisted.at(-1)?.accounts[1]?.lastSwitchReason).toBe("rotation");
 		} finally {
@@ -2397,7 +2398,7 @@ describe("runtime rotation proxy", () => {
 		});
 		expect(proxy.getStatus()).not.toHaveProperty("lastAccountEmail");
 		expect(
-			accountManager.getAccountByIndex(0)?.rateLimitResetTimes["gpt-5-codex"],
+			accountManager.getAccountByIndex(0)?.rateLimitResetTimes["gpt-5.2"],
 		).toBeTypeOf("number");
 	});
 
@@ -2419,7 +2420,7 @@ describe("runtime rotation proxy", () => {
 			"acc_2",
 		]);
 		expect(
-			(accountManager.getAccountByIndex(0)?.rateLimitResetTimes["gpt-5-codex"] ?? 0) -
+			(accountManager.getAccountByIndex(0)?.rateLimitResetTimes["gpt-5.2"] ?? 0) -
 				Date.now(),
 		).toBeGreaterThan(60 * 60 * 1_000);
 	});
@@ -2924,7 +2925,7 @@ describe("runtime rotation proxy", () => {
 		const reloadedStorage = persisted.at(-1);
 		expect(reloadedStorage).toBeDefined();
 		if (!reloadedStorage) throw new Error("expected persisted storage");
-		expect(reloadedStorage?.accounts[0]?.rateLimitResetTimes["gpt-5-codex"]).toBeTypeOf(
+		expect(reloadedStorage?.accounts[0]?.rateLimitResetTimes["gpt-5.2"]).toBeTypeOf(
 			"number",
 		);
 		const secondManager = new AccountManager(undefined, reloadedStorage);

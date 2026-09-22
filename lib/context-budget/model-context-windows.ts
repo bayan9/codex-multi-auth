@@ -24,19 +24,14 @@ import { getNormalizedModel } from "../request/helpers/model-map.js";
  * in doubt about a model's real ceiling, leave it out of this table and add
  * it to UNESTIMATED_ROUTABLE_MODELS instead.
  */
+//
+// Retired models (`gpt-5.1` through `gpt-5.4-*`, `gpt-5-mini`/`nano`, the codex
+// models) are deliberately absent. Their ids now route to a replacement, and
+// estimating the window from the retired name would evaluate a request against
+// a model it no longer runs on.
 const ESTIMATED_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-	"gpt-5.1": 260_000,
-	"gpt-5.2": 260_000,
-	"gpt-5.2-pro": 260_000,
-	"gpt-5.3-codex": 260_000,
-	"gpt-5.4": 260_000,
-	"gpt-5.4-mini": 260_000,
-	"gpt-5.4-nano": 260_000,
-	"gpt-5.4-pro": 260_000,
 	"gpt-5.5": 260_000,
 	"gpt-5.5-pro": 260_000,
-	"gpt-5-mini": 260_000,
-	"gpt-5-nano": 260_000,
 };
 
 /**

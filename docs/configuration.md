@@ -202,13 +202,26 @@ The shipped config templates expose first-class current OpenAI model aliases:
 - GPT-5.6 adds two reasoning tiers above `xhigh`: `max`, and `ultra` on Sol/Terra only. `ultra` selects Codex's automatic subagent delegation and is sent to the API as `max`, mirroring upstream Codex
 - no GPT-5.6 tier accepts `none` or `minimal` reasoning effort; requests using them are coerced up to `low`
 - `gpt-5.6` on its own resolves to Sol, the flagship tier; the legacy `gpt-5` alias still resolves to `gpt-5.5`
-- `config/codex-modern.json` and `config/codex-legacy.json` expose current documented GPT-5.5, GPT-5.4, and GPT-5.3 Codex model IDs
-- deprecated Codex selectors such as `gpt-5-codex` and `gpt-5.1-codex*` are treated as compatibility aliases and retried on the current documented Codex model when the ChatGPT Codex surface rejects them
-- the wrapper and optional plugin-host runtime try those models directly and only fall back to `gpt-5.4` after a real ChatGPT Codex unsupported-model response
+- retired models are gone from both templates and no longer run under their own names. Every model older than GPT-5.5 is retired: the codex models and the `*-chat-latest` snapshots are past their shutdown date on OpenAI's deprecations page, `gpt-5.1`, `gpt-5.2`, `gpt-5.4` and `gpt-5.4-mini` left the upstream Codex catalog (`gpt-5.4` with `retirement_at: 2026-08-31`), and the `gpt-5-mini`/`gpt-5-nano` snapshots shut down on 2026-12-11. Their ids, with or without an effort suffix, stay accepted as aliases of the replacement OpenAI names:
+
+  | Retired id | Now runs as |
+  | --- | --- |
+  | `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-max`, `codex-max`, `gpt-5-codex`, any other id containing `codex` | `gpt-5.6-sol` |
+  | `gpt-5.1-codex-mini`, `gpt-5-codex-mini`, `codex-mini-latest` | `gpt-5.6-terra` |
+  | `gpt-5.4` | `gpt-6-sol` |
+  | `gpt-5.4-mini`, `gpt-5.4-nano` | `gpt-6-luna` |
+  | `gpt-5.4-pro`, `gpt-5.2-pro` | `gpt-5.5-pro` |
+  | `gpt-5.2`, `gpt-5.1`, `gpt-5-chat-latest`, `gpt-5.1-chat-latest`, `gpt-5.2-chat-latest`, `gpt-5.3-chat-latest` | `gpt-5.6-sol` |
+  | `gpt-5-mini` | `gpt-5.6-terra` |
+  | `gpt-5-nano` | `gpt-5.6-luna` |
+
+- because codex ids now run on `gpt-5.6-sol`, they use the `gpt-5.2` prompt family and rotation bucket like every other live model. A per-family account assignment saved under `gpt-5-codex`, `codex-max` or `gpt-5.1` is no longer consulted
+- a retired id sent through the pass-through rotation proxy still reaches the backend under its old name; the unsupported-model chain carries one hop from each retired id to its replacement, so that response turns into a working request. `gpt-5.5` and `gpt-5.5-pro` are the floor of every walk, since `gpt-5.4` is no longer served
+- `fallbackToGpt52OnUnsupportedGpt53` is kept for config compatibility but has no effect: it only gated the `gpt-5.3-codex` to `gpt-5.2-codex` hop, and both models are retired
 - GPT-6 Astra has its own entry in that chain: `gpt-6-astra` steps to `gpt-5.6-sol`, `gpt-5.6-sol` steps to `gpt-5.5`, and `gpt-6-astra-aeon` steps to `gpt-6-astra` first. `gpt-6-sol` steps to `gpt-5.6-sol` and `gpt-6-luna` to `gpt-5.6-luna`, then on to `gpt-5.5`; neither steps sideways into Astra. Astra rolls out org by org, so an account without entitlement gets a real unsupported-model response for it. It never fires pre-emptively, only after that response
 - the two paths gate it differently, which is easy to get wrong. In the plugin-host runtime the chain applies only when `fallbackOnUnsupportedCodexModel` is on, and it defaults to `false`. The `codex-multi-auth-codex` wrapper has always retried unconditionally on an unsupported-model response from the real Codex CLI, with no setting to consult; it prints `model <name> is unsupported on this ChatGPT Codex surface. Retrying with <fallback>.` to stderr each time
 - the chain is walked one hop at a time: each unsupported response resolves from the model that just failed, not from the one you originally asked for. A model with no entry of its own ends the walk, which is why `gpt-5.6-sol` and `gpt-5.6-luna` carry one. The `gpt-5.6-luna` row is new with GPT-6 Luna, so a direct `gpt-5.6-luna` request that gets an unsupported-model response now retries on `gpt-5.5` (higher per-token price) where it used to stop. `unsupportedCodexFallbackChain` overrides follow the same rule, so a multi-hop path needs an entry per hop
-- depth costs attempts. Every hop spends one of the shared per-request outbound attempts, and a single-account balanced session has a budget of 5. The longest Astra walk (`gpt-6-astra-aeon` through to `gpt-5.4`) uses exactly 5, so a session that also spends an attempt on a retry or stream failover ends in an attempt-budget-exhausted 503 rather than reaching the last hop. That needs an account entitled to none of aeon, Astra, Sol or 5.5
+- depth costs attempts. Every hop spends one of the shared per-request outbound attempts, and a single-account balanced session has a budget of 5. The longest walk (`gpt-6-astra-aeon` through to `gpt-5.5`) uses 4, leaving one attempt for a retry or stream failover; spend two and the last hop is unreachable, ending in an attempt-budget-exhausted 503. That needs an account entitled to none of aeon, Astra or 5.6 Sol
 
 ---
 

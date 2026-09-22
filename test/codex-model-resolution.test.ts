@@ -50,9 +50,9 @@ describe("codex.js wrapper — GPT-5.6 model resolution", () => {
 		expect(wrapper.normalizeRequestedModel("gpt-5.6-sol-2026-06-26")).toBe("gpt-5.6-sol");
 	});
 
-	it("leaves the legacy `gpt-5` alias and Codex Max untouched", () => {
+	it("leaves the legacy `gpt-5` alias alone and routes retired Codex Max to its replacement", () => {
 		expect(wrapper.normalizeRequestedModel("gpt-5")).toBe("gpt-5.5");
-		expect(wrapper.normalizeRequestedModel("gpt-5.1-codex-max")).toBe("gpt-5.3-codex");
+		expect(wrapper.normalizeRequestedModel("gpt-5.1-codex-max")).toBe("gpt-5.6-sol");
 	});
 
 	it("buckets 5.6 into the gpt-5.2 prompt family for status", () => {
@@ -121,7 +121,8 @@ describe("codex.js wrapper — GPT-6 Astra and Daybreak resolution", () => {
 		expect(wrapper.resolveModelFamilyForStatus("openai/gpt-5.6-sol")).toBe(
 			"gpt-5.2",
 		);
-		expect(wrapper.resolveModelFamilyForStatus("openai/gpt-5.1")).toBe("gpt-5.1");
+		// `gpt-5.1` is retired and runs on `gpt-5.6-sol`, so it reports that family.
+		expect(wrapper.resolveModelFamilyForStatus("openai/gpt-5.1")).toBe("gpt-5.2");
 		expect(wrapper.resolveModelFamilyForStatus("models/gpt-5.3-codex")).toBe(
 			"codex",
 		);
@@ -158,7 +159,13 @@ describe("codex.js wrapper — reasoning-effort coercion", () => {
 	it("steps `max`/`ultra` down to the strongest tier a pre-5.6 model supports", () => {
 		expect(wrapper.coerceReasoningEffortForModel("gpt-5.5", "max")).toBe("xhigh");
 		expect(wrapper.coerceReasoningEffortForModel("gpt-5.5", "ultra")).toBe("xhigh");
-		expect(wrapper.coerceReasoningEffortForModel("gpt-5.1", "ultra")).toBe("high");
+		expect(wrapper.coerceReasoningEffortForModel("gpt-5.5-pro", "ultra")).toBe("xhigh");
+	});
+
+	it("gives a retired id its replacement's effort ceiling", () => {
+		// `gpt-5.1` topped out at `high`; it now runs on 5.6 Sol, which accepts
+		// `ultra` and sends it as `max`.
+		expect(wrapper.coerceReasoningEffortForModel("gpt-5.1", "ultra")).toBe("max");
 	});
 });
 
@@ -254,11 +261,13 @@ describe("codex.js wrapper — GPT-6 status family does not swallow codex ids", 
 		// profile reports. The GPT-6 branch must not claim a codex id off it.
 		expect(wrapper.resolveModelFamilyForStatus("gpt-6-codex")).toBe("codex");
 		expect(wrapper.resolveModelFamilyForStatus("gpt-5.3-codex")).toBe("codex");
-		// Routing still sends it to the current codex model, same as lib.
+		// Routing still sends it to the model codex ids run on, same as lib. With
+		// every codex model retired that is 5.6 Sol, on the gpt-5.2 prompt family.
 		expect(wrapper.normalizeRequestedModel("gpt-6-codex")).toBe(
 			resolveNormalizedModel("gpt-6-codex"),
 		);
-		expect(getModelProfile("gpt-6-codex").promptFamily).toBe("gpt-5-codex");
+		expect(resolveNormalizedModel("gpt-6-codex")).toBe("gpt-5.6-sol");
+		expect(getModelProfile("gpt-6-codex").promptFamily).toBe("gpt-5.2");
 	});
 });
 
