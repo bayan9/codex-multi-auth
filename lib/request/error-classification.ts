@@ -65,9 +65,12 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	// it the Luna walk would stop one rung short of `gpt-5.5`, the same
 	// stranding the Sol row fixed. It also applies to a direct `gpt-5.6-luna`
 	// request, which used to end its walk on an unsupported response and now
-	// retries on the pricier `gpt-5.5`. Terra is still absent: nothing steps
-	// into it, so giving it a hop would change 5.6 behaviour for no path.
+	// retries on the pricier `gpt-5.5`.
 	"gpt-5.6-luna": ["gpt-5.5"],
+	// Terra gained its row once the retired codex minis and `gpt-5-mini` began
+	// stepping into it; without it those walks stopped at Terra instead of the
+	// `gpt-5.5` floor every other retired id reaches.
+	"gpt-5.6-terra": ["gpt-5.5"],
 	"gpt-5": ["gpt-5.5"],
 	"gpt-5-pro": ["gpt-5.5-pro"],
 	"gpt-5.5-2026-04-23": ["gpt-5.5"],

@@ -627,10 +627,8 @@ function resolveCodexCatalogModel(modelId: string): string | undefined {
 	if (!normalized.includes("codex")) {
 		return undefined;
 	}
-	if (
-		normalized.includes("codex-mini") ||
-		normalized.includes("codex mini")
-	) {
+	// Anchored so `codex-minimal` (an effort suffix) is not read as a mini.
+	if (/codex[- ]mini(?!mal)/.test(normalized)) {
 		return CODEX_MINI_REPLACEMENT_MODEL;
 	}
 	return CURRENT_CODEX_MODEL;
@@ -809,6 +807,18 @@ export function resolveNormalizedModel(model: string | undefined): string {
 	const mappedModel = lookupMappedModel(modelId);
 	if (mappedModel) {
 		return mappedModel;
+	}
+
+	// `max`/`ultra` are not generated as aliases for the pre-5.6 ids, so
+	// `gpt-5.3-chat-latest-max` missed the retired table and the general GPT-5
+	// resolver sent it to 5.5 instead of its replacement. Retry the lookup
+	// without the suffix before any fuzzy resolver runs.
+	const withoutTopEffort = modelId.replace(/-(max|ultra)$/i, "");
+	if (withoutTopEffort !== modelId) {
+		const mappedWithoutEffort = lookupMappedModel(withoutTopEffort);
+		if (mappedWithoutEffort) {
+			return mappedWithoutEffort;
+		}
 	}
 
 	// Daybreak first: its slugs carry neither a `codex` nor a `gpt 5` token, so

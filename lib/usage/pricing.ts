@@ -1,3 +1,4 @@
+import { RETIRED_MODEL_REPLACEMENTS } from "../request/helpers/model-map.js";
 import type { UsageServiceTier, UsageTokenCounts } from "./types.js";
 
 export interface UsageModelPricing {
@@ -138,41 +139,6 @@ const MODEL_PRICING: Record<string, UsageModelPricing> = {
 			},
 		},
 	},
-	// Rows for retired models (`gpt-5-codex` through `gpt-5.4`) stay on purpose.
-	// The ledger keeps the model string each request was recorded under, so
-	// deleting a row would turn every historical row for it into unknown cost and
-	// make a `maxCostUsd` budget fail closed for as long as that usage is in the
-	// window.
-	"gpt-5-codex": {
-		inputUsdPerMillion: 1.25,
-		outputUsdPerMillion: 10,
-		cachedInputUsdPerMillion: 0.125,
-		reasoningUsdPerMillion: 10,
-	},
-	"gpt-5.1-codex": {
-		inputUsdPerMillion: 1.25,
-		outputUsdPerMillion: 10,
-		cachedInputUsdPerMillion: 0.125,
-		reasoningUsdPerMillion: 10,
-	},
-	"gpt-5.2": {
-		inputUsdPerMillion: 1.25,
-		outputUsdPerMillion: 10,
-		cachedInputUsdPerMillion: 0.125,
-		reasoningUsdPerMillion: 10,
-	},
-	"gpt-5.3-codex": {
-		inputUsdPerMillion: 1.25,
-		outputUsdPerMillion: 10,
-		cachedInputUsdPerMillion: 0.125,
-		reasoningUsdPerMillion: 10,
-	},
-	"gpt-5.4": {
-		inputUsdPerMillion: 2,
-		outputUsdPerMillion: 12,
-		cachedInputUsdPerMillion: 0.2,
-		reasoningUsdPerMillion: 12,
-	},
 	"gpt-5.5": {
 		inputUsdPerMillion: 2,
 		outputUsdPerMillion: 12,
@@ -246,10 +212,19 @@ export function getUsageModelPricing(
 	// `NaN` instead of `null`. A NaN cost is worse than an unknown one, because
 	// `NaN >= limit` is false, so it silently makes a `maxCostUsd` budget
 	// unenforceable rather than failing closed the way an unpriced model does.
-	if (!Object.hasOwn(MODEL_PRICING, normalized)) {
+	//
+	// A retired id is priced as the model it now runs on. The proxy records the
+	// raw client model string, so a new `gpt-5-codex` row is really a
+	// `gpt-5.6-sol` request; pricing it at the retired model's old rate would
+	// under-count a `maxCostUsd` budget. Rows already on disk are unaffected:
+	// the ledger stores `costUsd` when a row is written and never re-prices it.
+	const effective = Object.hasOwn(RETIRED_MODEL_REPLACEMENTS, normalized)
+		? RETIRED_MODEL_REPLACEMENTS[normalized]
+		: normalized;
+	if (!effective || !Object.hasOwn(MODEL_PRICING, effective)) {
 		return null;
 	}
-	return MODEL_PRICING[normalized] ?? null;
+	return MODEL_PRICING[effective] ?? null;
 }
 
 /**

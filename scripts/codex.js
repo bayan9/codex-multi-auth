@@ -686,14 +686,15 @@ function resolveModelFamilyForStatus(model) {
 		return "gpt-5.2";
 	}
 	if (normalized.includes("daybreak")) return "gpt-5.2";
-	if (normalized.includes("codex-max")) return "codex-max";
-	if (normalized.includes("codex")) return "codex";
-	// Every live general GPT-5 model (5.5, 5.5-pro, the 5.6 tiers) is in the
-	// gpt-5.2 prompt family, and every retired one (`gpt-5.1`, `gpt-5.2`, the
-	// 5.4 family, `gpt-5-mini`/`nano`, `gpt-5`) now runs on a replacement in
-	// that family too. The old per-version branches reported `gpt-5.1` and
-	// `gpt-5-codex` for ids that no longer run under those families.
-	if (normalized.startsWith("gpt-5")) return "gpt-5.2";
+	// The proxy keys a /codex/responses request by `getModelFamily(model)`
+	// (lib/runtime-rotation-proxy.ts), i.e. the replacement's prompt family.
+	// Every codex model is retired and runs on `gpt-5.6-sol`/`terra`, and every
+	// live or retired general GPT-5 id runs on a model in the gpt-5.2 family, so
+	// status reads that family. The old `codex`/`codex-max`/`gpt-5.1`/
+	// `gpt-5-codex` answers named keys the proxy does not write for these ids.
+	if (normalized.includes("codex") || normalized.startsWith("gpt-5")) {
+		return "gpt-5.2";
+	}
 	return null;
 }
 
@@ -1412,6 +1413,7 @@ const WRAPPER_UNSUPPORTED_MODEL_FALLBACK_CHAIN = {
 	"gpt-6-luna": ["gpt-5.6-luna"],
 	"gpt-5.6-sol": ["gpt-5.5"],
 	"gpt-5.6-luna": ["gpt-5.5"],
+	"gpt-5.6-terra": ["gpt-5.5"],
 	"gpt-5": ["gpt-5.5"],
 	"gpt-5-pro": ["gpt-5.5-pro"],
 	"gpt-5.5-2026-04-23": ["gpt-5.5"],
@@ -2423,7 +2425,7 @@ function resolveCodexRequestedModel(normalized) {
 	// Every codex model is retired: a mini codex id goes to Terra, any other id
 	// carrying `codex` to Sol. Mirrors lib resolveCodexCatalogModel.
 	if (!normalized.includes("codex")) return "";
-	if (normalized.includes("codex-mini") || normalized.includes("codex mini")) {
+	if (/codex[- ]mini(?!mal)/.test(normalized)) {
 		return CODEX_MINI_REPLACEMENT_MODEL;
 	}
 	return CURRENT_CODEX_MODEL;
@@ -2539,6 +2541,14 @@ function normalizeRequestedModel(model) {
 	const exactMatch = REQUESTED_MODEL_ALIASES.get(normalized);
 	if (exactMatch) {
 		return exactMatch;
+	}
+	// Mirrors lib: retry the alias lookup without a `-max`/`-ultra` suffix.
+	const withoutTopEffort = normalized.replace(/-(max|ultra)$/, "");
+	if (withoutTopEffort !== normalized) {
+		const effortlessMatch = REQUESTED_MODEL_ALIASES.get(withoutTopEffort);
+		if (effortlessMatch) {
+			return effortlessMatch;
+		}
 	}
 
 	const daybreakModel = resolveDaybreakRequestedModel(stripped);
