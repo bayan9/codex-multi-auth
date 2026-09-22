@@ -171,6 +171,12 @@ describe("GPT-6 Astra", () => {
 				outputUsdPerMillion: 50,
 				cachedInputUsdPerMillion: 1,
 				reasoningUsdPerMillion: 50,
+				longContext: {
+					inputUsdPerMillion: 20,
+					outputUsdPerMillion: 75,
+					cachedInputUsdPerMillion: 2,
+					reasoningUsdPerMillion: 75,
+				},
 				// Fast tier, also published at launch. See
 				// test/usage-service-tier.test.ts for how it is applied.
 				serviceTiers: {
@@ -179,17 +185,24 @@ describe("GPT-6 Astra", () => {
 						outputUsdPerMillion: 100,
 						cachedInputUsdPerMillion: 2,
 						reasoningUsdPerMillion: 100,
+						longContext: {
+							inputUsdPerMillion: 40,
+							outputUsdPerMillion: 150,
+							cachedInputUsdPerMillion: 4,
+							reasoningUsdPerMillion: 150,
+						},
 					},
 				},
 			});
+			// Input under 272K: short-context rate (long context has its own test).
 			expect(
 				estimateUsageCostUsd("gpt-6-astra", {
-					inputTokens: 1_000_000,
+					inputTokens: 100_000,
 					cachedInputTokens: 0,
 					outputTokens: 1_000_000,
 					reasoningTokens: 0,
 				}),
-			).toBe(60);
+			).toBe(51);
 		});
 
 		it("bills cached input at the platform 90% discount, never free", () => {
@@ -201,18 +214,18 @@ describe("GPT-6 Astra", () => {
 			// already encodes at input/10.
 			expect(
 				estimateUsageCostUsd("gpt-6-astra", {
-					inputTokens: 1_000_000,
-					cachedInputTokens: 1_000_000,
+					inputTokens: 100_000,
+					cachedInputTokens: 100_000,
 					outputTokens: 0,
 					reasoningTokens: 0,
 				}),
-			).toBe(1);
+			).toBe(0.1);
 			// Still never zero: counting cached tokens as free is what made cost
 			// caps unenforceable once already.
 			expect(
 				estimateUsageCostUsd("gpt-6-astra", {
-					inputTokens: 1_000_000,
-					cachedInputTokens: 1_000_000,
+					inputTokens: 100_000,
+					cachedInputTokens: 100_000,
 					outputTokens: 0,
 					reasoningTokens: 0,
 				}),

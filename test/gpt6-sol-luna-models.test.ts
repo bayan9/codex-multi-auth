@@ -143,31 +143,32 @@ describe("GPT-6 Sol and Luna", () => {
 	});
 
 	describe("cost", () => {
+		// Input under 272K so these assert the short-context rate.
 		const TOKENS = {
-			inputTokens: 1_000_000,
+			inputTokens: 100_000,
 			cachedInputTokens: 0,
 			outputTokens: 1_000_000,
 			reasoningTokens: 0,
 		};
 
 		it("prices both tiers at the published standard rate", () => {
-			expect(estimateUsageCostUsd("gpt-6-sol", TOKENS)).toBe(12);
-			expect(estimateUsageCostUsd("gpt-6-luna", TOKENS)).toBeCloseTo(0.6, 10);
+			expect(estimateUsageCostUsd("gpt-6-sol", TOKENS)).toBeCloseTo(10.2, 10);
+			expect(estimateUsageCostUsd("gpt-6-luna", TOKENS)).toBeCloseTo(0.51, 10);
 		});
 
 		it("prices the published Fast tier at 2x", () => {
 			expect(
 				estimateUsageCostUsd("gpt-6-sol", { ...TOKENS, serviceTier: "priority" }),
-			).toBe(24);
+			).toBeCloseTo(20.4, 10);
 			expect(
 				estimateUsageCostUsd("gpt-6-luna", { ...TOKENS, serviceTier: "priority" }),
-			).toBeCloseTo(1.2, 10);
+			).toBeCloseTo(1.02, 10);
 		});
 
 		it("bills cached input at the 90% discount, never free", () => {
-			const cachedOnly = { ...TOKENS, cachedInputTokens: 1_000_000, outputTokens: 0 };
-			expect(estimateUsageCostUsd("gpt-6-sol", cachedOnly)).toBeCloseTo(0.2, 10);
-			expect(estimateUsageCostUsd("gpt-6-luna", cachedOnly)).toBeCloseTo(0.01, 10);
+			const cachedOnly = { ...TOKENS, cachedInputTokens: 100_000, outputTokens: 0 };
+			expect(estimateUsageCostUsd("gpt-6-sol", cachedOnly)).toBeCloseTo(0.02, 10);
+			expect(estimateUsageCostUsd("gpt-6-luna", cachedOnly)).toBeCloseTo(0.001, 10);
 		});
 
 		it("reports an unpublished tier as unknown rather than guessing", () => {
@@ -177,6 +178,60 @@ describe("GPT-6 Sol and Luna", () => {
 			const luna = getUsageModelPricing("gpt-6-luna");
 			expect(luna?.serviceTiers?.priority).toBeDefined();
 			expect(luna?.serviceTiers?.flex).toBeUndefined();
+		});
+
+		describe("long context (272K and up)", () => {
+			// The page labels short-context rows `<272K context length`, so the
+			// boundary itself is long. Before this, a 500K-token Sol request was
+			// billed at the short rate and a maxCostUsd cap could overrun.
+			const at = (inputTokens: number) => ({
+				inputTokens,
+				cachedInputTokens: 0,
+				outputTokens: 0,
+				reasoningTokens: 0,
+			});
+
+			it("keeps the short rate one token below the boundary", () => {
+				expect(estimateUsageCostUsd("gpt-6-sol", at(271_999))).toBeCloseTo(
+					(271_999 / 1_000_000) * 2,
+					10,
+				);
+			});
+
+			it("switches to the long rate at exactly 272,000 input tokens", () => {
+				expect(estimateUsageCostUsd("gpt-6-sol", at(272_000))).toBeCloseTo(
+					0.272 * 4,
+					10,
+				);
+				expect(estimateUsageCostUsd("gpt-6-sol", at(272_001))).toBeCloseTo(
+					(272_001 / 1_000_000) * 4,
+					10,
+				);
+				expect(estimateUsageCostUsd("gpt-6-luna", at(1_000_000))).toBeCloseTo(
+					0.2,
+					10,
+				);
+				expect(estimateUsageCostUsd("gpt-6-astra", at(1_000_000))).toBe(20);
+			});
+
+			it("prices long-context output, cached input and Fast mode too", () => {
+				const tokens = {
+					inputTokens: 1_000_000,
+					cachedInputTokens: 500_000,
+					outputTokens: 1_000_000,
+					reasoningTokens: 0,
+				};
+				// 0.5M billable x 4 + 0.5M cached x 0.4 + 1M out x 15
+				expect(estimateUsageCostUsd("gpt-6-sol", tokens)).toBeCloseTo(17.2, 10);
+				// Fast long context: 0.5 x 8 + 0.5 x 0.8 + 1 x 30
+				expect(
+					estimateUsageCostUsd("gpt-6-sol", { ...tokens, serviceTier: "priority" }),
+				).toBeCloseTo(34.4, 10);
+			});
+
+			it("leaves models with no long-context data on their one rate", () => {
+				expect(estimateUsageCostUsd("gpt-5.5", at(1_000_000))).toBe(2);
+			});
 		});
 	});
 
