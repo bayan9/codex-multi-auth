@@ -48,13 +48,24 @@ export const DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN: Record<string, string[]> 
 	// aeon steps to the flagship first: still GPT-6, still Astra, just without
 	// the long-horizon behaviour.
 	"gpt-6-astra-aeon": ["gpt-6-astra", "gpt-5.6-sol"],
+	// Sol and Luna step to the 5.6 tier they replace, never sideways into Astra:
+	// an account without the new tier is far likelier to lack Astra too, and
+	// Astra is the priciest hop available ($10/$50 per 1M against Luna's
+	// $0.10/$0.50). Every hop on these walks still costs more than Luna itself.
+	"gpt-6-sol": ["gpt-5.6-sol"],
+	"gpt-6-luna": ["gpt-5.6-luna"],
 	// The hop that makes the Astra path reach a model every account has. GPT-5.6
 	// shipped without a chain entry, so an unsupported 5.6 response ended the
 	// walk; with Astra above it that would have stranded the fallback one rung
-	// short of the floor it documents. Terra and Luna are deliberately still
-	// absent: nothing steps into them, so giving them a hop would change 5.6
-	// behaviour beyond completing this path.
+	// short of the floor it documents.
 	"gpt-5.6-sol": ["gpt-5.5"],
+	// Luna gained its row once `gpt-6-luna` started stepping into it; without
+	// it the Luna walk would stop one rung short of `gpt-5.5`, the same
+	// stranding the Sol row fixed. It also applies to a direct `gpt-5.6-luna`
+	// request, which used to end its walk on an unsupported response and now
+	// retries on the pricier `gpt-5.5`. Terra is still absent: nothing steps
+	// into it, so giving it a hop would change 5.6 behaviour for no path.
+	"gpt-5.6-luna": ["gpt-5.5"],
 	"gpt-5": ["gpt-5.5"],
 	"gpt-5-pro": ["gpt-5.5-pro"],
 	"gpt-5-chat-latest": ["gpt-5.5"],

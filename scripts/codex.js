@@ -1381,7 +1381,10 @@ const LEGACY_CODEX_MODEL = "gpt-5-codex";
 const WRAPPER_UNSUPPORTED_MODEL_FALLBACK_CHAIN = {
 	"gpt-6-astra": ["gpt-5.6-sol", "gpt-5.5"],
 	"gpt-6-astra-aeon": ["gpt-6-astra", "gpt-5.6-sol"],
+	"gpt-6-sol": ["gpt-5.6-sol"],
+	"gpt-6-luna": ["gpt-5.6-luna"],
 	"gpt-5.6-sol": ["gpt-5.5"],
+	"gpt-5.6-luna": ["gpt-5.5"],
 	"gpt-5": ["gpt-5.5"],
 	"gpt-5-pro": ["gpt-5.5-pro"],
 	"gpt-5-chat-latest": ["gpt-5.5"],
@@ -2025,6 +2028,8 @@ const SUPPORTED_REASONING_EFFORTS_BY_MODEL = {
 	[CURRENT_CODEX_MODEL]: ["low", "medium", "high", "xhigh"],
 	"gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
 	"gpt-6-astra-aeon": ["low", "medium", "high", "xhigh", "max", "ultra"],
+	"gpt-6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+	"gpt-6-luna": ["low", "medium", "high", "xhigh", "max"],
 	"gpt-daybreak-blue-latest": ["low", "medium", "high", "xhigh", "max", "ultra"],
 	"gpt-daybreak-red-latest": ["low", "medium", "high", "xhigh", "max", "ultra"],
 	"gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -2086,13 +2091,19 @@ const GPT_5_6_LUNA_MODEL = "gpt-5.6-luna";
 const GPT_5_6_FLAGSHIP_ALIAS = "gpt-5.6";
 const GPT_5_6_SOL_TERRA_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
 const GPT_5_6_LUNA_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-// GPT-6 Astra (2026-09-03). No Sol/Terra/Luna split this generation: the
-// flagship plus `aeon`, a long-horizon variant. Same frontier effort ladder as
-// 5.6 (no `none`/`minimal`, `ultra` at the top). Bare `gpt-6` -> flagship.
+// GPT-6 Astra (2026-09-03): the flagship plus `aeon`, a long-horizon variant.
+// Same frontier effort ladder as 5.6 (no `none`/`minimal`, `ultra` at the
+// top). Bare `gpt-6` -> flagship.
 const GPT_6_ASTRA_MODEL = "gpt-6-astra";
 const GPT_6_ASTRA_AEON_MODEL = "gpt-6-astra-aeon";
 const GPT_6_FLAGSHIP_ALIAS = "gpt-6";
 const GPT_6_ASTRA_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
+// GPT-6 Sol and Luna (upstream catalog, 2026-09-22). Sol reaches `ultra`, Luna
+// stops at `max`. No GPT-6 Terra. Mirrors lib/request/helpers/model-map.ts.
+const GPT_6_SOL_MODEL = "gpt-6-sol";
+const GPT_6_LUNA_MODEL = "gpt-6-luna";
+const GPT_6_SOL_EFFORTS = GPT_6_ASTRA_EFFORTS;
+const GPT_6_LUNA_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // Daybreak cyber models from the upstream Codex catalog. `red` is the
 // cyber-permissive variant, `blue` the defensive one.
 const DAYBREAK_BLUE_MODEL = "gpt-daybreak-blue-latest";
@@ -2322,6 +2333,13 @@ function seedRequestedModelAliases() {
 		GPT_6_ASTRA_AEON_MODEL,
 		GPT_6_ASTRA_EFFORTS,
 	);
+	// No bare `sol`/`luna` aliases: those already mean the 5.6 tiers.
+	addRequestedModelEffortAliases(GPT_6_SOL_MODEL, GPT_6_SOL_MODEL, GPT_6_SOL_EFFORTS);
+	addRequestedModelEffortAliases(
+		GPT_6_LUNA_MODEL,
+		GPT_6_LUNA_MODEL,
+		GPT_6_LUNA_EFFORTS,
+	);
 	addRequestedModelEffortAliases(
 		DAYBREAK_BLUE_MODEL,
 		DAYBREAK_BLUE_MODEL,
@@ -2473,6 +2491,11 @@ function resolveGpt6RequestedModel(stripped) {
 		return "";
 	}
 	if (tokens.includes("aeon")) return GPT_6_ASTRA_AEON_MODEL;
+	if (isAstra) return GPT_6_ASTRA_MODEL;
+	// `terra` goes to Sol: there is no GPT-6 Terra, and upstream migrates
+	// `gpt-5.6-terra` users to Sol.
+	if (tokens.includes("luna")) return GPT_6_LUNA_MODEL;
+	if (tokens.includes("sol") || tokens.includes("terra")) return GPT_6_SOL_MODEL;
 	return GPT_6_ASTRA_MODEL;
 }
 

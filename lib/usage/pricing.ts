@@ -13,7 +13,7 @@ export interface UsageModelPricing {
 	 * row under-counts it by half and lets a `maxCostUsd` cap overrun.
 	 *
 	 * A tier absent from this map is deliberately NOT approximated from the
-	 * standard rate. Only Astra's Fast multiplier is published; inventing one for
+	 * standard rate. Only the GPT-6 Fast rates are published; inventing one for
 	 * the rest would move a budget's trip point on a guess, which is the failure
 	 * this file exists to avoid. `estimateUsageCostUsd` reports an unlisted tier
 	 * as unknown cost instead, so a budget fails closed the same way it does for
@@ -42,14 +42,45 @@ const MODEL_PRICING: Record<string, UsageModelPricing> = {
 		reasoningUsdPerMillion: 50,
 		serviceTiers: {
 			// Published at launch alongside the standard rate: Fast mode is up to
-			// 2.5x the speed at 2x the price, $20 / $100 per 1M. This is the only
-			// tier multiplier OpenAI has published for any model in this table,
-			// which is why it is the only one listed anywhere in this file.
+			// 2.5x the speed at 2x the price, $20 / $100 per 1M. Only the GPT-6
+			// rows list a Fast tier, because only GPT-6 has a published Fast rate.
 			priority: {
 				inputUsdPerMillion: 20,
 				outputUsdPerMillion: 100,
 				cachedInputUsdPerMillion: 2,
 				reasoningUsdPerMillion: 100,
+			},
+		},
+	},
+	// GPT-6 Sol and Luna, from the OpenAI API pricing page (read 2026-09-23;
+	// short-context rows). Both publish a Fast tier at exactly 2x, like Astra.
+	// Long-context (>272K) rows also exist at a higher rate and are not modelled
+	// here, the same as for Astra.
+	"gpt-6-sol": {
+		inputUsdPerMillion: 2,
+		outputUsdPerMillion: 10,
+		cachedInputUsdPerMillion: 0.2,
+		reasoningUsdPerMillion: 10,
+		serviceTiers: {
+			priority: {
+				inputUsdPerMillion: 4,
+				outputUsdPerMillion: 20,
+				cachedInputUsdPerMillion: 0.4,
+				reasoningUsdPerMillion: 20,
+			},
+		},
+	},
+	"gpt-6-luna": {
+		inputUsdPerMillion: 0.1,
+		outputUsdPerMillion: 0.5,
+		cachedInputUsdPerMillion: 0.01,
+		reasoningUsdPerMillion: 0.5,
+		serviceTiers: {
+			priority: {
+				inputUsdPerMillion: 0.2,
+				outputUsdPerMillion: 1,
+				cachedInputUsdPerMillion: 0.02,
+				reasoningUsdPerMillion: 1,
 			},
 		},
 	},
