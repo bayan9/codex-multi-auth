@@ -102,6 +102,8 @@ describe("codex.js wrapper — GPT-6 Astra and Daybreak resolution", () => {
 	it("buckets GPT-6 and Daybreak into the gpt-5.2 prompt family for status", () => {
 		expect(wrapper.resolveModelFamilyForStatus("gpt-6-astra")).toBe("gpt-5.2");
 		expect(wrapper.resolveModelFamilyForStatus("gpt-6-astra-aeon")).toBe("gpt-5.2");
+		expect(wrapper.resolveModelFamilyForStatus("gpt-6-sol")).toBe("gpt-5.2");
+		expect(wrapper.resolveModelFamilyForStatus("gpt-6-luna")).toBe("gpt-5.2");
 		expect(wrapper.resolveModelFamilyForStatus("gpt-daybreak-red-latest")).toBe(
 			"gpt-5.2",
 		);
@@ -176,6 +178,15 @@ describe("codex.js wrapper — parity with lib/request/helpers/model-map", () =>
 		"gpt-6-astra-2026-09-03",
 		"astra",
 		"astra-aeon",
+		"gpt-6-sol",
+		"gpt-6-luna",
+		"gpt-6-sol-ultra",
+		"gpt-6-luna-max",
+		"gpt-6-sol-2026-09-22",
+		"gpt6-luna",
+		"GPT 6 Sol",
+		"gpt-6-terra",
+		"openai/gpt-6-luna",
 		"openai/gpt-6",
 		"gpt-6-codex",
 		"gpt-daybreak-blue-latest",
@@ -213,6 +224,8 @@ describe("codex.js wrapper — parity with lib/request/helpers/model-map", () =>
 	const COERCION_MODELS = [
 		"gpt-6-astra",
 		"gpt-6-astra-aeon",
+		"gpt-6-sol",
+		"gpt-6-luna",
 		"gpt-daybreak-blue-latest",
 		"gpt-daybreak-red-latest",
 		"gpt-5.6-sol",
@@ -259,7 +272,14 @@ describe("codex.js wrapper — unsupported-model fallback chain parity", () => {
 	// Pinned to the GPT-6 rows only. The two tables already diverge elsewhere
 	// (`gpt-5.3-codex` has a row in lib and none in the wrapper), which predates
 	// GPT-6 and is deliberately not asserted here.
-	const GPT6_ROWS = ["gpt-6-astra", "gpt-6-astra-aeon", "gpt-5.6-sol"];
+	const GPT6_ROWS = [
+		"gpt-6-astra",
+		"gpt-6-astra-aeon",
+		"gpt-6-sol",
+		"gpt-6-luna",
+		"gpt-5.6-sol",
+		"gpt-5.6-luna",
+	];
 
 	it.each(GPT6_ROWS)("wrapper carries the `%s` row lib has", (model) => {
 		const libRow = DEFAULT_UNSUPPORTED_CODEX_FALLBACK_CHAIN[model];

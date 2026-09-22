@@ -61,6 +61,10 @@ export const UNESTIMATED_ROUTABLE_MODELS = [
 	// `contextBudgetGuardModelWindowOverrides` once you know your real ceiling.
 	"gpt-6-astra",
 	"gpt-6-astra-aeon",
+	// Sol and Luna carry the same 272K Codex / 872K max split in the upstream
+	// catalog as Astra, so the same reasoning keeps them unestimated.
+	"gpt-6-sol",
+	"gpt-6-luna",
 	"gpt-daybreak-blue-latest",
 	"gpt-daybreak-red-latest",
 ] as const;

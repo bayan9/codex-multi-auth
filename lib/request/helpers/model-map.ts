@@ -167,8 +167,8 @@ const GPT_5_6_LUNA_EFFORTS = [
 /**
  * GPT-6 Astra, OpenAI's 2026-09-03 frontier release.
  *
- * There is no Sol/Terra/Luna split this generation: the announced lineup is the
- * flagship plus `aeon`, a long-horizon variant built for runs measured in days.
+ * The launch lineup was the flagship plus `aeon`, a long-horizon variant built
+ * for runs measured in days; Sol and Luna followed on 2026-09-22 (below).
  * `gpt-6-astra` is the API model name OpenAI published at launch;
  * `gpt-6-astra-aeon` is the second slug that shipped beside it in the Codex
  * model list. "Astra Pro" is a plan tier, not a separate slug we have seen, so
@@ -195,6 +195,27 @@ const GPT_6_ASTRA_EFFORTS = [
 	"xhigh",
 	"max",
 	"ultra",
+] as const satisfies readonly ModelReasoningEffort[];
+
+/**
+ * GPT-6 Sol and Luna, added to the upstream Codex catalog on 2026-09-22
+ * (openai/codex #47332) beside Astra. Sol is the everyday workhorse and Luna
+ * the small, cheap tier; there is no GPT-6 Terra. Upstream migrates `gpt-5.5`,
+ * `gpt-5.6-sol` and `gpt-5.6-terra` users to Sol and `gpt-5.6-luna` users to
+ * Luna. Ladders and defaults below are the catalog's own values: Sol reaches
+ * `ultra`, Luna stops at `max` (same split as 5.6), both default to `medium`.
+ */
+const GPT_6_SOL_MODEL = "gpt-6-sol";
+const GPT_6_LUNA_MODEL = "gpt-6-luna";
+
+const GPT_6_SOL_EFFORTS = GPT_6_ASTRA_EFFORTS;
+
+const GPT_6_LUNA_EFFORTS = [
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
 ] as const satisfies readonly ModelReasoningEffort[];
 
 /**
@@ -323,6 +344,20 @@ export const MODEL_PROFILES: Record<string, ModelProfile> = {
 		promptFamily: "gpt-5.2",
 		defaultReasoningEffort: "medium",
 		supportedReasoningEfforts: GPT_6_ASTRA_EFFORTS,
+		capabilities: TOOL_CAPABILITIES.full,
+	},
+	[GPT_6_SOL_MODEL]: {
+		normalizedModel: GPT_6_SOL_MODEL,
+		promptFamily: "gpt-5.2",
+		defaultReasoningEffort: "medium",
+		supportedReasoningEfforts: GPT_6_SOL_EFFORTS,
+		capabilities: TOOL_CAPABILITIES.full,
+	},
+	[GPT_6_LUNA_MODEL]: {
+		normalizedModel: GPT_6_LUNA_MODEL,
+		promptFamily: "gpt-5.2",
+		defaultReasoningEffort: "medium",
+		supportedReasoningEfforts: GPT_6_LUNA_EFFORTS,
 		capabilities: TOOL_CAPABILITIES.full,
 	},
 	[DAYBREAK_BLUE_MODEL]: {
@@ -475,6 +510,11 @@ function addGpt6Aliases(): void {
 	// rather than letting it fall through to GPT-5.5.
 	addEffortAliases("astra", GPT_6_ASTRA_MODEL, GPT_6_ASTRA_EFFORTS);
 	addEffortAliases("astra-aeon", GPT_6_ASTRA_AEON_MODEL, GPT_6_ASTRA_EFFORTS);
+	// No bare `sol`/`luna` aliases: those names already mean the 5.6 tiers to
+	// anyone who used them before 2026-09-22, and re-pointing them would swap a
+	// user's model generation without asking.
+	addEffortAliases(GPT_6_SOL_MODEL, GPT_6_SOL_MODEL, GPT_6_SOL_EFFORTS);
+	addEffortAliases(GPT_6_LUNA_MODEL, GPT_6_LUNA_MODEL, GPT_6_LUNA_EFFORTS);
 }
 
 function addDaybreakAliases(): void {
@@ -657,8 +697,9 @@ function resolveCodexCatalogModel(modelId: string): string | undefined {
  * `gpt 5` token pair) and every unrecognised GPT-6 id lands on `DEFAULT_MODEL`,
  * running GPT-5.5 for a caller who asked for the frontier model. `aeon` keeps
  * its own canonical id because it is a behaviourally different model (long
- * horizon), not a rename of the flagship; everything else resolves to the
- * flagship, matching OpenAI's bare `gpt-6` alias.
+ * horizon), not a rename of the flagship. A `sol`/`luna` tier token picks that
+ * tier; everything else resolves to the flagship, matching OpenAI's bare
+ * `gpt-6` alias.
  *
  * Ids carrying a `codex` token are left to `resolveCodexCatalogModel`, exactly
  * as the 5.6 resolver defers them.
@@ -691,6 +732,13 @@ function resolveGpt6CatalogModel(modelId: string): string | undefined {
 	}
 
 	if (tokens.includes("aeon")) return GPT_6_ASTRA_AEON_MODEL;
+	if (isAstra) return GPT_6_ASTRA_MODEL;
+	// Before Sol and Luna existed every non-Astra GPT-6 id fell to the line
+	// below, so `gpt-6-luna` silently ran Astra at 100x Luna's price. `terra`
+	// goes to Sol because there is no GPT-6 Terra and upstream migrates
+	// `gpt-5.6-terra` users to Sol.
+	if (tokens.includes("luna")) return GPT_6_LUNA_MODEL;
+	if (tokens.includes("sol") || tokens.includes("terra")) return GPT_6_SOL_MODEL;
 	return GPT_6_ASTRA_MODEL;
 }
 
