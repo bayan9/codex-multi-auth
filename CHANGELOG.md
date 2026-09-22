@@ -5,6 +5,37 @@ Dates use ISO format (`YYYY-MM-DD`).
 
 This repository's current stable release line is `2.x`. Full release notes live in [`docs/releases/`](docs/releases/) — this file is the short version. Pre-`0.1.0` iteration history is archived in [`docs/releases/legacy-pre-0.1-history.md`](docs/releases/legacy-pre-0.1-history.md).
 
+## [2.16.0] - 2026-09-23
+
+GPT-6 Sol and Luna are supported, and every retired model now runs on its named replacement. [Full notes](docs/releases/v2.16.0.md).
+
+### Added
+
+- `gpt-6-sol` and `gpt-6-luna` with the upstream catalog's reasoning ladders,
+  published standard and Fast pricing, and config template entries. Before this,
+  both silently ran GPT-6 Astra
+  ([#696](https://github.com/ndycode/codex-multi-auth/pull/696))
+
+### Changed
+
+- Retired models (every codex model, `gpt-5.1`, `gpt-5.2`, the `gpt-5.4`
+  family, `gpt-5-mini`/`nano`, the `*-chat-latest` snapshots) now resolve to
+  the replacement OpenAI names, are removed from the templates, and are priced
+  at the replacement's rate. The fallback floor is `gpt-5.5` and the quota
+  probe no longer tries retired models. Codex ids now use the `gpt-5.2` prompt
+  family and rotation bucket
+  ([#697](https://github.com/ndycode/codex-multi-auth/pull/697),
+  [#698](https://github.com/ndycode/codex-multi-auth/pull/698))
+
+### Fixed
+
+- GPT-6 requests with more than 272K input tokens are priced at the published
+  long-context rate instead of the cheaper short-context rate
+  ([#696](https://github.com/ndycode/codex-multi-auth/pull/696))
+- `status -m <codex model>` reads the account family the runtime proxy
+  actually keys, not the unused `codex` slot
+  ([#698](https://github.com/ndycode/codex-multi-auth/pull/698))
+
 ## [2.15.0] - 2026-09-17
 
 Image generation and editing now run through the authenticated runtime rotation proxy, and built-in `image_gen` is exposed to Codex 0.154.0 sessions without native-auth fallback. [Full notes](docs/releases/v2.15.0.md).
