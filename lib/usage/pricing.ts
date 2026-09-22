@@ -21,7 +21,7 @@ export interface UsageModelPricing {
 	 */
 	serviceTiers?: Partial<Record<UsageServiceTier, UsageModelPricing>>;
 	/**
-	 * Rates once a response's input reaches `LONG_CONTEXT_MIN_INPUT_TOKENS`.
+	 * Rates once a response's input exceeds `SHORT_CONTEXT_MAX_INPUT_TOKENS`.
 	 *
 	 * OpenAI bills a GPT-6 request whose context crosses 272K at a separate,
 	 * higher rate. A row that declares this block (every tier inside it too) is
@@ -34,10 +34,11 @@ export interface UsageModelPricing {
 }
 
 /**
- * Input size at which long-context pricing starts. The pricing page labels the
- * short-context rows `<272K context length`, so exactly 272,000 is long.
+ * Largest input still billed at the short-context rate. OpenAI's GPT-6 model
+ * pages say "Prompts with more than 272K input tokens are priced at 2x input
+ * and cache rates", so exactly 272,000 is short and 272,001 is long.
  */
-export const LONG_CONTEXT_MIN_INPUT_TOKENS = 272_000;
+export const SHORT_CONTEXT_MAX_INPUT_TOKENS = 272_000;
 
 const MODEL_PRICING: Record<string, UsageModelPricing> = {
 	// GPT-6 Astra, published at the 2026-09-03 launch: $10 / 1M input,
@@ -275,7 +276,7 @@ function resolveContextLengthPricing(
 	tierPricing: UsageModelPricing,
 	inputTokens: number,
 ): UsageModelPricing | null {
-	if (inputTokens < LONG_CONTEXT_MIN_INPUT_TOKENS) {
+	if (inputTokens <= SHORT_CONTEXT_MAX_INPUT_TOKENS) {
 		return tierPricing;
 	}
 	if (tierPricing.longContext) {

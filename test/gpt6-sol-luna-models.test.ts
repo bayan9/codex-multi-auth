@@ -180,10 +180,11 @@ describe("GPT-6 Sol and Luna", () => {
 			expect(luna?.serviceTiers?.flex).toBeUndefined();
 		});
 
-		describe("long context (272K and up)", () => {
-			// The page labels short-context rows `<272K context length`, so the
-			// boundary itself is long. Before this, a 500K-token Sol request was
-			// billed at the short rate and a maxCostUsd cap could overrun.
+		describe("long context (more than 272K input)", () => {
+			// The GPT-6 model pages price "prompts with more than 272K input
+			// tokens" at the long-context rate, so 272,000 itself is short. Before
+			// this, a 500K-token Sol request was billed at the short rate and a
+			// maxCostUsd cap could overrun.
 			const at = (inputTokens: number) => ({
 				inputTokens,
 				cachedInputTokens: 0,
@@ -191,18 +192,14 @@ describe("GPT-6 Sol and Luna", () => {
 				reasoningTokens: 0,
 			});
 
-			it("keeps the short rate one token below the boundary", () => {
-				expect(estimateUsageCostUsd("gpt-6-sol", at(271_999))).toBeCloseTo(
-					(271_999 / 1_000_000) * 2,
+			it("keeps the short rate at exactly 272,000 input tokens", () => {
+				expect(estimateUsageCostUsd("gpt-6-sol", at(272_000))).toBeCloseTo(
+					0.272 * 2,
 					10,
 				);
 			});
 
-			it("switches to the long rate at exactly 272,000 input tokens", () => {
-				expect(estimateUsageCostUsd("gpt-6-sol", at(272_000))).toBeCloseTo(
-					0.272 * 4,
-					10,
-				);
+			it("switches to the long rate one token past 272,000", () => {
 				expect(estimateUsageCostUsd("gpt-6-sol", at(272_001))).toBeCloseTo(
 					(272_001 / 1_000_000) * 4,
 					10,
