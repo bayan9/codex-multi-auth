@@ -2084,3 +2084,34 @@ describe("orphaned app-bind recovery (#614)", () => {
 		);
 	});
 });
+
+describe("native app binding", () => {
+	it("persists reference identity and restores unrelated config edits on unbind", async () => {
+		const root = await createTempRoot("native-app-bind-");
+		const codexHome = join(root, "codex-home");
+		const env = { CODEX_MULTI_AUTH_DIR: join(root, "multi-auth"), CODEX_MULTI_AUTH_APP_BIND_CODEX_HOME: codexHome };
+		await mkdir(codexHome, { recursive: true });
+		await writeFile(join(codexHome, "config.toml"), 'model = "original-model"\nmodel_reasoning_effort = "medium"\n');
+		const options = { platform: "linux" as const, home: root, env, spawnDetached: false };
+		await seedExistingAppBindState({ ...options, port: 43210, baseUrl: "http://127.0.0.1:43210", nodePath: process.execPath, routerScriptPath: join(thisDir, "../scripts/codex-app-router.js") });
+		await bindCodexAppRuntimeRotation({ ...options, nativeOpenai: true, catalogAccount: { email: "reference@example.test", accountId: "ref-account" } });
+		const status = await getAppBindStatus(options);
+		expect(status.state?.nativeOpenai).toBe(true);
+		expect(status.state?.catalogAccount).toEqual({ email: "reference@example.test", accountId: "ref-account" });
+		const bound = await readFile(join(codexHome, "config.toml"), "utf8");
+		expect(bound).toContain('model_provider = "openai"'); expect(bound).not.toContain('requires_openai_auth = false');
+		await writeFile(join(codexHome, "config.toml"), bound.replace('"medium"', '"high"'));
+		await unbindCodexAppRuntimeRotation(options);
+		const restored = await readFile(join(codexHome, "config.toml"), "utf8");
+		expect(restored).not.toContain('openai_base_url'); expect(restored).toContain('model_reasoning_effort = "high"');
+	});
+	it("removes an orphaned native override when unbinding", async () => {
+		const root = await createTempRoot("native-orphan-"); const codexHome = join(root, "codex-home");
+		const env = { CODEX_MULTI_AUTH_DIR: join(root, "multi-auth"), CODEX_MULTI_AUTH_APP_BIND_CODEX_HOME: codexHome };
+		await mkdir(codexHome, { recursive: true });
+		await writeFile(join(codexHome, "config.toml"), rewriteConfigTomlForAppBind('model = "kept"\n', 'http://127.0.0.1:43210', 'secret', true));
+		await unbindCodexAppRuntimeRotation({ platform: "linux", home: root, env, spawnDetached: false });
+		const restored = await readFile(join(codexHome, "config.toml"), "utf8");
+		expect(restored).not.toContain('43210'); expect(restored).not.toContain('native provider'); expect(restored).toContain('model = "kept"');
+	});
+});

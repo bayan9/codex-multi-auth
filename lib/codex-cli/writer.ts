@@ -1,3 +1,4 @@
+import { hasNativeProviderConfig } from "../runtime-constants.js";
 import { existsSync, promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { createLogger } from "../logger.js";
@@ -496,6 +497,12 @@ export async function setCodexCliActiveSelection(
 ): Promise<boolean> {
 	return enqueueActiveSelectionWrite(async () => {
 		if (!isCodexCliSyncEnabled()) return false;
+		// Native app binding deliberately separates desktop identity from inference selection.
+		try {
+			if (hasNativeProviderConfig(await fs.readFile(getCodexCliConfigPath(), "utf8"))) return false;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+		}
 
 		incrementCodexCliMetric("writeAttempts");
 		const accountsPath = getCodexCliAccountsPath();

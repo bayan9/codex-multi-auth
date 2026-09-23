@@ -323,6 +323,8 @@ async function main() {
 	try {
 		const proxyModule = await import("../dist/lib/runtime-rotation-proxy.js");
 		proxyServer = await proxyModule.startRuntimeRotationProxy({
+			nativeOpenai: stateRecord?.nativeOpenai === true,
+			catalogAccount: stateRecord?.catalogAccount,
 			host,
 			port,
 			clientApiKey,

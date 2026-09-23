@@ -1,3 +1,4 @@
+import type { AccountStorageV3 } from "../storage.js";
 import type { AccountManager } from "../accounts.js";
 import type { ModelFamily } from "../prompts/codex.js";
 
@@ -31,6 +32,10 @@ export interface RuntimeRotationProxyStatus {
 }
 
 export interface RuntimeRotationProxyOptions {
+	nativeOpenai?: boolean;
+	/** Override the native credential reader for embedded hosts and tests. */
+	readNativeAccountStorage?: () => Promise<AccountStorageV3 | null>;
+	catalogAccount?: { email: string; accountId: string; };
 	host?: string;
 	port?: number;
 	upstreamBaseUrl?: string;

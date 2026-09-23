@@ -1,3 +1,7 @@
+import { loadAccounts } from "./storage.js";
+import { syncNativeAccountCredentials } from "./runtime/native-account-sync.js";
+import { isNativeClientToken } from "./runtime/native-client-auth.js";
+import { AccountModelCatalog } from "./runtime/account-model-catalog.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -423,6 +427,10 @@ function createOutboundHeaders(
 	return headers;
 }
 
+function catalogAccountKey(account: ManagedAccount): string {
+	return `${account.index}:${account.accountId ?? ""}:${account.email ?? ""}`;
+}
+
 function isAuthorizedClient(headers: Headers, clientApiKey: string): boolean {
 	const authorization = headers.get("authorization") ?? "";
 	const bearerMatch = authorization.match(/^Bearer\s+(.+)$/i);
@@ -484,6 +492,7 @@ async function persistRuntimeActiveAccount(
 	family: ModelFamily,
 	isPinned: boolean,
 	schedulingStrategy: string,
+	preserveDesktopLogin = false,
 ): Promise<void> {
 	if (isPinned) {
 		// When the user has manually pinned an account, the proxy MUST NOT
@@ -523,7 +532,7 @@ async function persistRuntimeActiveAccount(
 			await accountManager.markSwitchedLocked(account, "rotation", family);
 		}
 		accountManager.saveToDiskDebounced();
-		await accountManager.syncCodexCliActiveSelectionForIndex(account.index);
+		if (!preserveDesktopLogin) await accountManager.syncCodexCliActiveSelectionForIndex(account.index);
 	} catch {
 		// Runtime forwarding must not fail after a valid upstream response just
 		// because the local status mirrors are temporarily locked.
@@ -981,6 +990,9 @@ export async function startRuntimeRotationProxy(
 	const lastObservedAffinityGeneration =
 		readStorageMetaFromDisk().affinityGeneration;
 	const state = createRotationProxyState({
+		nativeOpenai: options.nativeOpenai === true,
+		readNativeAccountStorage: options.readNativeAccountStorage ?? (options.accountManager ? undefined : loadAccounts),
+		catalogAccount: options.catalogAccount,
 		activeAccountManager,
 		routingMutexMode,
 		schedulingStrategy,
@@ -1090,8 +1102,47 @@ async function handleRequestInner(
 		// unauthorized). Authorized callers still fall through to the 404 below
 		// when they hit an unsupported path/method.
 		const incomingHeaders = headersFromIncoming(req);
-		if (!isAuthorizedClient(incomingHeaders, state.clientApiKey)) {
+		if (state.nativeOpenai && state.readNativeAccountStorage) {
+			const disk = await state.readNativeAccountStorage();
+			if (!disk) {
+				writeUnauthorized(res);
+				return;
+			}
+			if (disk) {
+				const accounts = accountManager.getAccountsSnapshot();
+				const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
+				if (!sameInventory) {
+					accountManager = new AccountManager(undefined, disk);
+					state.activeAccountManager = accountManager;
+					state.knownAccountManagers.add(accountManager);
+					state.modelCatalog = undefined;
+				} else if (syncNativeAccountCredentials(accountManager, disk)) {
+					state.modelCatalog = undefined;
+				}
+			}
+		}
+		const bearer = incomingHeaders.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+		const managedOAuth = state.nativeOpenai && bearer && accountManager.getAccountsSnapshot().some(account =>
+			account.enabled !== false && !account.authInvalidatedAt && account.access && (account.expires ?? 0) > state.now() && safeEqual(bearer, account.access));
+		const nativeOAuth = state.nativeOpenai && bearer && !managedOAuth && await isNativeClientToken(bearer, state.now());
+		if (!isAuthorizedClient(incomingHeaders, state.clientApiKey) && !managedOAuth && !nativeOAuth) {
 			writeUnauthorized(res);
+			return;
+		}
+
+		// The native client treats 426 as a signal to retry over HTTP/SSE.
+		// Authenticate first; never forward an unsupported WebSocket handshake.
+		if (
+			req.method === "GET" && isResponsesPath(incomingUrl.pathname) &&
+			incomingHeaders.get("upgrade")?.toLowerCase() === "websocket"
+		) {
+			res.setHeader("connection", "close");
+			writeJson(res, 426, {
+				error: {
+					message: "Use HTTP streaming for Responses API requests.",
+					code: "runtime_rotation_proxy_http_required",
+				},
+			});
 			return;
 		}
 
@@ -1322,6 +1373,58 @@ async function handleRequestInner(
 		// applies unchanged because it all keys off `pinnedIndex` / `isPinned`.
 		const pinnedIndex = state.forcedAccountIndex ?? storageMeta.pinnedAccountIndex;
 		const isPinned = typeof pinnedIndex === "number";
+		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
+			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
+			if (requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) && state.catalogClientVersion !== requestedVersion) {
+				state.catalogClientVersion = requestedVersion;
+				state.modelCatalog = undefined;
+			}
+			state.modelCatalog ??= new AccountModelCatalog(async (key) => {
+				const account = state.activeAccountManager.getAccountsSnapshot().find(a => catalogAccountKey(a) === key);
+				if (!account || account.enabled === false) throw new Error("Account unavailable");
+				const fresh = await ensureFreshAccessToken({					accountManager: state.activeAccountManager, account,
+					family: "codex", model: null, now: state.now(), tokenRefreshSkewMs: state.tokenRefreshSkewMs,
+					tokenInvalidationCooldownMs: state.tokenInvalidationCooldownMs				});
+				if (!fresh.ok) throw new Error("Account authentication unavailable");
+				const accountId = resolveAccountId(fresh.account, fresh.accessToken);
+				if (!accountId) throw new Error("Account identity unavailable");
+				const url = new URL(state.upstreamBaseUrl);
+				url.pathname = url.pathname.replace(/\/+$/, "") + "/codex/models";
+				const clientVersion = state.catalogClientVersion;
+				if (clientVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(clientVersion)) url.searchParams.set("client_version", clientVersion);
+				const response = await state.fetchImpl(url.toString(), {					method: "GET", redirect: "error",
+					headers: createOutboundHeaders(new Headers(), fresh.account, fresh.accessToken, accountId),
+					signal: AbortSignal.timeout(Math.min(state.fetchTimeoutMs, 15_000))				});
+				if (!response.ok) { await response.body?.cancel(); throw new Error("Catalog unavailable"); }
+				// Bound remote bytes, not just the advertised content length.
+				const reader = response.body?.getReader(); if (!reader) throw new Error("Empty catalog");
+				const chunks: Uint8Array[] = []; let size = 0;
+				try {					for (;;) {						const part = await reader.read(); if (part.done) break; size += part.value.byteLength;
+						if (size > 8 * 1024 * 1024) throw new Error("Catalog too large"); chunks.push(part.value);					}				}
+				finally { await reader.cancel(); }
+				return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+			}, state.now);
+			const eligible = accountManager.getAccountsSnapshot().filter(a => a.enabled !== false &&
+				(!isPinned || a.index === pinnedIndex) && !policyDecision?.blockedAccountIndexes.has(a.index));
+			if (isModelsRequest) {
+				const reference = state.catalogAccount;
+				const discovery = reference ? accountManager.getAccountsSnapshot().filter(a => a.enabled !== false && a.email === reference.email && a.accountId === reference.accountId) : eligible;
+				const models = await state.modelCatalog.list(discovery.map(catalogAccountKey));
+				writeJson(res, models.length ? 200 : 503, models.length ? { models } : { error: { code: "account_catalog_unavailable", message: "No eligible account catalog is available." } });
+				return;
+			}
+			const requestedModel = context.model;
+			if (!requestedModel) throw new Error("Missing requested model");
+			let supported = 0;
+			for (const account of eligible) {
+				if (await state.modelCatalog.supports(catalogAccountKey(account), requestedModel)) supported++;
+				else policyDecision?.blockedAccountIndexes.add(account.index);
+			}
+			if (!supported) {
+				writeJson(res, 403, { error: { code: "model_not_available_in_account_catalog", message: "Selected model is not advertised by an eligible account. Refresh account access or change the pin." } }); return;
+			}
+		}
+
 		// The token bucket spreads load across a selectable pool. A pin has no
 		// alternative account, so exhausting that local heuristic can only reject a
 		// request that the pinned account could serve. Keep circuit-breaker admission
@@ -2100,6 +2203,7 @@ async function handleRequestInner(
 				context.family,
 				isPinned && refreshed.account.index === pinnedIndex,
 				state.schedulingStrategy,
+				state.nativeOpenai,
 			);
 
 			// Recover the upstream token counts as the body streams past. Without

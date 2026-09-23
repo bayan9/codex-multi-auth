@@ -4235,3 +4235,126 @@ describe("chooseAccount sequential mode (issue #509)", () => {
 		});
 	});
 });
+
+describe("native OpenAI catalog routing", () => {
+	it("authenticates managed OAuth and unions account catalogs without returning credentials", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const { fetchImpl } = createRecordingFetch(call => Response.json({ models: [{ slug: call.headers.get("chatgpt-account-id") === "acc_1" ? "model-a" : "model-b", visibility: "list" }] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await fetch(`${proxy.baseUrl}/models?client_version=0.156.0`, { headers: { authorization: "Bearer access-1" } });
+		expect(response.status).toBe(200);
+		const text = await response.text(); expect(text).not.toContain("access-");
+		expect(JSON.parse(text).models.map((m: { slug: string }) => m.slug)).toEqual(["model-a", "model-b"]);
+	});
+	it("does not authenticate unknown or disabled OAuth tokens", async () => {
+		const storage = createStorage(Date.now()); storage.accounts[0]!.enabled = false;
+		const accountManager = new AccountManager(undefined, storage);
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ models: [] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true } });
+		for (const token of ["unknown", "access-1"]) { const r = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: `Bearer ${token}` } }); expect(r.status).toBe(401); await r.text(); }
+		expect(calls).toHaveLength(0);
+	});
+	it("honors a pin for catalog discovery and refuses unsupported pinned models", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ models: [{ slug: "supported" }] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, forcedAccountIndex: 0 } });
+		const response = await postResponses(proxy, { model: "not-supported", input: "hello" });
+		expect(response.status).toBe(403); expect((await response.json()).error.code).toBe("model_not_available_in_account_catalog");
+		expect(calls.every(c => c.url.includes("/models"))).toBe(true);
+	});
+});
+
+describe("reference account catalog", () => {
+	it("uses the reference catalog independently of the inference pin and refreshes new models", async () => {
+		let now = Date.now(); let models = [{ slug: "model-a", supported_reasoning_levels: [{ effort: "high" }] }];
+		const storage = createStorage(now); const reference = storage.accounts[0]!;
+		const accountManager = new AccountManager(undefined, storage);
+		const { calls, fetchImpl } = createRecordingFetch(call => Response.json({ models: call.headers.get("chatgpt-account-id") === "acc_1" ? models : [{ slug: "model-b" }] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, forcedAccountIndex: 1, now: () => now, catalogAccount: { email: reference.email!, accountId: reference.accountId! } } });
+		const read = async () => { const r = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: "Bearer access-1" } }); expect(r.status).toBe(200); return r.json(); };
+		expect((await read()).models).toEqual(models);
+		models = [...models, { slug: "new-model", supported_reasoning_levels: [] }]; now += 61000;
+		expect((await read()).models).toEqual(models);
+		const rejected = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(rejected.status).toBe(403); await rejected.text();
+		expect(calls.every(c => c.url.includes("/models"))).toBe(true);
+	});
+});
+
+describe("native login isolation", () => {
+	it.each([undefined, 1])("routes inference with pin %s without replacing the desktop login", async (forcedAccountIndex) => {
+		const manager = new AccountManager(undefined, createStorage(Date.now()));
+		const sync = vi.spyOn(manager, "syncCodexCliActiveSelectionForIndex").mockResolvedValue();
+		const { calls, fetchImpl } = createRecordingFetch(call => call.url.includes("/models") ? Response.json({ models: [{ slug: "model-a" }] }) : textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true, forcedAccountIndex } });
+		const result = await postResponses(proxy, { model: "model-a", input: "hello", stream: true }, "/responses", { authorization: "Bearer access-1" });
+		expect(result.status).toBe(200); await result.text();
+		expect(calls.some(c => c.url.includes("/responses") && c.headers.get("authorization")?.startsWith("Bearer access-"))).toBe(true);
+		if (forcedAccountIndex === 1) {
+			const inference = calls.find(c => c.url.includes("/responses"));
+			expect(inference?.headers.get("authorization")).toBe("Bearer access-2");
+			expect(inference?.headers.get("chatgpt-account-id")).toBe("acc_2");
+		}
+		expect(sync).not.toHaveBeenCalled();
+	});
+});
+
+describe("native re-login while router is running", () => {
+	it("accepts the newly saved credential and drops the obsolete auth cooldown", async () => {
+		const storage = createStorage(Date.now()); const accountManager = new AccountManager(undefined, storage);
+		const account = accountManager.getAccountByIndex(0)!; account.cooldownReason = "auth-failure"; account.coolingDownUntil = Date.now() + 300000;
+		let disk = structuredClone(storage);
+		const { fetchImpl } = createRecordingFetch(() => Response.json({ models: [{ slug: "model-a" }] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage: async () => disk } });
+		Object.assign(disk.accounts[0]!, { accessToken: "new-login-token", refreshToken: "new-refresh", expiresAt: Date.now() + 7200000 });
+		const response = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: "Bearer new-login-token" } });
+		expect(response.status).toBe(200); await response.text();
+		expect(account.access).toBe("new-login-token"); expect(account.cooldownReason).toBeUndefined();
+
+		disk.accounts[0]!.authInvalidatedAt = Date.now();
+		const revoked = await fetch(`${proxy.baseUrl}/models`, {headers: {authorization: "Bearer new-login-token"}});
+		expect(revoked.status).toBe(401); await revoked.text();
+		disk.accounts[0]!.enabled = false;
+		const rejected = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: "Bearer new-login-token" } });
+		expect(rejected.status).toBe(401); await rejected.text();
+	});
+});
+
+describe("native catalog client version", () => {
+	it("recovers discovery when a native client supplies its version after an unversioned request", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now()));
+		const { fetchImpl } = createRecordingFetch(call => new URL(call.url).searchParams.get("client_version") === "9.1.0" ? Response.json({ models: [{ slug: "future-model" }] }) : new Response("version required", { status: 400 }));
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const headers = { authorization: "Bearer access-1" };
+		const first = await fetch(`${proxy.baseUrl}/models`, { headers }); expect(first.status).toBe(503); await first.text();
+		const next = await fetch(`${proxy.baseUrl}/models?client_version=9.1.0`, { headers }); expect(next.status).toBe(200); expect((await next.json()).models[0].slug).toBe("future-model");
+	});
+});
+
+describe("Responses WebSocket fallback", () => {
+	it("signals the native client to fall back to HTTP after authenticating", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({}));
+		const proxy = await startProxy({ accountManager: manager, fetchImpl });
+		const upgrade = async (token: string) => new Promise<number>((resolve, reject) => {
+			const req = request(`${proxy.baseUrl}/responses`, { headers: { authorization: `Bearer ${token}`, connection: "Upgrade", upgrade: "websocket", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==" } }, res => { res.resume(); res.on("end", () => resolve(res.statusCode ?? 0)); });
+			req.on("error", reject); req.end();
+		});
+		expect(await upgrade("unknown")).toBe(401);
+		expect(await upgrade(DEFAULT_CLIENT_API_KEY)).toBe(426);
+		expect(calls).toHaveLength(0);
+		const ordinary = await fetch(`${proxy.baseUrl}/responses`, { headers: { authorization: `Bearer ${DEFAULT_CLIENT_API_KEY}` } });
+		expect(ordinary.status).toBe(404); await ordinary.text();
+	});
+});
+
+describe("native account storage availability", () => {
+ it("rejects stale managed credentials when the live account store disappears", async () => {
+  const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+  const {calls,fetchImpl}=createRecordingFetch(()=>Response.json({models:[{slug:"model-a"}]}));
+  const proxy=await startProxy({accountManager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>null}});
+  const response=await fetch(`${proxy.baseUrl}/models`,{headers:{authorization:"Bearer access-1"}});
+  expect(response.status).toBe(401);await response.text();
+  expect(calls).toHaveLength(0);
+ });
+});

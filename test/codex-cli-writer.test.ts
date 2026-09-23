@@ -66,6 +66,14 @@ describe("codex-cli writer", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
+	it("preserves the desktop credentials when native app binding is active", async () => {
+		const auth = JSON.stringify({ tokens: { access_token: "desktop-access", refresh_token: "desktop-refresh" } });
+		await writeFile(authPath, auth);
+		await writeFile(configPath, '# codex-multi-auth native provider begin\nmodel_provider = "openai"\nopenai_base_url = "http://127.0.0.1:43210"\n# codex-multi-auth native provider end\n');
+		expect(await setCodexCliActiveSelection({ accountId: "inference", accessToken: "inference-access", refreshToken: "inference-refresh" })).toBe(false);
+		expect(await readFile(authPath, "utf8")).toBe(auth);
+	});
+
   it("returns false when neither accounts.json nor auth.json exists", async () => {
     const updated = await setCodexCliActiveSelection({ accountId: "missing" });
     expect(updated).toBe(false);
