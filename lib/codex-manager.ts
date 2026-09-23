@@ -7,6 +7,7 @@ import {
 	formatWaitTime,
 	sanitizeEmail,
 } from "./accounts.js";
+import { reboundUnauthorizedAccountIdentity } from "./auth/account-access.js";
 import { loadCodexCliState } from "./codex-cli/state.js";
 import { setCodexCliActiveSelection } from "./codex-cli/writer.js";
 import {
@@ -170,6 +171,7 @@ function createRepairCommandDeps(): RepairCommandDeps {
 		formatCompactQuotaSnapshot,
 		resolveStoredAccountIdentity,
 		applyTokenAccountIdentity,
+		reboundUnauthorizedAccountIdentity,
 	};
 }
 

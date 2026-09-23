@@ -52,6 +52,7 @@ import {
 	runSignInFlow,
 	syncSelectionToCodex,
 } from "./login-oauth.js";
+import { constrainAutomaticSelection } from "../auth/account-access.js";
 import { persistAndSyncSelectedAccount } from "./persist-selected-account.js";
 import {
 	type RepairCommandDeps,
@@ -585,11 +586,24 @@ async function runAuthLoginFlow(
 				return 1;
 			}
 
-			const resolved = resolveAccountSelection(
+			let resolved = resolveAccountSelection(
 				tokenResult,
 				loginOptions.org,
 				expectedAccount?.accountId,
 			);
+			// The workspace list comes from token claims, which can name an
+			// organization these credentials hold no live authorization for. Codex
+			// CLI >= 0.156.0 checks that against wham/accounts/check and refuses
+			// every request with "selected workspace missing from routing
+			// discovery", so ask the same question before persisting the id.
+			// Only for an automatic selection: `--org` is explicit intent, and a
+			// targeted re-auth is identity-checked by persistAccountPool.
+			if (!loginOptions.org && !expectedAccount) {
+				resolved = await constrainAutomaticSelection(
+					resolved,
+					tokenResult.access,
+				);
+			}
 			let persistResult: Awaited<ReturnType<typeof persistAccountPool>>;
 			try {
 				persistResult = await persistAccountPool([resolved], false, {

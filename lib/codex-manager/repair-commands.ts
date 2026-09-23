@@ -19,6 +19,7 @@ import {
 } from "../quota-probe.js";
 import { isCodexUnavailableError } from "../errors.js";
 import { queuedRefresh } from "../refresh-queue.js";
+import type { ConstrainedSelection } from "../auth/account-access.js";
 import {
 	findMatchingAccountIndex,
 	getStoragePath,
@@ -135,6 +136,16 @@ export interface RepairCommandDeps {
 		account: AccountMetadataV3,
 		refreshedAccountId: string | undefined,
 	) => boolean;
+	/**
+	 * Migrates an org-sourced account id the backend no longer authorizes
+	 * (Codex CLI >= 0.156.0's `wham/accounts/check`); see
+	 * lib/auth/account-access.ts for the full contract. Live-only: called from
+	 * `fix --live`, where a network round trip already happens per account.
+	 */
+	reboundUnauthorizedAccountIdentity: (
+		account: AccountMetadataV3,
+		accessToken: string,
+	) => Promise<ConstrainedSelection | null>;
 }
 
 function printFixUsage(): void {
@@ -297,7 +308,8 @@ type FixOutcome =
 	| "healthy"
 	| "disabled-hard-failure"
 	| "warning-soft-failure"
-	| "already-disabled";
+	| "already-disabled"
+	| "rebound-unauthorized-workspace";
 
 interface FixAccountReport {
 	index: number;
@@ -321,7 +333,11 @@ function summarizeFixReports(
 	for (const report of reports) {
 		if (report.outcome === "healthy") healthy += 1;
 		else if (report.outcome === "disabled-hard-failure") disabled += 1;
-		else if (report.outcome === "warning-soft-failure") warnings += 1;
+		else if (
+			report.outcome === "warning-soft-failure" ||
+			report.outcome === "rebound-unauthorized-workspace"
+		)
+			warnings += 1;
 		else skipped += 1;
 	}
 	return { healthy, disabled, warnings, skipped };
@@ -1274,6 +1290,18 @@ export async function runFix(
 			let refreshAfterLiveProbeFailure = false;
 			if (options.live) {
 				const currentAccessToken = account.accessToken;
+				let reboundNote = "";
+				if (currentAccessToken) {
+					const rebound = await deps.reboundUnauthorizedAccountIdentity(
+						account,
+						currentAccessToken,
+					);
+					if (rebound) {
+						accountStorageChanged = true;
+						reboundNote =
+							"workspace was not authorized for these credentials; rebound to the account's default identity. ";
+					}
+				}
 				const probeAccountId = currentAccessToken
 					? account.accountId ?? extractAccountId(currentAccessToken)
 					: undefined;
@@ -1297,10 +1325,12 @@ export async function runFix(
 						reports.push({
 							index: i,
 							label,
-							outcome: "healthy",
-							message: display.showQuotaDetails
-								? `live session OK (${deps.formatCompactQuotaSnapshot(snapshot)})`
-								: "live session OK",
+							outcome: reboundNote ? "rebound-unauthorized-workspace" : "healthy",
+							message: `${reboundNote}${
+								display.showQuotaDetails
+									? `live session OK (${deps.formatCompactQuotaSnapshot(snapshot)})`
+									: "live session OK"
+							}`,
 						});
 						continue;
 					} catch {
@@ -1367,6 +1397,14 @@ export async function runFix(
 					) || quotaCacheChanged;
 			}
 			if (options.live) {
+				const rebound = await deps.reboundUnauthorizedAccountIdentity(
+					account,
+					refreshResult.access,
+				);
+				const reboundNote = rebound
+					? "workspace was not authorized for these credentials; rebound to the account's default identity. "
+					: "";
+				if (rebound) accountStorageChanged = true;
 				const probeAccountId = account.accountId ?? nextAccountId;
 				if (probeAccountId) {
 					try {
@@ -1388,10 +1426,12 @@ export async function runFix(
 						reports.push({
 							index: i,
 							label,
-							outcome: "healthy",
-							message: display.showQuotaDetails
-								? `refresh + live probe succeeded (${deps.formatCompactQuotaSnapshot(snapshot)})`
-								: "refresh + live probe succeeded",
+							outcome: reboundNote ? "rebound-unauthorized-workspace" : "healthy",
+							message: `${reboundNote}${
+								display.showQuotaDetails
+									? `refresh + live probe succeeded (${deps.formatCompactQuotaSnapshot(snapshot)})`
+									: "refresh + live probe succeeded"
+							}`,
 						});
 						continue;
 					} catch (error) {

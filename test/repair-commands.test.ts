@@ -151,6 +151,7 @@ function createDeps(
 			accountIdSource: refreshedAccountId ? "token" : storedAccountIdSource,
 		}),
 		applyTokenAccountIdentity: () => false,
+		reboundUnauthorizedAccountIdentity: async () => null,
 		...overrides,
 	};
 }
@@ -1585,5 +1586,194 @@ describe("repair-commands direct deps coverage", () => {
 		expect(payload.fix.actions).not.toContainEqual(
 			expect.objectContaining({ key: "codex-active-sync" }),
 		);
+	});
+
+	// specs/codex-multi-auth-account-access — migrates an org-sourced id
+	// wham/accounts/check no longer authorizes (Codex CLI >= 0.156.0), for an
+	// account whose access token is still fresh.
+	it("runFix rebinds an unauthorized org workspace on an already-valid token and still probes it live", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({
+			byAccountId: {},
+			byEmail: {},
+		});
+		storageMocks.loadAccounts.mockResolvedValueOnce({
+			version: 3,
+			accounts: [
+				{
+					email: "org@example.com",
+					refreshToken: "org-refresh",
+					accessToken: "org-access",
+					expiresAt: Date.now() + 60_000,
+					accountId: "org-team",
+					accountIdSource: "org" as const,
+					enabled: true,
+				},
+			],
+			activeIndex: 0,
+			activeIndexByFamily: {},
+		});
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValueOnce({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		let capturedAccountId: string | undefined;
+		let capturedToken: string | undefined;
+		const reboundUnauthorizedAccountIdentity = vi.fn(
+			async (
+				account: { accountId?: string; accountIdSource?: string },
+				accessToken: string,
+			) => {
+				// vi.fn() call records keep a reference, not a snapshot, so the
+				// pre-mutation accountId must be captured here rather than asserted
+				// on the recorded call args after this mock has already rewritten it.
+				capturedAccountId = account.accountId;
+				capturedToken = accessToken;
+				account.accountId = "personal-id";
+				account.accountIdSource = "token";
+				return { accountId: "personal-id", changed: true, rejected: "org-team" };
+			},
+		);
+		const consoleSpy = silenceConsole("log");
+
+		const exitCode = await runFix(
+			["--json", "--live"],
+			createDeps({
+				hasUsableAccessToken: () => true,
+				reboundUnauthorizedAccountIdentity,
+			}),
+		);
+
+		expect(exitCode).toBe(0);
+		expect(reboundUnauthorizedAccountIdentity).toHaveBeenCalledTimes(1);
+		expect(capturedAccountId).toBe("org-team");
+		expect(capturedToken).toBe("org-access");
+		// The corrected id, not the rejected org id, is what got probed.
+		expect(quotaProbeMocks.fetchCodexQuotaSnapshot).toHaveBeenCalledWith(
+			expect.objectContaining({ accountId: "personal-id" }),
+		);
+		expect(storageMocks.withAccountStorageTransaction).toHaveBeenCalledTimes(1);
+		const payload = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}")) as {
+			changed: boolean;
+			summary: { warnings: number };
+			reports: Array<{ outcome: string; message: string }>;
+		};
+		expect(payload.changed).toBe(true);
+		expect(payload.summary).toMatchObject({ warnings: 1, healthy: 0 });
+		expect(payload.reports).toHaveLength(1);
+		expect(payload.reports[0]).toMatchObject({
+			outcome: "rebound-unauthorized-workspace",
+		});
+		expect(payload.reports[0]?.message).toContain("not authorized");
+	});
+
+	// Same migration, taken on the refresh path (account.accountId was stale
+	// enough to need a refresh first) — the corrected id must still be the one
+	// probed and persisted, not the pre-refresh org id.
+	it("runFix rebinds an unauthorized org workspace after a refresh and probes the corrected id", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({
+			byAccountId: {},
+			byEmail: {},
+		});
+		storageMocks.loadAccounts.mockResolvedValueOnce({
+			version: 3,
+			accounts: [
+				{
+					email: "org@example.com",
+					refreshToken: "org-refresh",
+					accessToken: "org-access-stale",
+					expiresAt: 0,
+					accountId: "org-team",
+					accountIdSource: "org" as const,
+					enabled: true,
+				},
+			],
+			activeIndex: 0,
+			activeIndexByFamily: {},
+		});
+		// A leftover mockResolvedValueOnce from an earlier test can outlive
+		// clearAllMocks() (it clears call history, not the queued-once values), so
+		// reset before arming this test's own response.
+		refreshQueueMocks.queuedRefresh.mockReset();
+		refreshQueueMocks.queuedRefresh.mockResolvedValue({
+			type: "success",
+			access: "org-access-fresh",
+			refresh: "org-refresh-next",
+			expires: Date.now() + 120_000,
+			idToken: "org-id-token",
+		});
+		extractAccountEmailMock.mockReturnValue("org@example.com");
+		extractAccountIdMock.mockReturnValue("org-team");
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValueOnce({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		let capturedAccountId: string | undefined;
+		let capturedToken: string | undefined;
+		const reboundUnauthorizedAccountIdentity = vi.fn(
+			async (
+				account: { accountId?: string; accountIdSource?: string },
+				accessToken: string,
+			) => {
+				capturedAccountId = account.accountId;
+				capturedToken = accessToken;
+				account.accountId = "personal-id";
+				account.accountIdSource = "token";
+				return { accountId: "personal-id", changed: true, rejected: "org-team" };
+			},
+		);
+		const consoleSpy = silenceConsole("log");
+
+		const exitCode = await runFix(
+			["--json", "--live"],
+			createDeps({ hasUsableAccessToken: () => false, reboundUnauthorizedAccountIdentity }),
+		);
+
+		expect(exitCode).toBe(0);
+		expect(reboundUnauthorizedAccountIdentity).toHaveBeenCalledTimes(1);
+		expect(capturedAccountId).toBe("org-team");
+		expect(capturedToken).toBe("org-access-fresh");
+		expect(quotaProbeMocks.fetchCodexQuotaSnapshot).toHaveBeenCalledWith(
+			expect.objectContaining({ accountId: "personal-id" }),
+		);
+		const payload = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}")) as {
+			reports: Array<{ outcome: string; message: string }>;
+		};
+		expect(payload.reports[0]).toMatchObject({
+			outcome: "rebound-unauthorized-workspace",
+		});
+	});
+
+	// Live-only contract: this migration makes a network call, so it must not
+	// run on a plain `fix` without `--live`.
+	it("runFix does not check workspace authorization without --live", async () => {
+		storageMocks.loadAccounts.mockResolvedValueOnce({
+			version: 3,
+			accounts: [
+				{
+					email: "org@example.com",
+					refreshToken: "org-refresh",
+					accessToken: "org-access",
+					expiresAt: Date.now() + 60_000,
+					accountId: "org-team",
+					accountIdSource: "org" as const,
+					enabled: true,
+				},
+			],
+			activeIndex: 0,
+			activeIndexByFamily: {},
+		});
+		const reboundUnauthorizedAccountIdentity = vi.fn();
+		silenceConsole("log");
+
+		await runFix(
+			["--json"],
+			createDeps({ hasUsableAccessToken: () => true, reboundUnauthorizedAccountIdentity }),
+		);
+
+		expect(reboundUnauthorizedAccountIdentity).not.toHaveBeenCalled();
 	});
 });

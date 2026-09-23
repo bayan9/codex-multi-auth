@@ -200,7 +200,7 @@ fail with exit code 1 without reading account storage or quota cache.
 | `--json` | limits, verify-flagged, verify, why-selected, best, forecast, report, usage, budget, models, monitor, integrations, fix, doctor, config explain, debug bundle, history | Print machine-readable output |
 | `--csv` | usage | Print or write CSV bucket output |
 | `--explain` | forecast, report | Include reasoning details (forecast text/JSON, report text) |
-| `--live` | best, forecast, report, fix | Use live probe before decisions/output |
+| `--live` | best, forecast, report, fix | Use live probe before decisions/output. On `fix`, this also rebinds an org-sourced account id that the backend's `wham/accounts/check` no longer authorizes (see the workspace-selection note above) |
 | `--no-runtime-overlay` | forecast | Score from stored account state only; skip runtime observability overlay |
 | `--max-accounts <n>` | report | Cap how many accounts a live report walk inspects |
 | `--max-probes <n>` | report | Cap live probes during report |
@@ -326,6 +326,26 @@ With only an account index, prints the workspaces that account can rotate
 between (for example a personal Plus seat and a business/team seat under the
 same email, issue #491). With a workspace index too, persists that workspace
 as the account's active selection.
+
+> Authorization vs membership: an account's tracked workspaces come from the
+> token's own claims, which advertise **membership**. Codex CLI 0.156.0 and newer
+> additionally checks `GET /backend-api/wham/accounts/check` before every request
+> and refuses to run when the selected account is absent from that answer
+> (`selected workspace missing from routing discovery`). A fresh `login` without
+> `--org` now asks the same question and, when the automatically chosen workspace
+> is not authorized, falls back to the account the backend reports as default and
+> prints a warning. The check fails open: any error leaves the selection as-is.
+> `login --org` and `login --account` are left untouched — the first is explicit
+> intent, the second is identity-checked before the write.
+>
+> **Already-saved accounts**: `login` only guards new selections. An org-sourced
+> id saved before this check existed (or set by `codex-multi-auth workspace
+> <account> <workspace>`, which has no live check of its own) is migrated by
+> `codex-multi-auth fix --live` instead: it runs the same authorization check
+> per account and, when the saved id is not authorized, rebinds it to the
+> backend's default and reports `rebound-unauthorized-workspace` for that
+> account. `fix` without `--live` does not check this (it makes no network
+> calls).
 
 ---
 

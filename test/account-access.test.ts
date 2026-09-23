@@ -1,0 +1,319 @@
+import { describe, it, expect, vi } from "vitest";
+import {
+	parseAuthorizedAccounts,
+	constrainSelectionToAuthorized,
+	fetchAuthorizedAccounts,
+	applyAuthorizedAccountConstraint,
+	reboundUnauthorizedAccountIdentity,
+} from "../lib/auth/account-access.js";
+
+/**
+ * Codex CLI >= 0.156.0 validates the account it is told to act as against
+ * `GET /backend-api/wham/accounts/check` before sending a request. An id that is
+ * absent from that response fails every call with "selected workspace missing
+ * from routing discovery". These tests pin the contract of asking the same
+ * question before we persist an account id.
+ */
+describe("parseAuthorizedAccounts", () => {
+	it("reads the ids and the default from a wham/accounts/check payload", () => {
+		const parsed = parseAuthorizedAccounts({
+			account_ordering: ["65f1cc7a-personal"],
+			accounts: [{ id: "65f1cc7a-personal", structure: "personal" }],
+			default_account_id: "65f1cc7a-personal",
+		});
+
+		expect(parsed).toEqual({
+			accountIds: ["65f1cc7a-personal"],
+			defaultAccountId: "65f1cc7a-personal",
+		});
+	});
+
+	it("keeps every listed account, not just the default", () => {
+		const parsed = parseAuthorizedAccounts({
+			accounts: [{ id: "personal-id" }, { id: "org-team" }],
+			default_account_id: "personal-id",
+		});
+
+		expect(parsed?.accountIds).toEqual(["personal-id", "org-team"]);
+	});
+
+	it("returns null for a payload with no usable account list", () => {
+		expect(parseAuthorizedAccounts({ accounts: [] })).toBeNull();
+		expect(parseAuthorizedAccounts({})).toBeNull();
+		expect(parseAuthorizedAccounts(null)).toBeNull();
+		expect(parseAuthorizedAccounts("nope")).toBeNull();
+	});
+
+	it("ignores entries without a usable id", () => {
+		const parsed = parseAuthorizedAccounts({
+			accounts: [{ id: "" }, { name: "no id" }, { id: "good" }],
+		});
+
+		expect(parsed?.accountIds).toEqual(["good"]);
+	});
+});
+
+describe("constrainSelectionToAuthorized", () => {
+	const authorized = {
+		accountIds: ["personal-id"],
+		defaultAccountId: "personal-id",
+	};
+
+	it("replaces an account id the server does not authorize", () => {
+		const result = constrainSelectionToAuthorized("org-team", authorized);
+
+		expect(result).toEqual({
+			accountId: "personal-id",
+			changed: true,
+			rejected: "org-team",
+		});
+	});
+
+	it("leaves an authorized account id untouched", () => {
+		const result = constrainSelectionToAuthorized("personal-id", authorized);
+
+		expect(result).toEqual({ accountId: "personal-id", changed: false });
+	});
+
+	// Never make login worse than before: with nothing to fall back to we keep
+	// the caller's own choice rather than writing an empty account id.
+	it("keeps the original id when the response offers no default", () => {
+		const result = constrainSelectionToAuthorized("org-team", {
+			accountIds: ["personal-id"],
+		});
+
+		expect(result).toEqual({ accountId: "org-team", changed: false });
+	});
+
+	it("keeps the original id when authorization could not be determined", () => {
+		const result = constrainSelectionToAuthorized("org-team", null);
+
+		expect(result).toEqual({ accountId: "org-team", changed: false });
+	});
+});
+
+describe("fetchAuthorizedAccounts", () => {
+	it("asks wham/accounts/check with the access token as bearer", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response(
+				JSON.stringify({
+					accounts: [{ id: "personal-id" }],
+					default_account_id: "personal-id",
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			),
+		);
+
+		const result = await fetchAuthorizedAccounts("token-abc", {
+			fetch: fetchMock,
+		});
+
+		expect(result).toEqual({
+			accountIds: ["personal-id"],
+			defaultAccountId: "personal-id",
+		});
+		const [url, init] = fetchMock.mock.calls[0] ?? [];
+		expect(String(url)).toContain("/wham/accounts/check");
+		const headers = new Headers(
+			(init as RequestInit | undefined)?.headers ?? {},
+		);
+		expect(headers.get("authorization")).toBe("Bearer token-abc");
+	});
+
+	// Fail open: a login must not break because this advisory check was
+	// unreachable, rate limited, or rejected.
+	it("returns null instead of throwing on a non-ok response", async () => {
+		const fetchMock = vi.fn(async () => new Response("nope", { status: 401 }));
+
+		await expect(
+			fetchAuthorizedAccounts("token-abc", { fetch: fetchMock }),
+		).resolves.toBeNull();
+	});
+
+	it("returns null instead of throwing on a network error", async () => {
+		const fetchMock = vi.fn(async () => {
+			throw new Error("offline");
+		});
+
+		await expect(
+			fetchAuthorizedAccounts("token-abc", { fetch: fetchMock }),
+		).resolves.toBeNull();
+	});
+
+	it("returns null on a malformed body", async () => {
+		const fetchMock = vi.fn(
+			async () => new Response("<html>", { status: 200 }),
+		);
+
+		await expect(
+			fetchAuthorizedAccounts("token-abc", { fetch: fetchMock }),
+		).resolves.toBeNull();
+	});
+});
+
+describe("applyAuthorizedAccountConstraint", () => {
+	const authorized = {
+		accountIds: ["personal-id"],
+		defaultAccountId: "personal-id",
+	};
+
+	it("rewrites an unauthorized selection and marks it as token-derived", () => {
+		const { selection, result } = applyAuthorizedAccountConstraint(
+			{ accountIdOverride: "org-team", accountIdSource: "org" as const },
+			authorized,
+		);
+
+		expect(result?.changed).toBe(true);
+		expect(selection.accountIdOverride).toBe("personal-id");
+		// The backend's default IS the account these credentials are, so it must
+		// auto-follow later token refreshes instead of staying pinned like an
+		// explicit org/manual choice would.
+		expect(selection.accountIdSource).toBe("token");
+	});
+
+	it("leaves an authorized selection byte-identical", () => {
+		const input = {
+			accountIdOverride: "personal-id",
+			accountIdSource: "org" as const,
+		};
+		const { selection, result } = applyAuthorizedAccountConstraint(
+			input,
+			authorized,
+		);
+
+		expect(result?.changed).toBe(false);
+		expect(selection).toEqual(input);
+	});
+
+	it("is a no-op when the selection carries no account id", () => {
+		const { selection, result } = applyAuthorizedAccountConstraint(
+			{},
+			authorized,
+		);
+
+		expect(result).toBeNull();
+		expect(selection).toEqual({});
+	});
+
+	it("is a no-op when authorization is unknown", () => {
+		const input = { accountIdOverride: "org-team" };
+		const { selection, result } = applyAuthorizedAccountConstraint(input, null);
+
+		expect(result).toBeNull();
+		expect(selection).toEqual(input);
+	});
+});
+
+describe("reboundUnauthorizedAccountIdentity", () => {
+	// This is the migration path for accounts saved BEFORE this guard existed
+	// (or added by `codex-multi-auth workspace <account> <workspace>`, which has
+	// no live check of its own). Scoped to accountIdSource === "org": "token" /
+	// "id_token" sources already auto-follow via applyTokenAccountIdentity, and a
+	// "manual" `--org` binding is explicit user intent this must not override.
+	it("rewrites an org-sourced id the backend does not authorize", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response(
+				JSON.stringify({
+					accounts: [{ id: "personal-id" }],
+					default_account_id: "personal-id",
+				}),
+				{ status: 200 },
+			),
+		);
+		const account = { accountId: "org-team", accountIdSource: "org" as const };
+
+		const result = await reboundUnauthorizedAccountIdentity(
+			account,
+			"token-abc",
+			{ fetch: fetchMock },
+		);
+
+		expect(result).toEqual({
+			accountId: "personal-id",
+			changed: true,
+			rejected: "org-team",
+		});
+		expect(account).toEqual({
+			accountId: "personal-id",
+			accountIdSource: "token",
+		});
+	});
+
+	it("leaves a token-sourced id alone — that source already auto-follows the token", async () => {
+		const fetchMock = vi.fn();
+		const account = { accountId: "org-team", accountIdSource: "token" as const };
+
+		const result = await reboundUnauthorizedAccountIdentity(
+			account,
+			"token-abc",
+			{ fetch: fetchMock },
+		);
+
+		expect(result).toBeNull();
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(account.accountId).toBe("org-team");
+	});
+
+	it("leaves a manual --org binding alone — that is explicit user intent", async () => {
+		const fetchMock = vi.fn();
+		const account = { accountId: "org-team", accountIdSource: "manual" as const };
+
+		const result = await reboundUnauthorizedAccountIdentity(
+			account,
+			"token-abc",
+			{ fetch: fetchMock },
+		);
+
+		expect(result).toBeNull();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("is a no-op when the org id is already authorized", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response(
+				JSON.stringify({ accounts: [{ id: "org-team" }] }),
+				{ status: 200 },
+			),
+		);
+		const account = { accountId: "org-team", accountIdSource: "org" as const };
+
+		const result = await reboundUnauthorizedAccountIdentity(
+			account,
+			"token-abc",
+			{ fetch: fetchMock },
+		);
+
+		expect(result).toBeNull();
+		expect(account.accountId).toBe("org-team");
+	});
+
+	it("leaves the account untouched when the check itself fails (fail open)", async () => {
+		const fetchMock = vi.fn(async () => {
+			throw new Error("offline");
+		});
+		const account = { accountId: "org-team", accountIdSource: "org" as const };
+
+		const result = await reboundUnauthorizedAccountIdentity(
+			account,
+			"token-abc",
+			{ fetch: fetchMock },
+		);
+
+		expect(result).toBeNull();
+		expect(account.accountId).toBe("org-team");
+	});
+
+	it("is a no-op when the account has no id to check", async () => {
+		const fetchMock = vi.fn();
+		const account = { accountIdSource: "org" as const };
+
+		const result = await reboundUnauthorizedAccountIdentity(
+			account,
+			"token-abc",
+			{ fetch: fetchMock },
+		);
+
+		expect(result).toBeNull();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
