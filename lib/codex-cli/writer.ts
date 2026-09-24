@@ -13,6 +13,7 @@ import {
 	makeAccountFingerprint,
 } from "./observability.js";
 import { tempPathFor } from "../temp-path.js";
+import { extractAccountId } from "../auth/token-utils.js";
 
 const log = createLogger("codex-cli-writer");
 let lastCodexCliSelectionWriteAt = 0;
@@ -450,8 +451,15 @@ async function writeCodexAuthState(
 	}
 	nextTokens.access_token = accessToken;
 	nextTokens.refresh_token = refreshToken;
-	if (selection.accountId?.trim()) {
-		nextTokens.account_id = selection.accountId.trim();
+	const selectedAccountId = selection.accountId?.trim();
+	if (selectedAccountId) {
+		// Codex CLI >= 0.156 checks tokens.account_id against the ChatGPT
+		// workspaces of the token (wham/accounts/check). An OpenAI platform org
+		// id ("org-...") is never one of them, so fall back to the token's own
+		// chatgpt_account_id claim instead of writing an id Codex rejects.
+		nextTokens.account_id = selectedAccountId.startsWith("org-")
+			? (extractAccountId(accessToken) ?? selectedAccountId)
+			: selectedAccountId;
 	}
 	const selectedIdToken = readTrimmedString(selection.idToken);
 	const existingIdToken = readTrimmedString(existingTokens.id_token);

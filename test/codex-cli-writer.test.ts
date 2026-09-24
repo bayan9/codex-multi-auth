@@ -74,6 +74,33 @@ describe("codex-cli writer", () => {
     );
   });
 
+  it("writes the token's chatgpt_account_id instead of an org id (#700)", async () => {
+    const jwt = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const accessToken = jwt({
+      "https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
+    });
+
+    await setCodexCliActiveSelection({
+      accountId: "org-AbC123",
+      accessToken,
+      refreshToken: "r",
+    });
+    let written = JSON.parse(await readFile(authPath, "utf-8")) as {
+      tokens?: { account_id?: string };
+    };
+    expect(written.tokens?.account_id).toBe("ws-uuid-1");
+
+    // explicit non-org workspace selections are preserved
+    await setCodexCliActiveSelection({
+      accountId: "team-ws-uuid",
+      accessToken,
+      refreshToken: "r",
+    });
+    written = JSON.parse(await readFile(authPath, "utf-8"));
+    expect(written.tokens?.account_id).toBe("team-ws-uuid");
+  });
+
   it("creates auth.json when missing and selection includes tokens", async () => {
     const updated = await setCodexCliActiveSelection({
       accountId: "acc_new",
