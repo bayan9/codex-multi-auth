@@ -456,10 +456,17 @@ async function writeCodexAuthState(
 		// Codex CLI >= 0.156 checks tokens.account_id against the ChatGPT
 		// workspaces of the token (wham/accounts/check). An OpenAI platform org
 		// id ("org-...") is never one of them, so fall back to the token's own
-		// chatgpt_account_id claim instead of writing an id Codex rejects.
-		nextTokens.account_id = selectedAccountId.startsWith("org-")
-			? (extractAccountId(accessToken) ?? selectedAccountId)
+		// chatgpt_account_id claim instead of writing an id Codex rejects. With no
+		// claim at all, drop the field so Codex derives it from the tokens.
+		const accountId = selectedAccountId.startsWith("org-")
+			? (extractAccountId(accessToken) ??
+				extractAccountId(readTrimmedString(selection.idToken)))
 			: selectedAccountId;
+		if (accountId) {
+			nextTokens.account_id = accountId;
+		} else {
+			delete nextTokens.account_id;
+		}
 	}
 	const selectedIdToken = readTrimmedString(selection.idToken);
 	const existingIdToken = readTrimmedString(existingTokens.id_token);

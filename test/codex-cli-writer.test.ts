@@ -99,6 +99,15 @@ describe("codex-cli writer", () => {
     });
     written = JSON.parse(await readFile(authPath, "utf-8"));
     expect(written.tokens?.account_id).toBe("team-ws-uuid");
+
+    // no claim in either token: never write the org id, drop the field
+    await setCodexCliActiveSelection({
+      accountId: "org-AbC123",
+      accessToken: "opaque-access",
+      refreshToken: "r",
+    });
+    written = JSON.parse(await readFile(authPath, "utf-8"));
+    expect(written.tokens?.account_id).toBeUndefined();
   });
 
   it("creates auth.json when missing and selection includes tokens", async () => {
