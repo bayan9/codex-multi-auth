@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { getCodexMultiAuthDir } from "../runtime-paths.js";
 import { tempPathFor } from "../temp-path.js";
 import { withRetry } from "../fs-retry.js";
+import { withFileTransactionLock } from "../storage/file-lock.js";
 import { mapWithConcurrency } from "../concurrency.js";
 
 export function inferenceAccountKey(account: Parameters<typeof getAccountIdentityKey>[0]): string {
@@ -31,15 +32,20 @@ async function readTimestamp(key: string): Promise<number | null> {
 /** Separate from shared diagnostic snapshots: only inference dispatches write these files. */
 export async function saveInferenceRequestTime(key: string, at: number): Promise<void> {
  if(!validKey(key) || !Number.isFinite(at) || at<=0) return;
- const path=activityPath(key), temp=tempPathFor(path);
+ const path=activityPath(key);
  await fs.mkdir(join(getCodexMultiAuthDir(),"inference-activity"),{recursive:true,mode:0o700});
- const timestamp=Math.max(at,await readTimestamp(key) ?? 0);
- try {
-  await fs.writeFile(temp,JSON.stringify(timestamp)+"\n",{mode:0o600,flag:"wx"});
-  await withRetry(()=>fs.rename(temp,path),{maxAttempts:6,backoffMs:25});
- } finally {
-  await withRetry(()=>fs.unlink(temp),{maxAttempts:6,backoffMs:25}).catch(error=>{if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;});
- }
+ // Read-max-write under the cross-process lock, so a concurrent writer (app
+ // router and a wrapper proxy) cannot replace a newer time with an older one.
+ await withFileTransactionLock(path, async () => {
+  const temp=tempPathFor(path);
+  const timestamp=Math.max(at,await readTimestamp(key) ?? 0);
+  try {
+   await fs.writeFile(temp,JSON.stringify(timestamp)+"\n",{mode:0o600,flag:"wx"});
+   await withRetry(()=>fs.rename(temp,path),{maxAttempts:6,backoffMs:25});
+  } finally {
+   await withRetry(()=>fs.unlink(temp),{maxAttempts:6,backoffMs:25}).catch(error=>{if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;});
+  }
+ });
 }
 /**
  * Per-request dispatches only need the latest time per key on disk. Keep the

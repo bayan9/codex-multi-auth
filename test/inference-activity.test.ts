@@ -47,3 +47,27 @@ it("coalesces per-request inference times into one debounced write per key",asyn
   expect(save).toHaveBeenCalledTimes(3);
  } finally {vi.useRealTimers();}
 });
+
+it("keeps the newest time when two writers of the same key interleave",async()=>{
+ const {readFileSync}=await import("node:fs");
+ const key=`sha256:${"e".repeat(64)}`;
+ const gate=()=>{let open!:()=>void;const promise=new Promise<void>(r=>{open=r;});return {open,wait:(ms:number)=>Promise.race([promise,new Promise<void>(r=>setTimeout(r,ms))])};};
+ const olderWritten=gate(),newerRenamed=gate();
+ const realRename=fs.rename.bind(fs),realWrite=fs.writeFile.bind(fs);
+ const write=vi.spyOn(fs,"writeFile").mockImplementation(async(...args:Parameters<typeof fs.writeFile>)=>{
+  await realWrite(...args);
+  if(String(args[1]).trim()==="1500")olderWritten.open();
+ });
+ const rename=vi.spyOn(fs,"rename").mockImplementation(async(from,to)=>{
+  let value="";try{value=readFileSync(from,"utf8").trim();}catch{/* lock directories */}
+  // Without a lock both writers read before either renames; force the newer rename first.
+  if(value==="2000")await olderWritten.wait(300);
+  if(value==="1500")await newerRenamed.wait(300);
+  await realRename(from,to);
+  if(value==="2000")newerRenamed.open();
+ });
+ try {
+  await Promise.all([saveInferenceRequestTime(key,2000),saveInferenceRequestTime(key,1500)]);
+ } finally {write.mockRestore();rename.mockRestore();}
+ expect((await loadInferenceRequestTimes([key]))[key]).toBe(2000);
+});
