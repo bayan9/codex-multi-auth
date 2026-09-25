@@ -2108,6 +2108,26 @@ describe("AccountManager", () => {
 			expect(account.accountId).toBe("matching-account-id");
 		});
 
+		it.each([
+			["ELOCKED", "Storage is busy with another live writer; retry shortly."],
+			["EACCES", "Failed to save accounts: access denied"],
+		])("keeps the rotated credential live when the storage transaction fails with %s", async (code, message) => {
+			const { withAccountStorageTransaction } = await import("../lib/storage.js");
+			// ELOCKED: another writer held the file lock past its wait; EACCES: the
+			// Windows temp write still failed after retries (wrapped StorageError).
+			vi.mocked(withAccountStorageTransaction).mockRejectedValueOnce(Object.assign(new Error(message), { code }));
+			const now = Date.now();
+			const manager = new AccountManager(undefined, {
+				version: 3 as const,
+				activeIndex: 0,
+				accounts: [{ refreshToken: "old-refresh", accessToken: "old-access", expiresAt: now, addedAt: now, lastUsed: now }],
+			} as any);
+			const account = manager.getAccountByIndex(0)!;
+			const committed = await manager.commitRefreshedAuth(account, { type: "oauth", access: "header.payload.signature", refresh: "new-refresh", expires: now + 3_600_000 });
+			expect(committed).toBe(account);
+			expect(account.refreshToken).toBe("new-refresh");
+		});
+
 		it("keeps the rotated credential live when the storage write stays locked", async () => {
 			const { withAccountStorageTransaction } = await import(
 				"../lib/storage.js"
