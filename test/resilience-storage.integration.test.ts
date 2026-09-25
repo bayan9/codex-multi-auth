@@ -125,6 +125,9 @@ it("rescues a refreshed legacy record after matched fallback token replacement",
  const disk=(await loadAccounts())!;disk.accounts[0]!.accountLabel="External";await saveAccounts(disk);
  await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:"oauth",access,refresh:"fixture-rotated",expires:Date.now()+3600000});
  expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated");
+ await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:"oauth",access,refresh:"fixture-rotated-again",expires:Date.now()+7200000});
+ expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated-again");
+ await expect(manager.saveToDisk()).rejects.toMatchObject({code:"ESTALE"});
 });
 it.each(['removed','disabled','invalidated','replaced'])("never rescues credentials over a %s disk record",async kind=>{
  await setup();const initial=(await loadAccounts())!;initial.accounts.push({recordId:'other',accountId:'other',refreshToken:'fixture-other',addedAt:2,lastUsed:2,accountLabel:'Before'});await saveAccounts(initial);
