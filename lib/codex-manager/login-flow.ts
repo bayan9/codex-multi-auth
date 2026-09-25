@@ -33,7 +33,7 @@ import {
 	printUsage,
 } from "./help.js";
 import { runActionPanel } from "./login-action-panel.js";
-import { clearCredentialSidecars } from "../storage/credential-sidecars.js";
+import { clearAccountsAndCredentialSidecars } from "../storage/credential-sidecars.js";
 import {
 	handleManageAction,
 	promptBackupRestoreMode,
@@ -115,8 +115,7 @@ async function drainPendingMenuQuotaRefresh(
 const log = createLogger("codex-manager");
 
 async function clearAccountsAndReset(): Promise<void> {
-	await clearAccounts();
-	await clearCredentialSidecars();
+	await clearAccountsAndCredentialSidecars(clearAccounts);
 }
 
 /** @internal */

@@ -52,7 +52,13 @@ vi.mock("../lib/storage.js", async (importOriginal) => {
 	};
 });
 
-vi.mock("../lib/storage/credential-sidecars.js", () => ({ clearCredentialSidecars: clearCredentialSidecarsMock }));
+vi.mock("../lib/storage/credential-sidecars.js", () => ({
+	clearCredentialSidecars: clearCredentialSidecarsMock,
+	clearAccountsAndCredentialSidecars: async (clearPool: () => Promise<void>) => {
+		await clearPool();
+		await clearCredentialSidecarsMock();
+	},
+}));
 
 vi.mock("../lib/cli.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../lib/cli.js")>();

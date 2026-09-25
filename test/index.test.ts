@@ -387,7 +387,13 @@ const saveAccountsMock = vi.fn(
 	},
 );
 const clearCredentialSidecarsMock = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("../lib/storage/credential-sidecars.js", () => ({ clearCredentialSidecars: clearCredentialSidecarsMock }));
+vi.mock("../lib/storage/credential-sidecars.js", () => ({
+	clearCredentialSidecars: clearCredentialSidecarsMock,
+	clearAccountsAndCredentialSidecars: async (clearPool: () => Promise<void>) => {
+		await clearPool();
+		await clearCredentialSidecarsMock();
+	},
+}));
 const clearAccountsMock = vi.fn(async () => {
 	mockStorage.accounts = [];
 	mockStorage.activeIndex = 0;

@@ -86,7 +86,7 @@ import {
 	runVerifyFlagged as runRepairVerifyFlagged,
 } from "./codex-manager/repair-commands.js";
 import { runUninstallCommand } from "./codex-manager/commands/uninstall.js";
-import { clearCredentialSidecars } from "./storage/credential-sidecars.js";
+import { clearAccountsAndCredentialSidecars } from "./storage/credential-sidecars.js";
 import { runForecastCommand } from "./codex-manager/commands/forecast.js";
 import { runInitConfigCommand } from "./codex-manager/commands/init-config.js";
 import { runReportCommand } from "./codex-manager/commands/report.js";
@@ -712,10 +712,7 @@ const CLI_COMMAND_HANDLERS: ReadonlyMap<string, CliCommandHandler> = new Map<
 	["fix", (rest) => runRepairFix(rest, createRepairCommandDeps())],
 	["doctor", (rest) => runRepairDoctor(rest, createRepairCommandDeps())],
 	["uninstall", (rest) => runUninstallCommand(rest, {
-		clearAccounts: async () => {
-			await clearAccounts();
-			await clearCredentialSidecars();
-		},
+		clearAccounts: () => clearAccountsAndCredentialSidecars(clearAccounts),
 	})],
 	[
 		"config",

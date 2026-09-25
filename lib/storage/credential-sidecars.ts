@@ -37,3 +37,22 @@ export async function clearCredentialSidecars(): Promise<void> {
 	const activity = join(dir, "inference-activity");
 	await withRetry(() => fs.rm(activity, { recursive: true, force: true }), retry);
 }
+
+/**
+ * Clear the account pool and the credential sidecars. The sidecars are removed
+ * even when the pool clear fails (e.g. a lasting Windows EBUSY), so raw API
+ * keys never survive a reset; the first failure is rethrown afterwards.
+ */
+export async function clearAccountsAndCredentialSidecars(clearPool: () => Promise<void>): Promise<void> {
+	let failure: unknown;
+	let failed = false;
+	for (const step of [clearPool, clearCredentialSidecars]) {
+		try {
+			await step();
+		} catch (error) {
+			if (!failed) failure = error;
+			failed = true;
+		}
+	}
+	if (failed) throw failure;
+}
