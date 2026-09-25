@@ -679,8 +679,12 @@ model, reasoning, and speed combination. Within a chosen account the selected
 workspace is preferred, followed by its stored binding and other enabled
 workspaces. Workspace choice is per request and does not change the desktop login
 or saved selection. Explicit account constraints and API/ZDR pool boundaries
-remain enforced. Catalogs refresh on demand after 60 seconds (failed discovery
-retries after 5 seconds), using the native client's version.
+remain enforced. Catalogs refresh on demand after 5 minutes (failed discovery
+retries after 5 seconds), using the native client's version. A throttled catalog
+honors `Retry-After`, capped at 15 minutes; `check capabilities` retries at once.
+Discovery outages never block inference: a workspace whose catalog has not been
+fetched successfully is unknown and stays routable, and once one fetch succeeds
+that last successful catalog decides, whatever its age.
 
 `check` refreshes the running native proxy and reports each credential/workspace
 separately. It labels the stored binding and preferred workspace, and highlights

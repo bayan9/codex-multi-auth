@@ -4426,7 +4426,7 @@ describe("native mode authenticates before touching account storage", () => {
 });
 
 describe("native catalog outages", () => {
-	it("reports a retryable discovery outage without sending inference to an unverified workspace", async () => {
+	it("routes to an account whose catalog is unknown instead of refusing the model", async () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
 		const { calls, fetchImpl } = createRecordingFetch(call => {
 			if (call.url.includes("/models")) {
@@ -4438,10 +4438,27 @@ describe("native catalog outages", () => {
 		});
 		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true } });
 		const response = await postResponses(proxy, { model: "model-a", input: "hello", stream: true });
-		expect(response.status).toBe(503);
-		expect((await response.json()).error.code).toBe("account_catalog_refresh_pending");
+		expect(response.status).toBe(200); await response.text();
 		const inference = calls.filter(c => c.url.includes("/responses"));
-		expect(inference).toHaveLength(0);
+		expect(inference.length).toBeGreaterThan(0);
+		expect(inference.every(c => c.headers.get("chatgpt-account-id") === "acc_1")).toBe(true);
+	});
+	it("keeps excluding by the last successful catalog after a later refresh fails", async () => {
+		let now = Date.now(); let throttled = false;
+		const accountManager = new AccountManager(undefined, createStorage(now, 1));
+		const { calls, fetchImpl } = createRecordingFetch(call => {
+			if (call.url.includes("/models")) return throttled ? new Response("busy", { status: 429 }) : Response.json({ models: [{ slug: "model-a" }] });
+			return textEventStream();
+		});
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, now: () => now } });
+		const first = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(first.status).toBe(200); await first.text();
+		throttled = true; now += 20 * 60_000;
+		const known = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(known.status).toBe(200); await known.text();
+		const absent = await postResponses(proxy, { model: "model-b", input: "hello" });
+		expect(absent.status).toBe(403); await absent.text();
+		expect(calls.filter(c => c.url.endsWith("/responses"))).toHaveLength(2);
 	});
 	it("checks every eligible account catalog concurrently", async () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now(), 3));
@@ -4552,9 +4569,36 @@ describe("catalog review concurrency and backoff",()=>{
    return textEventStream();
   });
   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
-  for(const advance of [0,6000,6000]){now+=advance;const response=await postResponses(proxy,{model:'model-test',input:'test'});expect(response.status).toBe(503);expect((await response.json()).error.code).toBe("account_catalog_refresh_pending");}
+  for(const advance of [0,6000,6000]){now+=advance;const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();expect(response.status).toBe(200);}
   expect(reads).toBe(1);
   now+=120000;const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();expect(reads).toBe(2);
+ });
+ it.each([["86400"],[new Date(Date.now()+30*24*3600_000).toUTCString()]])("caps a catalog Retry-After of %s at fifteen minutes",async retryAfter=>{
+  let now=Date.now(),reads=0;
+  const manager=new AccountManager(undefined,createStorage(now,1));
+  const {fetchImpl}=createRecordingFetch(call=>{
+   if(call.url.includes('/models')){reads++;return new Response('busy',{status:429,headers:{'retry-after':retryAfter}});}
+   return textEventStream();
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  const first=await postResponses(proxy,{model:'model-test',input:'test'});await first.text();expect(first.status).toBe(200);
+  expect(reads).toBe(1);
+  now+=15*60_000+1;
+  const later=await postResponses(proxy,{model:'model-test',input:'test'});await later.text();expect(later.status).toBe(200);
+  expect(reads).toBe(2);
+ });
+ it("lets an explicit capability refresh bypass an earlier catalog backoff",async()=>{
+  let now=Date.now(),reads=0;
+  const manager=new AccountManager(undefined,createStorage(now,1));
+  const {fetchImpl}=createRecordingFetch(call=>{
+   if(call.url.includes('/models')){reads++;return reads===1?new Response('busy',{status:429,headers:{'retry-after':'600'}}):Response.json({models:[{slug:'model-test'}]});}
+   return textEventStream();
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  const first=await postResponses(proxy,{model:'model-test',input:'test'});await first.text();expect(reads).toBe(1);
+  const refreshed=await getModels(proxy,"/models?refresh_capabilities=1");
+  expect(refreshed.status).toBe(200);expect((await refreshed.json()).models.map((m:{slug:string})=>m.slug)).toEqual(['model-test']);
+  expect(reads).toBe(2);
  });
  it("still recovers stale state when another account lacks the model",async()=>{
   const storage=createStorage(Date.now(),2),manager=new AccountManager(undefined,storage);
@@ -5184,7 +5228,7 @@ it("requires fresh eligibility when stale recovery reorders the account inventor
 
 
 describe("native catalog outage with reasoning settings", () => {
-	it("returns a retryable availability error when no workspace catalog is known", async () => {
+	it("routes an effort-bearing request while the catalog is rate limited", async () => {
 		const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
 		const { fetchImpl, calls } = createRecordingFetch(call => call.url.includes("/models")
 			? new Response("busy", { status: 429, headers: { "retry-after": "120" } })
@@ -5192,9 +5236,28 @@ describe("native catalog outage with reasoning settings", () => {
 		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
 		const response = await postResponses(proxy, { model: "model-test", reasoning: { effort: "high" }, service_tier: "priority", input: "test" });
 		await response.text();
-		expect(response.status).toBe(503);
-		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(false);
+		expect(response.status).toBe(200);
+		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(true);
 	});
+});
+
+describe("effort-bearing requests during catalog outages", () => {
+ it("forwards unchanged reasoning settings while discovery is throttled", async () => {
+  let now = Date.now();
+  const manager = new AccountManager(undefined, createStorage(now,1));
+  const {fetchImpl,calls} = createRecordingFetch(call => call.url.includes("/models")
+   ? new Response("busy",{status:429,headers:{"retry-after":"120"}})
+   : textEventStream());
+  const proxy = await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  for (const advance of [0,6000,6000]) {
+   now += advance;
+   const response = await postResponses(proxy,{model:"model-test",reasoning:{effort:"high"},service_tier:"priority",input:"test"});
+   await response.text();expect(response.status).toBe(200);
+  }
+  expect(calls.filter(call=>call.url.includes("/models"))).toHaveLength(1);
+  expect(calls.filter(call=>call.url.endsWith("/responses"))).toHaveLength(3);
+  for (const call of calls.filter(call=>call.url.endsWith("/responses"))) expect(JSON.parse(call.bodyText)).toMatchObject({reasoning:{effort:"high"},service_tier:"priority"});
+ });
 });
 
 describe("unversioned catalog requests", () => {

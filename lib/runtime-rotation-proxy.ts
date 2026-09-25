@@ -19,7 +19,7 @@ import { ApiModelRuntime } from "./runtime/api-model-runtime.js";
 import { buildVisibleModelUnion, parseModelRoute, canonicalServiceTier, type RouteModel } from "./model-route-policy.js";
 import { syncNativeAccountCredentials } from "./runtime/native-account-sync.js";
 import { isNativeClientToken } from "./runtime/native-client-auth.js";
-import { CatalogRetryError, AccountModelCatalog } from "./runtime/account-model-catalog.js";
+import { CatalogRetryError, AccountModelCatalog, clampCatalogRetryMs } from "./runtime/account-model-catalog.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -1629,6 +1629,9 @@ async function handleRequestInner(
             const catalogClientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : undefined;
             const backoff = state.catalogBackoff ??= new Map();
 			const forceCatalogRefresh = isModelsRequest && incomingUrl.searchParams.get("refresh_capabilities") === "1";
+			// An explicit capability check is a deliberate retry: it must not stay
+			// parked behind an earlier throttle's backoff.
+			if (forceCatalogRefresh) backoff.clear();
 			const catalogsByVersion = state.modelCatalogs ??= new Map();
 			const versionKey = catalogClientVersion ?? "";
 			state.modelCatalog = forceCatalogRefresh ? undefined : catalogsByVersion.get(versionKey);
@@ -1656,7 +1659,7 @@ async function handleRequestInner(
 				if (!response.ok) {
                     await response.body?.cancel();
                     if (response.status === 429) {
-                        const retryMs = Math.max(60_000, parseRetryAfterHeaderMs(response.headers, state.now()) ?? 60_000);
+                        const retryMs = clampCatalogRetryMs(parseRetryAfterHeaderMs(response.headers, state.now()));
                         if (backoff.size >= 100) backoff.delete(backoff.keys().next().value ?? "");
                         backoff.set(key, state.now() + retryMs);
                         throw new CatalogRetryError(retryMs);
@@ -1808,23 +1811,19 @@ async function handleRequestInner(
 			const effort = isRecord(requestedBody?.reasoning) && typeof requestedBody.reasoning.effort === "string" ? requestedBody.reasoning.effort : undefined;
 			const requestedTier = typeof requestedBody?.service_tier === "string" ? requestedBody.service_tier : undefined;
 			const failures = state.capabilityFailures ??= new RuntimeCapabilityFailures(state.now);
-			const discovery = await modelCatalog.prepareRouting(
+			await modelCatalog.prepareRouting(
 				eligible.flatMap(workspaceModelScopes).filter(scope => scope.routable).map(scope => scope.id),
 				requestedModel, effort, requestedTier, key => failures.supports(key, requestedModel, effort, requestedTier),
 			);
 			if (res.destroyed || res.writableEnded) return;
-			if (discovery === "pending") {
-				res.setHeader("retry-after", "2");
-				writeJson(res, 503, {error:{code:"account_catalog_refresh_pending",message:"Account capabilities are refreshing. Retry shortly."}});
-				return;
-			}
 			let supported = 0;
    catalogEligibleKeys = new Set();
    for (const account of eligible) {
     const candidates: ReturnType<typeof workspaceModelScopes> = [];
     const scopes=workspaceModelScopes(account).filter(scope=>scope.routable).sort((a,b)=>Number(b.selected)-Number(a.selected)||Number(b.bound)-Number(a.bound));
     for(const scope of scopes) {
-     if(failures.supports(scope.id,requestedModel,effort,requestedTier) && modelCatalog.supportsCached(scope.id,requestedModel,effort,requestedTier)) candidates.push(scope);
+     // Fail open: an unknown catalog (outage/throttle) stays routable; only a fetched one excludes.
+     if(failures.supports(scope.id,requestedModel,effort,requestedTier) && modelCatalog.supportsForRouting(scope.id,requestedModel,effort,requestedTier)) candidates.push(scope);
     }
     if(candidates.length){
      candidates.sort((a,b)=>compareSubscriptionQuota(subscriptionQuotaPreference(quotaForScope(account,a),state.now()),subscriptionQuotaPreference(quotaForScope(account,b),state.now())));
