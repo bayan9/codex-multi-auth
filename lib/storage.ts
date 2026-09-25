@@ -2040,6 +2040,9 @@ function cloneFlaggedStorageForPersistence(
 		accounts: structuredClone(storage?.accounts ?? []),
 	};
 }
+/** Code for a merge base that cannot be read; distinct from an ESTALE edit conflict. */
+export const ACCOUNT_STORAGE_UNREADABLE = "EACCOUNTSUNREADABLE";
+
 async function loadPrimaryAccountsForMerge(): Promise<AccountStorageV3 | null> {
 	const path = getStoragePath();
 	if (existsSync(getIntentionalResetMarkerPath(path))) {
@@ -2053,11 +2056,18 @@ async function loadPrimaryAccountsForMerge(): Promise<AccountStorageV3 | null> {
 		if (!normalized) throw new Error("Invalid primary account storage");
 		return normalized;
 	} catch (cause) {
-		// A confirmed deletion is authoritative; never resurrect a backup here.
-		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+		const code = (cause as NodeJS.ErrnoException).code;
+		// The journal is written before the primary and removed after it, so a
+		// journal beside a missing primary is the newest state, not a stale
+		// backup. Without one, the deletion is authoritative.
+		if (code === "ENOENT") return loadAccountsFromJournal(path, { silent: true });
+		// A locked or torn primary may hold newer state than any backup, so it is
+		// never replaced by a recovered copy here.
 		throw Object.assign(
-			new Error("Account storage changed concurrently; reload before saving."),
-			{ code: "ESTALE", cause },
+			new Error(
+				`Account storage could not be read${typeof code === "string" ? ` (${code})` : ""}; nothing was saved.`,
+			),
+			{ code: ACCOUNT_STORAGE_UNREADABLE, cause },
 		);
 	}
 }

@@ -3,11 +3,13 @@ import {
 	type AccountIdCandidate,
 } from "../auth/token-utils.js";
 import { CodexValidationError } from "../errors.js";
+import { stylePromptText } from "./formatters/index.js";
 import { select, type MenuItem } from "../ui/select.js";
 
 interface WorkspaceChoiceDeps {
 	interactive: boolean;
 	select: (items: MenuItem<string>[]) => Promise<string | null>;
+	warn?: (message: string) => void;
 }
 
 /** Undefined delegates to the unambiguous default; null means cancel without saving. */
@@ -22,18 +24,27 @@ export async function chooseLoginWorkspace(
 		}),
 	},
 ): Promise<string | undefined | null> {
-	if (candidates.length <= 1 || candidates.filter(isPersonalAccountCandidate).length === 1) {
+	// An org- id is an API organization alias of a workspace (normalized to the
+	// token's workspace when saved), so it never adds a real choice on its own.
+	const workspaces = candidates.filter((candidate) => !candidate.accountId.startsWith("org-"));
+	if (workspaces.length <= 1 || candidates.filter(isPersonalAccountCandidate).length === 1) {
 		return undefined;
 	}
 	if (!deps.interactive) {
-		throw new CodexValidationError("Multiple workspaces found without a unique Personal workspace. Run login in an interactive terminal or use login --org <workspace-id>.");
+		// Scripted logins keep the 2.16.0 automatic choice rather than discarding
+		// a completed OAuth exchange.
+		(deps.warn ?? ((message: string) => console.warn(stylePromptText(message, "warning"))))(
+			"Multiple workspaces found without a unique Personal workspace; saving the automatic choice. Re-run login with --org <workspace-id> to bind a specific workspace.",
+		);
+		return undefined;
 	}
-	const choice = await deps.select(candidates.map((candidate) => ({
+	// An interactive pick is explicit intent and is saved like --org.
+	const choice = await deps.select(workspaces.map((candidate) => ({
 		label: candidate.label,
 		value: candidate.accountId,
 	})));
 	if (choice === null) return null;
-	if (!candidates.some((candidate) => candidate.accountId === choice)) {
+	if (!workspaces.some((candidate) => candidate.accountId === choice)) {
 		throw new CodexValidationError("Invalid workspace selection. Account was not saved.");
 	}
 	return choice;

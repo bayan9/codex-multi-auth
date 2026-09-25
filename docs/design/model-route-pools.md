@@ -240,7 +240,7 @@ last check, reserve membership and reset time, separate from configured tiers.
 Model/workspace eligibility and fresher in-memory observations can change the
 actual request order; this estimate is not a claim of a universal global rank.
 
-`check` completes one tiny probe for a personal subscription that reports exactly
+`check --prime` completes one tiny probe for a personal subscription that reports exactly
 zero usage and has no established reset countdown. A full relative window can
 be an unused-account placeholder; receiving headers alone does not prove the
 timer started. A completed probe is reported explicitly. Incomplete or timed-out

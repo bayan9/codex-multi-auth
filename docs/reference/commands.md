@@ -56,9 +56,17 @@ Run `check` for the full check, or select one portion:
 
 | Command | Work performed |
 | --- | --- |
-| `check accounts` | Account authentication and live quota checks, including a tiny first-use request for genuinely unused subscriptions; skips reset-credit and model discovery checks |
+| `check accounts` | Account authentication and live quota checks; skips reset-credit and model discovery checks |
 | `check resets` | Refresh available subscription reset credits, showing the account number and email; does not redeem credits or run inference/model probes |
-| `check capabilities` | Refresh model and capability discovery for enabled subscription workspaces and API credentials, including configured capability probes; updates the running router catalog |
+| `check capabilities` | Refresh model and capability discovery for enabled subscription workspaces and API credentials, and force the configured capability probes even inside the 15-minute cache; updates the running router catalog |
+| `check --prime`, `check accounts --prime` | Also send a tiny first-use request to genuinely unused Personal subscriptions (Plus/Pro, every window at 0%, full-length reset). This starts their 5-hour and weekly windows and uses subscription quota |
+
+Plain `check` refreshes model discovery but reuses API capability probe results
+younger than 15 minutes, including results from an earlier `check` process
+(stored as hashes in `api-capability-probes.json`). Only `check capabilities`
+sends the billable probes regardless of age. No check sends the first-use
+request unless you pass `--prime`; scheduled checks and the dashboard's Quick
+and Deep Check never do.
 
 Existing scheduled checks keep their full-check behavior. Use
 `codex-multi-auth resets redeem <account-number>` for an explicit redemption. Unknown check arguments return a usage error;
@@ -237,7 +245,7 @@ fail with exit code 1 without reading account storage or quota cache.
 | `--all` | verify | Run both `--paths` and `--flagged` together |
 | `--now`, `-n` | why-selected | Recompute the current selection from live state (default). Note: on fix/doctor/verify-flagged, `-n` means `--dry-run` instead |
 | `--last`, `-l` | why-selected | Recompute selection from current state and attach the last persisted runtime snapshot |
-| `--clear-accounts` | uninstall | Also remove stored account credentials (irreversible) |
+| `--clear-accounts` | uninstall | Also remove stored account credentials and API keys (irreversible) |
 | `--stdout` | init-config | Force template output to stdout even when other write modes are considered |
 | `--remove` / `--dry-run` | `codex-multi-auth-app-launcher` | Remove managed launcher routing, or preview install/remove without writing |
 
@@ -801,10 +809,13 @@ failure.
   The namespaced `codex-multi-auth auth limits ...` form is an alias. No npm
   scripts or storage migrations were added.
 - `codex-multi-auth login` remains browser-first by default.
-- New logins prefer a uniquely identified Personal workspace over an organization default. If several workspaces exist without a unique Personal choice, interactive login requires selecting one before saving; noninteractive login requires `--org`. Cancelling the choice saves nothing. Explicit overrides and targeted re-authentication take precedence.
-- `check` now refreshes reset credits and model/capability discovery, and completes
-  a tiny first-use request for genuinely unused Personal subscriptions. This uses
-  subscription quota. API capability probes remain opt-in and billable. Use
+- New logins prefer a uniquely identified Personal workspace over an organization default. If several workspaces exist without a unique Personal choice, interactive login asks you to pick one before saving, and the pick is saved as an explicit binding like `--org`. Noninteractive login keeps the 2.16.0 automatic choice and prints a warning naming `--org`. Organization (`org-`) aliases of the token's workspace do not count as extra workspaces and are not offered in the picker. Cancelling the choice saves nothing. Explicit overrides and targeted re-authentication take precedence.
+- `check` now refreshes reset credits and model/capability discovery. API
+  capability probes remain opt-in per credential and billable; plain `check`
+  reuses results younger than 15 minutes, and `check capabilities` forces them.
+  `check --prime` (or `check accounts --prime`) also sends a tiny first-use
+  request to genuinely unused Personal subscriptions, which starts their quota
+  windows; no check does this without `--prime`. Use
   `check accounts|resets|capabilities` to run one portion; unknown arguments exit 1.
 - `status` labels the forecast as "Forecast suggestion". `status --json` adds
   `apiAccounts`, `totalAccountCount`, `selectionMode`, `modelInventory`, and
@@ -812,6 +823,8 @@ failure.
 - New commands include `login --api`, `resets list|redeem|auto`, and
   `account priority <index> <0..9>`. API credentials and reset state live in the
   new local files `api-routes.json` (mode 0600) and `reset-credits.json`.
+  `uninstall --clear-accounts` and the dashboard's delete-all reset remove both,
+  along with `api-capability-probes.json` and `inference-activity/`.
 - This routing release adds no npm scripts and requires no manual storage migration.
 
 - `codex-multi-auth login --org <org_id>` binds the login to one ChatGPT workspace.
@@ -975,7 +988,7 @@ is used only when ordinary eligible subscription accounts are unavailable.
 Unknown/stale reset observations do not receive a reset bonus. API/ZDR pools are
 never automatic paid fallbacks for subscription requests.
 
-`check` completes one tiny probe for a personal subscription that reports exactly
+`check --prime` completes one tiny probe for a personal subscription that reports exactly
 zero usage and has no established reset countdown. A full relative window can
 be an unused-account placeholder; receiving headers alone does not prove the
 timer started. A completed probe is reported explicitly. Incomplete or timed-out

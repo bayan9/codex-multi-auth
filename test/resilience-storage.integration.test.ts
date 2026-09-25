@@ -259,6 +259,63 @@ it("refuses backup recovery as the merge base after primary corruption", async (
  await writeFile(path + ".bak", JSON.stringify(backup));
  await writeFile(path, "{corrupt");
  proposed.accounts[0]!.accountLabel = "Local edit";
- await expect(saveAccounts(proposed)).rejects.toMatchObject({code:"ESTALE"});
+ // Unreadable storage is reported as such, not as a concurrent edit.
+ const failure = saveAccounts(proposed);
+ await expect(failure).rejects.toMatchObject({code:"EACCOUNTSUNREADABLE"});
+ await expect(failure).rejects.not.toThrow(/concurrently/);
  expect(await readFile(path,"utf8")).toBe("{corrupt");
+});
+
+async function writeJournal(path: string, storage: unknown) {
+ const { createHash } = await import("node:crypto");
+ const content = JSON.stringify(storage);
+ await writeFile(path + ".wal", JSON.stringify({ version: 1, content, checksum: createHash("sha256").update(content).digest("hex") }));
+}
+
+it("merges a transaction against a recoverable journal when the primary is missing", async () => {
+ const manager = await setup();
+ const path = getStoragePath();
+ const journal = (await loadAccounts())!;
+ journal.accounts.push({ recordId: "journal-only", accountId: "journal-only", refreshToken: "fixture-journal", addedAt: 2, lastUsed: 2 });
+ await writeJournal(path, journal);
+ await rm(path);
+ const { withAccountStorageTransaction } = await import("../lib/storage.js");
+ await withAccountStorageTransaction(async (current, persist) => persist({ ...(current ?? { version: 3 as const, activeIndex: 0, accounts: [] }), accounts: [...(current?.accounts ?? []), { recordId: "new", accountId: "new", refreshToken: "fixture-new", addedAt: 3, lastUsed: 3 }] }));
+ expect((await loadAccounts())?.accounts.map(a => a.recordId)).toEqual(["first", "journal-only", "new"]);
+ manager.getAccountByIndex(0)!.lastUsed = 30;
+ await manager.saveToDisk();
+ expect((await loadAccounts())?.accounts.map(a => a.recordId)).toEqual(["first", "journal-only", "new"]);
+});
+
+it("keeps a rotated refresh token live instead of dropping it when the primary is corrupt", async () => {
+ const manager = await setup();
+ const path = getStoragePath();
+ await writeFile(path + ".bak", await readFile(path, "utf8"));
+ await writeFile(path, "{corrupt");
+ const committed = await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 });
+ expect(committed?.refreshToken).toBe("fixture-rotated");
+ // A torn/corrupt primary is never replaced from an older backup behind the user's back.
+ expect(await readFile(path, "utf8")).toBe("{corrupt");
+ await writeFile(path, await readFile(path + ".bak", "utf8"));
+ await manager.flushPendingSave();
+ expect((await loadAccounts())?.accounts.map(a => a.refreshToken)).toEqual(["fixture-rotated"]);
+});
+
+it("keeps a rotated refresh token while the primary stays locked and saves it once readable", async () => {
+ const { vi } = await import("vitest");
+ const { promises: fs } = await import("node:fs");
+ const manager = await setup();
+ const path = getStoragePath();
+ const original = fs.readFile.bind(fs);
+ const locked = vi.spyOn(fs, "readFile").mockImplementation((async (file: unknown, ...rest: unknown[]) => {
+  if (String(file) === path) throw Object.assign(new Error("locked"), { code: "EBUSY" });
+  return (original as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+ }) as typeof fs.readFile);
+ try {
+  const committed = await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 });
+  expect(committed?.refreshToken).toBe("fixture-rotated");
+  expect(manager.getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated");
+ } finally { locked.mockRestore(); }
+ await manager.flushPendingSave();
+ expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated");
 });

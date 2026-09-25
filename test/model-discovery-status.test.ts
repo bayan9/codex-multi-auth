@@ -313,3 +313,57 @@ it("serializes independent inventory writers and preserves both successful basel
   expect(result?.entries.map(e=>e.lastSuccessful?.models)).toEqual([["writer-a"],["writer-b"]]);
  }finally{release();await pending;write.mockRestore();rename.mockRestore();}
 });
+
+it("honours the persisted 15-minute probe cache across fresh CLI processes unless probes are forced", async () => {
+ const { promises: fs } = await import("node:fs");
+ const { tmpdir } = await import("node:os");
+ const { join } = await import("node:path");
+ const dir = await fs.mkdtemp(join(tmpdir(), "probe-cache-"));
+ vi.stubEnv("CODEX_MULTI_AUTH_DIR", dir);
+ try {
+  let probes = 0;
+  const fetcher = vi.fn(async (url: string | URL) => {
+   const href = String(url);
+   if (href.endsWith("/v1/responses")) { probes++; return Response.json({ error: { message: "no" } }, { status: 500 }); }
+   if (href.includes("/v1/models")) return Response.json({ data: [{ id: "fixture-model" }] });
+   return new Response("missing", { status: 404 });
+  });
+  const route = { id: "fixture", label: "API fixture", kind: "api" as const, apiKey: "fixture-secret", enabled: true, priority: 0, visibleModels: ["fixture-model"], probeCapabilities: true };
+  let clock = 1_000_000;
+  const run = async (forceProbes?: boolean) => {
+   vi.resetModules();
+   const fresh = await import("../lib/runtime/model-discovery-status.js");
+   await fresh.discoverModelInventory(null, [route], { fetchImpl: fetcher as typeof fetch, now: () => clock, updateApiDiscovery: async (r) => r, persistProbes: true, forceProbes });
+  };
+  await run();
+  const first = probes;
+  expect(first).toBeGreaterThan(0);
+  clock += 60_000;
+  await run();
+  expect(probes).toBe(first);
+  expect(await fs.readFile(join(dir, "api-capability-probes.json"), "utf8")).not.toContain("fixture-secret");
+  await run(true);
+  expect(probes).toBe(first * 2);
+  clock += 16 * 60_000;
+  await run();
+  expect(probes).toBe(first * 3);
+ } finally {
+  vi.unstubAllEnvs();
+  await fs.rm(dir, { recursive: true, force: true });
+ }
+});
+
+it("asks a running proxy to force paid probes only for an explicit capability check", async () => {
+ const { refreshAndPrintModelInventory } = await import("../lib/runtime/model-discovery-status.js");
+ const urls: string[] = [];
+ for (const forceProbes of [false, true]) {
+  const inventory = { version: 1 as const, checkedAt: 200, entries: [] };
+  const load = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(inventory);
+  await refreshAndPrintModelInventory(vi.fn(), {
+   getBinding: async () => ({ running: true, state: { nativeOpenai: true, baseUrl: "http://127.0.0.1:12345", clientApiKey: "fixture-token" } }),
+   fetchImpl: (async (url: URL) => { urls.push(String(url)); return Response.json({ models: [] }); }) as unknown as typeof fetch,
+   loadInventory: load, now: () => 100, forceProbes,
+  });
+ }
+ expect(urls).toEqual(["http://127.0.0.1:12345/models?refresh_capabilities=1", "http://127.0.0.1:12345/models?refresh_capabilities=1&force_probes=1"]);
+});

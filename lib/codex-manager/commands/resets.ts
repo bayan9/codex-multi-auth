@@ -21,7 +21,11 @@ export async function runResetsCommand(args:string[]):Promise<number>{
   const state=await service.status();console.log(`Automatic redemption: ${state.policy}`);
   if(state.lastRedemption){const index=(storage?.accounts??[]).findIndex(a=>resetTargetForStoredAccount(a)?.key===state.lastRedemption?.key);console.log(`Last confirmed reset: ${index>=0?`account ${index+1}`:"removed account"}; ${state.lastRedemption.outcome}; ${state.lastRedemption.automatic?"automatic":"explicit"}`);}
   (storage?.accounts??[]).forEach((a,i)=>{const target=resetTargetForStoredAccount(a);const snapshot=target?(refreshed??state.snapshots)[target.key]:undefined;console.log(`${resetAccountLabel(a,i)}: ${snapshot?.availableCount??'unknown'} reset credits${snapshot?` (checked ${Math.max(0,Math.floor((Date.now()-snapshot.updatedAt)/1000))}s ago)`:''}${target?.key===state.pending?.key?' [redemption pending; retry this account]':''}`);});return 0;
- }catch{console.error(command==='list'?'Reset-credit availability could not be refreshed. No credits were redeemed.':command==='auto'?'Reset-credit settings could not be updated.':'Reset operation could not be confirmed. No new automatic redemption will be attempted while a result is pending; use resets list and retry the same account.');return 1;}
+ }catch{
+  // Only a consume whose result is unknown leaves a pending record; guard,
+  // pre-read and unknown-availability failures stop before spending anything.
+  const pending=command==='redeem'&&Boolean(await service.status().then(s=>s.pending,()=>true));
+  console.error(command==='list'?'Reset-credit availability could not be refreshed. No credits were redeemed.':command==='auto'?'Reset-credit settings could not be updated.':pending?'Reset operation could not be confirmed. No new automatic redemption will be attempted while a result is pending; use resets list and retry the same account.':'No reset credit was redeemed. Availability could not be confirmed or a reset was just redeemed; run resets list --refresh and try again.');return 1;}
  finally{await manager.flushPendingSave();}
  });
 }

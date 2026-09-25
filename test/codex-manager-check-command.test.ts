@@ -15,7 +15,7 @@ describe("focused check commands", () => {
   const deps = setup(), original = getStoragePathState();
   expect(await runCheckCommand(deps, args)).toBe(0);
   expect(deps.runHealthCheck).toHaveBeenCalledTimes(args.length === 0 || args[0] === "accounts" ? 1 : 0);
-  if (args.length === 0 || args[0] === "accounts") expect(deps.runHealthCheck).toHaveBeenCalledWith({ liveProbe: true, discoverModels: args.length === 0 });
+  if (args.length === 0 || args[0] === "accounts") expect(deps.runHealthCheck).toHaveBeenCalledWith({ liveProbe: true, discoverModels: args.length === 0, primeUnusedSubscription: false });
   expect(deps.runResetCheck).toHaveBeenCalledTimes(args[0] === "resets" ? 1 : 0);
   expect(deps.runCapabilityCheck).toHaveBeenCalledTimes(args[0] === "capabilities" ? 1 : 0);
   expect(getStoragePathState()).toEqual(original);
@@ -78,4 +78,16 @@ it("keeps a pending shared-pool check isolated from its caller and restores all 
   await rejected;
   expect(getStoragePathState()).toEqual(previous);
  });
+});
+
+it.each([[[] as string[], false], [["accounts"], false], [["--prime"], true], [["accounts", "--prime"], true]])("sends the first-use priming request only on explicit --prime: %j", async (args, prime) => {
+ const deps = setup();
+ expect(await runCheckCommand(deps, args)).toBe(0);
+ expect(deps.runHealthCheck).toHaveBeenCalledWith({ liveProbe: true, discoverModels: !args.includes("accounts"), primeUnusedSubscription: prime });
+});
+
+it.each([["resets", "--prime"], ["capabilities", "--prime"], ["--prime", "--prime"]])("rejects --prime outside account checks: %j", async (...args) => {
+ const deps = setup();
+ expect(await runCheckCommand(deps, args)).toBe(1);
+ expect(deps.runHealthCheck).not.toHaveBeenCalled();
 });

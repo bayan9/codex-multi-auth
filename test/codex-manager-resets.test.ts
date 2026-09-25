@@ -26,6 +26,8 @@ it('check capabilities refreshes only model discovery through the CLI dispatcher
  const {runCodexMultiAuthCli}=await import('../lib/codex-manager.js');
  expect(await runCodexMultiAuthCli(['check','capabilities'])).toBe(0);
  expect(f.capabilities).toHaveBeenCalledTimes(1);
+ // Only this explicit command may bypass the 15-minute paid-probe cache.
+ expect(f.capabilities).toHaveBeenCalledWith(expect.any(Function), { forceProbes: true });
  expect(f.refresh).not.toHaveBeenCalled(); expect(f.redeem).not.toHaveBeenCalled();
 });
 
@@ -44,4 +46,20 @@ it.each([false,true])('restores the caller storage state after standalone reset 
   expect(await runResetsCommand(['list'])).toBe(fails?1:0);
   expect(getStoragePathState()).toEqual(previous);
  });
+});
+
+it('does not claim a pending redemption when redeem fails before consuming', async () => {
+ f.redeem.mockRejectedValue(Error('A reset was just redeemed; refresh usage before trying again.'));
+ expect(await runResetsCommand(['redeem','1'])).toBe(1);
+ const output=JSON.stringify(vi.mocked(console.error).mock.calls);
+ expect(output).not.toMatch(/pending/);
+ expect(output).toContain('No reset credit was redeemed');
+});
+
+it('reports a pending result only when a consume is actually unconfirmed', async () => {
+ f.redeem.mockRejectedValue(Error('secret backend detail'));
+ f.list.mockResolvedValue({version:1,policy:'manual',snapshots:{},pending:{key:'k'}});
+ expect(await runResetsCommand(['redeem','1'])).toBe(1);
+ const output=JSON.stringify(vi.mocked(console.error).mock.calls);
+ expect(output).toMatch(/pending/);expect(output).not.toContain('secret');
 });

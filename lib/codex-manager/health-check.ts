@@ -66,6 +66,8 @@ export interface HealthCheckOptions {
 	forceRefresh?: boolean;
 	discoverModels?: boolean;
 	liveProbe?: boolean;
+	/** Explicit `check --prime` only: may start an unused subscription's quota windows. */
+	primeUnusedSubscription?: boolean;
 	model?: string;
 	display?: DashboardDisplaySettings;
 }
@@ -75,6 +77,7 @@ export async function runHealthCheck(
 ): Promise<void> {
 	const forceRefresh = options.forceRefresh === true;
 	const liveProbe = options.liveProbe === true;
+	const primeUnusedSubscription = options.primeUnusedSubscription === true;
 	const probeModel = options.model?.trim() || DEFAULT_LIVE_PROBE_MODEL;
 	const modelInspection = inspectRequestedModel(probeModel);
 	const display = options.display ?? DEFAULT_DASHBOARD_DISPLAY_SETTINGS;
@@ -131,7 +134,7 @@ export async function runHealthCheck(
    await withCheckProgress(() => `Checking account probes: ${completed}/${candidates.length}`, async () => {
     await mapWithConcurrency(candidates, 3, async candidate => {
      try {
-      const value = await fetchCodexQuotaSnapshot({primeUnusedSubscription:true,accountId:candidate.accountId,accessToken:candidate.accessToken,model:modelInspection.normalized});
+      const value = await fetchCodexQuotaSnapshot({primeUnusedSubscription,accountId:candidate.accountId,accessToken:candidate.accessToken,model:modelInspection.normalized});
       quickProbes.set(candidate.index,{ok:true,value});
      } catch(error) { quickProbes.set(candidate.index,{ok:false,error}); }
      finally { completed++; }
@@ -170,7 +173,7 @@ export async function runHealthCheck(
 					try {
 						const priorProbe = quickProbes.get(i);
       if(priorProbe && !priorProbe.ok) throw priorProbe.error;
-      const snapshot = priorProbe?.ok ? priorProbe.value : await withCheckProgress(`Account ${i + 1}/${storage.accounts.length}: live probe`, () => fetchCodexQuotaSnapshot({primeUnusedSubscription:true,
+      const snapshot = priorProbe?.ok ? priorProbe.value : await withCheckProgress(`Account ${i + 1}/${storage.accounts.length}: live probe`, () => fetchCodexQuotaSnapshot({primeUnusedSubscription,
 							accountId: probeAccountId,
 							accessToken: currentAccessToken,
 							model: modelInspection.normalized,
@@ -288,7 +291,7 @@ export async function runHealthCheck(
 						"signed in (live check skipped: missing account ID)";
 				} else {
 					try {
-						const snapshot = await withCheckProgress(`Account ${i + 1}/${storage.accounts.length}: live probe`, () => fetchCodexQuotaSnapshot({primeUnusedSubscription:true,
+						const snapshot = await withCheckProgress(`Account ${i + 1}/${storage.accounts.length}: live probe`, () => fetchCodexQuotaSnapshot({primeUnusedSubscription,
 							accountId: probeAccountId,
 							accessToken: result.access,
 							model: modelInspection.normalized,

@@ -1,11 +1,22 @@
 import { spawn } from 'node:child_process';
 import { existsSync, promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { codexCliAccountIdFor } from '../auth/token-utils.js';
+import type { CodexCliMirror } from '../storage/public-types.js';
+import { getCodexMultiAuthDir } from '../runtime-paths.js';
 import { isRecord } from '../utils.js';
 
-export interface NativeUsageAuth {accessToken:string;accountId:string;expiresAt:number;idToken?:string}
+export interface NativeUsageAuth {accessToken:string;accountId:string;expiresAt:number;idToken?:string;codexCliMirror?:CodexCliMirror}
+/** Longer than any live session (15s timeout), so only crash leftovers are swept. */
+const STALE_HOME_MS=10*60_000;
+async function sweepStaleHomes(root:string):Promise<void>{
+ const entries=await fs.readdir(root).catch(()=>[] as string[]);
+ await Promise.all(entries.filter(name=>name.startsWith('reset-rpc-')).map(async name=>{
+  const path=join(root,name);
+  try{if(Date.now()-(await fs.stat(path)).mtimeMs>STALE_HOME_MS)await fs.rm(path,{recursive:true,force:true,maxRetries:5,retryDelay:100});}catch{/* Another process owns or already removed it. */}
+ }));
+}
 type Method='account/rateLimits/read'|'account/rateLimitResetCredit/consume';
 function nativeCommand():string[]{
  const override=process.env.CODEX_MULTI_AUTH_USAGE_CODEX_BIN?.trim();
@@ -21,11 +32,16 @@ function nativeCommand():string[]{
 export async function nativeRateLimitsRpc(auth:NativeUsageAuth,method:Method,params:Record<string,unknown>,options:{command?:string[];tempRoot?:string;timeoutMs?:number}={}):Promise<unknown>{
  if(!auth.accessToken||!auth.accountId||auth.expiresAt<=Date.now()+30000)throw Error('Native usage requires a fresh account access token');
  const command=options.command??nativeCommand();const executable=command[0];if(!executable)throw Error('Native usage backend unavailable');
- const dir=await fs.mkdtemp(join(options.tempRoot??tmpdir(),'reset-rpc-'));
+ // The home briefly holds an access token: keep it in the user-private multi-auth
+ // directory (chmod is a no-op on Windows %TEMP%) and sweep leftovers of hard kills.
+ const root=options.tempRoot??join(getCodexMultiAuthDir(),'tmp');
+ await fs.mkdir(root,{recursive:true,mode:0o700});
+ await sweepStaleHomes(root);
+ const dir=await fs.mkdtemp(join(root,'reset-rpc-'));
  let stop:()=>Promise<void>=async()=>{};
  try{
   await fs.chmod(dir,0o700);
-  await fs.writeFile(join(dir,'auth.json'),JSON.stringify({auth_mode:'chatgpt',OPENAI_API_KEY:null,tokens:{access_token:auth.accessToken,id_token:auth.idToken??auth.accessToken,refresh_token:'',account_id:auth.accountId},last_refresh:new Date().toISOString()}),{mode:0o600});
+  await fs.writeFile(join(dir,'auth.json'),JSON.stringify({auth_mode:'chatgpt',OPENAI_API_KEY:null,tokens:{access_token:auth.accessToken,id_token:auth.idToken??auth.accessToken,refresh_token:'',account_id:codexCliAccountIdFor(auth,auth.accessToken,auth.idToken)},last_refresh:new Date().toISOString()}),{mode:0o600});
   await fs.writeFile(join(dir,'config.toml'),'cli_auth_credentials_store = "file"\n',{mode:0o600});
   const env:NodeJS.ProcessEnv={...process.env,CODEX_HOME:dir};
   // A native backend must not inherit API authentication or our own proxy route.

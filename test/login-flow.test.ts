@@ -15,7 +15,11 @@ const {
 	persistAccountPoolMock,
 	syncSelectionToCodexMock,
 	fetchAuthorizedAccountsMock,
+	clearAccountsMock,
+	clearCredentialSidecarsMock,
 } = vi.hoisted(() => ({
+	clearAccountsMock: vi.fn(),
+	clearCredentialSidecarsMock: vi.fn(),
 	chooseLoginWorkspaceMock: vi.fn(),
 	loadAccountsMock: vi.fn(),
 	getNamedBackupsMock: vi.fn(),
@@ -44,8 +48,11 @@ vi.mock("../lib/storage.js", async (importOriginal) => {
 		loadAccounts: loadAccountsMock,
 		getNamedBackups: getNamedBackupsMock,
 		setStoragePath: vi.fn(),
+		clearAccounts: clearAccountsMock,
 	};
 });
+
+vi.mock("../lib/storage/credential-sidecars.js", () => ({ clearCredentialSidecars: clearCredentialSidecarsMock }));
 
 vi.mock("../lib/cli.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../lib/cli.js")>();
@@ -666,4 +673,14 @@ it.each([undefined,"selected-workspace"])("preserves the native mirror when disc
  expect(await runAuthLogin(["--manual","--org","selected-workspace"],deps())).toBe(0);
  expect(persistAccountPoolMock).toHaveBeenCalledExactlyOnceWith([selected],false,PLAIN_PERSIST_OPTIONS);
  expect(syncSelectionToCodexMock).toHaveBeenCalledExactlyOnceWith(selected);
+});
+
+it("dashboard reset also removes stored API keys and runtime sidecars", async () => {
+ accountsOnDisk = storageWith(1);
+ clearAccountsMock.mockImplementation(async () => { accountsOnDisk = null; });
+ clearCredentialSidecarsMock.mockResolvedValue(undefined);
+ promptLoginModeMock.mockResolvedValueOnce({ mode: "fresh", deleteAll: true });
+ expect(await runAuthLogin([], deps())).toBe(0);
+ expect(clearAccountsMock).toHaveBeenCalledTimes(1);
+ expect(clearCredentialSidecarsMock).toHaveBeenCalledTimes(1);
 });
