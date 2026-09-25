@@ -286,6 +286,74 @@ export function extractAccountId(accessToken?: string): string | undefined {
 }
 
 /**
+ * Maps a stored account id to the value Codex CLI accepts as tokens.account_id.
+ * Codex CLI >= 0.156 checks that field against the token's ChatGPT workspaces;
+ * an OpenAI platform org id ("org-...") is never one of them, so it resolves to
+ * the token's chatgpt_account_id claim instead, or undefined without a claim.
+ * The auth.json writer and every stored-vs-auth.json comparison must share
+ * this mapping, or org-sourced accounts read as permanently drifted.
+ */
+/** Whether an id is an OpenAI platform org id ("org-..."), never a ChatGPT workspace. */
+export function isOpenAiOrgId(accountId: string | undefined): boolean {
+	return /^org-/i.test(accountId?.trim() ?? "");
+}
+
+export function resolveCodexAuthAccountId(
+	accountId: string | undefined,
+	accessToken?: string,
+	idToken?: string,
+): string | undefined {
+	const trimmed = accountId?.trim();
+	if (!trimmed) return undefined;
+	if (!isOpenAiOrgId(trimmed)) return trimmed;
+	return extractAccountId(accessToken) ?? extractAccountId(idToken);
+}
+
+interface CodexAccountIdentity {
+	accountId?: string;
+	accessToken?: string;
+}
+
+/**
+ * The Codex CLI state's active account id with the access token of the
+ * snapshot it came from, so an "org-..." id (the legacy accounts.json keeps
+ * the raw id) can be resolved against that account's own token.
+ */
+export function codexCliActiveIdentity(state: {
+	activeAccountId?: string;
+	accounts?: ReadonlyArray<CodexAccountIdentity & { isActive?: boolean }>;
+}): CodexAccountIdentity {
+	const accountId = state.activeAccountId?.trim();
+	const accounts = state.accounts ?? [];
+	const snapshot =
+		accounts.find((entry) => !!accountId && entry.accountId?.trim() === accountId) ??
+		accounts.find((entry) => entry.isActive);
+	return { accountId, accessToken: snapshot?.accessToken };
+}
+
+/**
+ * Whether two account ids name the same Codex account. Equal raw ids match;
+ * otherwise each side goes through resolveCodexAuthAccountId with its own
+ * token, so a stored "org-..." id matches the workspace id the writer put in
+ * auth.json. Unresolvable ids (org id, no claim) never match a different id.
+ * Equal org ids still differ when both tokens name different workspaces.
+ */
+export function codexAuthAccountIdsMatch(
+	left: CodexAccountIdentity,
+	right: CodexAccountIdentity,
+): boolean {
+	const leftId = left.accountId?.trim();
+	const rightId = right.accountId?.trim();
+	if (!leftId || !rightId) return false;
+	const leftResolved = resolveCodexAuthAccountId(leftId, left.accessToken);
+	const rightResolved = resolveCodexAuthAccountId(rightId, right.accessToken);
+	if (leftId === rightId) {
+		return !leftResolved || !rightResolved || leftResolved === rightResolved;
+	}
+	return !!leftResolved && leftResolved === rightResolved;
+}
+
+/**
  * Extracts the email address from OAuth tokens.
  * Checks id_token first (where OpenAI puts email), then falls back to access_token.
  */
