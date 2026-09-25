@@ -351,6 +351,28 @@ describe("forwardStreamingResponse", () => {
 		expect(res.ended).toBe(false);
 	});
 
+	it("does not write a missing-terminal error after the response already ended", async () => {
+		const res = new FakeServerResponse();
+		const status = createStatus();
+		const upstream = new Response(streamOf(new TextEncoder().encode("data: a\n\n")), {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+		const result = await forwardStreamingResponse(
+			upstream,
+			res.asServerResponse(),
+			status,
+			() => undefined,
+			1_000,
+			() => { res.ended = true; },
+			undefined,
+			() => ({ success: false, missingTerminal: true, errorCode: "upstream_missing_terminal" }),
+		);
+		expect(result).toBe(false);
+		expect(Buffer.concat(res.chunks).toString("utf8")).not.toContain("upstream_missing_terminal");
+		expect(status.lastError).toBeNull();
+	});
+
 	it("ends immediately when the upstream has no body", async () => {
 		const res = new FakeServerResponse();
 		const status = createStatus();

@@ -168,6 +168,8 @@ export async function forwardStreamingResponse(
 	const finish = (): boolean => {
 		if (clientDisconnected || res.destroyed) return false;
 		const result = completion?.();
+		// Already ended by a concurrent close path: never write after end.
+		if (res.writableEnded) return false;
 		if (result && !result.success) {
 			status.lastError = result.errorCode;
 			if (result.missingTerminal) res.write(Buffer.from(`data: ${JSON.stringify({type:"error",error:{code:result.errorCode,message:"Upstream ended before completing the response."}})}\n\n`));
@@ -198,10 +200,9 @@ export async function forwardStreamingResponse(
 			if (value && value.byteLength > 0) {
 				onChunk?.(value);
 				// If the response is already finished (clean end by a concurrent
-				// close-then-reader-cancel path), stop writing. Do NOT guard on
-				// res.destroyed here: a socket-error-during-backpressure scenario sets
-				// destroyed=true and then lets the next res.write() throw so the catch
-				// block can record the error and fire onStreamError correctly.
+				// close-then-reader-cancel path), stop writing. A destroyed response
+				// is left to the next res.write(), which throws into the catch below;
+				// that path returns false without penalizing the upstream account.
 				if (res.writableEnded) break;
 				// Respect backpressure: when the client's socket buffer is full,
 				// pause upstream reads until it drains instead of buffering the
