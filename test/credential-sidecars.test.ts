@@ -53,3 +53,11 @@ it.each(["reset-credits.json", "api-capability-probes.json", "api-routes.json"])
 		}
 	},
 );
+
+it("removes the credential sidecars even when the pool clear fails, then rethrows", async () => {
+	const { clearAccountsAndCredentialSidecars } = await import("../lib/storage/credential-sidecars.js");
+	await fs.writeFile(join(dir, "api-routes.json"), '{"apiKey":"sk-fixture"}');
+	const failure = Object.assign(new Error("locked"), { code: "EBUSY" });
+	await expect(clearAccountsAndCredentialSidecars(async () => { throw failure; })).rejects.toBe(failure);
+	await expect(fs.stat(join(dir, "api-routes.json"))).rejects.toMatchObject({ code: "ENOENT" });
+});

@@ -380,3 +380,21 @@ it("chains a second rotation of the same account while the first is only journal
  expect(next.getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated-2");
  await manager.flushPendingSave();
 });
+
+it("keeps a journaled rotated token live when a native request re-reads the unchanged primary", async () => {
+ const { createNativeAccountStorageReader } = await import("../lib/runtime/native-account-storage.js");
+ const { syncNativeAccountCredentials } = await import("../lib/runtime/native-account-sync.js");
+ const manager = await setup();
+ const path = getStoragePath();
+ const readNative = createNativeAccountStorageReader(undefined, path);
+ await readNative();
+ await withAccountsWriteLocked(path, () => manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 }));
+ // The deferred save has not run; the primary still holds the spent token.
+ expect(JSON.parse(await readFile(path, "utf8")).accounts[0].refreshToken).toBe("fixture-first");
+ const snapshot = await readNative();
+ expect(snapshot.verified).toBe(true);
+ syncNativeAccountCredentials(manager, snapshot.storage!);
+ expect(manager.getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated");
+ expect(manager.getAccountByIndex(0)?.access).toBe("fixture-fresh");
+ await manager.flushPendingSave();
+});

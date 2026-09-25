@@ -302,7 +302,7 @@ import {
 } from "./lib/runtime/ui-runtime.js";
 import { verifyRuntimeFlaggedAccounts } from "./lib/runtime/verify-flagged.js";
 import { SessionAffinityStore } from "./lib/session-affinity.js";
-import { clearCredentialSidecars } from "./lib/storage/credential-sidecars.js";
+import { clearAccountsAndCredentialSidecars } from "./lib/storage/credential-sidecars.js";
 import { registerCleanup } from "./lib/shutdown.js";
 import {
 	type AccountStorageV3,
@@ -3342,10 +3342,12 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 								if (menuResult.mode === "fresh") {
 									startFresh = true;
 									if (menuResult.deleteAll) {
-										await clearAccounts();
-										await clearFlaggedAccounts();
-										// Raw sk- API keys and per-account runtime state live beside the pool.
-										await clearCredentialSidecars();
+										// Raw sk- API keys and per-account runtime state live beside the
+										// pool; they are removed even if the pool clear fails.
+										await clearAccountsAndCredentialSidecars(async () => {
+											await clearAccounts();
+											await clearFlaggedAccounts();
+										});
 										invalidateRuntimeAccountManagerCache(
 											accountManagerCacheInvalidationDeps,
 										);

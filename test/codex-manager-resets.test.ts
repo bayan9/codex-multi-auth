@@ -1,10 +1,10 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-const f=vi.hoisted(()=>({list:vi.fn(),redeem:vi.fn(),policy:vi.fn(),refresh:vi.fn(),capabilities:vi.fn()}));
+const f=vi.hoisted(()=>({list:vi.fn(),redeem:vi.fn(),policy:vi.fn(),refresh:vi.fn(),capabilities:vi.fn(),extraAccounts:[] as Array<Record<string,unknown>>}));
 vi.mock('../lib/runtime/account-reset-credits.js',async original=>({...await original<typeof import('../lib/runtime/account-reset-credits.js')>(),createResetCreditService:()=>({status:f.list,redeem:f.redeem,setPolicy:f.policy,refresh:f.refresh})}));
 vi.mock('../lib/runtime/model-discovery-status.js',async original=>({...await original<typeof import('../lib/runtime/model-discovery-status.js')>(),refreshAndPrintModelInventory:f.capabilities}));
-vi.mock('../lib/storage.js',async original=>({...await original<typeof import('../lib/storage.js')>(),loadAccounts:async()=>({version:3,activeIndex:0,accounts:[{accountId:'workspace',email:'reader@example.test',refreshToken:'secret',addedAt:1,lastUsed:1}]})}));
+vi.mock('../lib/storage.js',async original=>({...await original<typeof import('../lib/storage.js')>(),loadAccounts:async()=>({version:3,activeIndex:0,accounts:[{accountId:'workspace',email:'reader@example.test',refreshToken:'secret',addedAt:1,lastUsed:1},...f.extraAccounts]})}));
 import { runResetsCommand } from '../lib/codex-manager/commands/resets.js';
-beforeEach(()=>{vi.clearAllMocks();vi.spyOn(console,'log').mockImplementation(()=>{});vi.spyOn(console,'error').mockImplementation(()=>{});f.list.mockResolvedValue({version:1,policy:'manual',snapshots:{}});f.redeem.mockResolvedValue('reset');f.capabilities.mockResolvedValue(true);});
+beforeEach(()=>{vi.clearAllMocks();f.extraAccounts=[];vi.spyOn(console,'log').mockImplementation(()=>{});vi.spyOn(console,'error').mockImplementation(()=>{});f.list.mockResolvedValue({version:1,policy:'manual',snapshots:{}});f.redeem.mockResolvedValue('reset');f.capabilities.mockResolvedValue(true);});
 it('lists without provider reads or redemption by default',async()=>{expect(await runResetsCommand([])).toBe(0);expect(f.refresh).not.toHaveBeenCalled();expect(f.redeem).not.toHaveBeenCalled();});
 it('requires an explicit valid account to redeem',async()=>{for(const args of [['redeem'],['redeem','0'],['redeem','2'],['redeem','1','extra']])expect(await runResetsCommand(args)).toBe(1);expect(f.redeem).not.toHaveBeenCalled();expect(await runResetsCommand(['redeem','1'])).toBe(0);expect(f.redeem).toHaveBeenCalledTimes(1);});
 it('changes policy only by explicit command',async()=>{expect(await runResetsCommand(['auto','last-resort'])).toBe(0);expect(f.policy).toHaveBeenCalledWith('last-resort');expect(f.redeem).not.toHaveBeenCalled();});
@@ -62,4 +62,17 @@ it('reports a pending result only when a consume is actually unconfirmed', async
  expect(await runResetsCommand(['redeem','1'])).toBe(1);
  const output=JSON.stringify(vi.mocked(console.error).mock.calls);
  expect(output).toMatch(/pending/);expect(output).not.toContain('secret');
+});
+
+it('names the account that owns a pending redemption when it is not the one retried', async () => {
+ const {resetTargetForStoredAccount}=await import('../lib/runtime/account-reset-credits.js');
+ const other={accountId:'other-workspace',email:'other@example.test',refreshToken:'secret-2',addedAt:1,lastUsed:1};
+ f.extraAccounts=[other];
+ const key=resetTargetForStoredAccount(other as never)!.key;
+ f.redeem.mockRejectedValue(Error('A redemption result is pending'));
+ f.list.mockResolvedValue({version:1,policy:'manual',snapshots:{},pending:{key}});
+ expect(await runResetsCommand(['redeem','1'])).toBe(1);
+ const output=JSON.stringify(vi.mocked(console.error).mock.calls);
+ expect(output).toContain('account 2');
+ expect(output).not.toContain('retry the same account');
 });
