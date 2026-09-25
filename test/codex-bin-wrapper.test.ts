@@ -1172,6 +1172,51 @@ describe("codex bin wrapper", () => {
 		expect(output).not.toContain("--account");
 	});
 
+	// Cross-provider session discovery is optional: a Codex build without
+	// `thread/list` (or one that rejects, exits or times out) must still reach
+	// native `codex resume` instead of failing the whole launch.
+	it("falls back to native resume when the session picker fails", () => {
+		const fixtureRoot = createWrapperFixture();
+		createRuntimeRotationProxyFixtureModule(fixtureRoot);
+		const runtimeDir = join(fixtureRoot, "dist", "lib", "runtime");
+		mkdirSync(runtimeDir, { recursive: true });
+		writeFileSync(
+			join(runtimeDir, "resume-picker.js"),
+			'export async function pickResumeThread() { throw new Error("thread/list is unsupported"); }\n',
+			"utf8",
+		);
+		// The picker only runs on an interactive terminal; spawnSync pipes stdio.
+		const ttyPreload = join(fixtureRoot, "force-tty.mjs");
+		writeFileSync(
+			ttyPreload,
+			"process.stdin.isTTY = true;\nprocess.stdout.isTTY = true;\n",
+			"utf8",
+		);
+		const originalHome = join(fixtureRoot, "codex-home");
+		mkdirSync(originalHome, { recursive: true });
+		writeFileSync(
+			join(originalHome, "config.toml"),
+			'model_provider = "openai"\n',
+			"utf8",
+		);
+		const fakeBin = createFakeCodexBin(fixtureRoot);
+
+		const result = runWrapper(fixtureRoot, ["resume", "--all"], {
+			CODEX_MULTI_AUTH_REAL_CODEX_BIN: fakeBin,
+			CODEX_HOME: originalHome,
+			CODEX_MULTI_AUTH_RUNTIME_ROTATION_PROXY: "1",
+			NODE_OPTIONS: `--import=${pathToFileURL(ttyPreload).href}`,
+			OPENAI_API_KEY: undefined,
+		});
+
+		const output = combinedOutput(result);
+		expect(output).toContain(
+			"Could not list saved Codex sessions: thread/list is unsupported",
+		);
+		expect(result.status).toBe(0);
+		expect(output).toContain("FORWARDED:resume --all");
+	});
+
 	it.each([
 		["email", ["exec", "--account", "account-2@example.com", "status"], {}, "1"],
 		["account id", ["exec", "--account", "acc_2", "status"], {}, "1"],
