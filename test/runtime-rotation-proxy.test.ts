@@ -4593,3 +4593,17 @@ it("clamps a reference catalog's context to the serving pool",async()=>{
  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,catalogAccount:{email:storage.accounts[0]!.email!,accountId:'acc_1'}}});
  const response=await getModels(proxy);expect((await response.json()).models[0].context_window).toBe(100000);
 });
+
+describe("native catalog outage with reasoning settings", () => {
+	it("routes an effort-bearing request while the catalog is rate limited", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+		const { fetchImpl, calls } = createRecordingFetch(call => call.url.includes("/models")
+			? new Response("busy", { status: 429, headers: { "retry-after": "120" } })
+			: textEventStream());
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await postResponses(proxy, { model: "model-test", reasoning: { effort: "high" }, service_tier: "priority", input: "test" });
+		await response.text();
+		expect(response.status).toBe(200);
+		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(true);
+	});
+});

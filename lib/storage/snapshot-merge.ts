@@ -10,16 +10,38 @@ function mergeValue(base: unknown, disk: unknown, local: unknown): unknown {
         return structuredClone(disk);
     if (equal(base, disk))
         return structuredClone(local);
-    if (isRecord(base) && isRecord(disk) && isRecord(local)) {
+    // Snapshots write an empty record as undefined; two writers adding keys to it
+    // are adding to an empty record, not conflicting.
+    const baseRecord = base === undefined && isRecord(disk) && isRecord(local) ? {} : base;
+    if (isRecord(baseRecord) && isRecord(disk) && isRecord(local)) {
         const result: Record<string, unknown> = Object.create(null);
-        for (const key of new Set([...Object.keys(base), ...Object.keys(disk), ...Object.keys(local)])) {
-            const value = mergeValue(base[key], disk[key], local[key]);
+        for (const key of new Set([...Object.keys(baseRecord), ...Object.keys(disk), ...Object.keys(local)])) {
+            const value = mergeValue(baseRecord[key], disk[key], local[key]);
             if (value !== undefined)
                 result[key] = value;
         }
         return result;
     }
     return conflict();
+}
+type RuntimeState = Pick<AccountMetadataV3, "rateLimitResetTimes" | "coolingDownUntil" | "cooldownReason">;
+/**
+ * Runtime limits and cooldowns are written by every live manager. A conflict on
+ * them must not fail the save (it would drop a rotated refresh token), so keep
+ * the later deadline instead. One-sided changes, including clears, still win.
+ */
+function mergeRuntimeState(base: AccountMetadataV3, disk: AccountMetadataV3, local: AccountMetadataV3): RuntimeState {
+    const limits: Record<string, number> = {};
+    for (const key of new Set([base, disk, local].flatMap(row => Object.keys(row.rateLimitResetTimes ?? {})))) {
+        const b = base.rateLimitResetTimes?.[key], d = disk.rateLimitResetTimes?.[key], l = local.rateLimitResetTimes?.[key];
+        const value = b === l ? d : b === d ? l : Math.max(d ?? 0, l ?? 0);
+        if (typeof value === "number")
+            limits[key] = value;
+    }
+    const cooldown = (row: AccountMetadataV3) => ({ coolingDownUntil: row.coolingDownUntil, cooldownReason: row.cooldownReason });
+    const chosen = equal(cooldown(base), cooldown(local)) ? disk
+        : equal(cooldown(base), cooldown(disk)) || (local.coolingDownUntil ?? 0) >= (disk.coolingDownUntil ?? 0) ? local : disk;
+    return { rateLimitResetTimes: Object.keys(limits).length ? limits : undefined, ...cooldown(chosen) };
 }
 /** Three-way persistence under the file transaction lock. Disk deletions win over stale runtime state. */
 export function mergeAccountSnapshot(base: AccountStorageV3 | null, current: AccountStorageV3 | null, local: AccountStorageV3): AccountStorageV3 {
@@ -67,7 +89,8 @@ export function mergeAccountSnapshot(base: AccountStorageV3 | null, current: Acc
         if (!next)
             continue;
         const lastUsed = Math.max(row.lastUsed, next.lastUsed);
-        const merged = mergeValue(prior, { ...row, lastUsed }, { ...next, lastUsed }) as AccountMetadataV3;
+        const runtime = mergeRuntimeState(prior, row, next);
+        const merged = mergeValue(prior, { ...row, lastUsed, ...runtime }, { ...next, lastUsed, ...runtime }) as AccountMetadataV3;
         accounts.push(merged);
     }
     for (const [key, row] of proposed)

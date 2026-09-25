@@ -644,7 +644,28 @@ export class AccountManager {
 					this.cursorByFamily[family] = nextIndex;
 				}
 			}
-			this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
+			// The baseline is what disk held, in this manager's snapshot shape. The
+			// auth fallback is a local change the first save must write; seeding it
+			// into the baseline would make the merge read disk as having removed or
+			// reverted it.
+			const baseline = this.buildStorageSnapshot();
+			if (authFallback && !hasMatchingFallback) {
+				baseline.accounts.pop();
+			} else if (hasMatchingFallback) {
+				const position = this.accounts.findIndex((account) => account.index === fallbackMatchedRowIndex);
+				const row = stored.accounts[fallbackMatchedRowIndex];
+				const snapshotRow = baseline.accounts[position];
+				if (row && snapshotRow) {
+					Object.assign(snapshotRow, {
+						accountId: row.accountId,
+						email: sanitizeEmail(row.email),
+						refreshToken: row.refreshToken,
+						accessToken: row.accessToken,
+						expiresAt: row.expiresAt,
+					});
+				}
+			}
+			this.persistenceBaseline = structuredClone(baseline);
 			return;
 		}
 
@@ -679,7 +700,8 @@ export class AccountManager {
 				this.cursorByFamily[family] = 0;
 			}
 		}
-		this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
+		// Disk held no usable accounts; any fallback account here is a local addition.
+		this.persistenceBaseline = structuredClone({ ...this.buildStorageSnapshot(), accounts: [] });
 	}
 
 	getAccountCount(): number {

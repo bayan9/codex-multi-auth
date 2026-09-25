@@ -2,18 +2,27 @@ import { isRecord } from "../utils.js";
 import type { CatalogModel } from "./account-model-catalog.js";
 const contextLimits = ["context_window", "max_context_window", "auto_compact_token_limit"] as const;
 const canonicalTier = (value: string) => value === "priority" ? "fast" : value;
-/** Combine selectable settings; routing must check the complete requested pair. */
+const tierIds = (model: CatalogModel) => Array.isArray(model.service_tiers)
+    ? model.service_tiers.filter(tier => isRecord(tier) && typeof tier.id === "string")
+    : [];
+/**
+ * Combine selectable settings so every advertised (effort, tier) pair is served
+ * by one account: efforts are unioned, tiers intersected. An effort then comes
+ * from some account, and every account offering the model supports every tier.
+ */
 export function mergeCatalogModel(a: CatalogModel, b: CatalogModel): CatalogModel {
     const result = { ...a };
-    for (const [field, key] of [["supported_reasoning_levels", "effort"], ["service_tiers", "id"]] as const) {
-        const options = new Map<string, unknown>();
-        for (const model of [a, b])
-            for (const option of Array.isArray(model[field]) ? model[field] : []) {
-                if (isRecord(option) && typeof option[key] === "string")
-                    options.set(option[key], option);
-            }
-        if (options.size)
-            result[field] = [...options.values()];
+    const efforts = new Map<string, unknown>();
+    for (const model of [a, b])
+        for (const option of Array.isArray(model.supported_reasoning_levels) ? model.supported_reasoning_levels : []) {
+            if (isRecord(option) && typeof option.effort === "string")
+                efforts.set(option.effort, option);
+        }
+    if (efforts.size)
+        result.supported_reasoning_levels = [...efforts.values()];
+    if (Array.isArray(a.service_tiers) || Array.isArray(b.service_tiers)) {
+        const shared = new Set(tierIds(b).map(tier => canonicalTier((tier as { id: string }).id)));
+        result.service_tiers = tierIds(a).filter(tier => shared.has(canonicalTier((tier as { id: string }).id)));
     }
     return clampCatalogContext(result, b);
 }

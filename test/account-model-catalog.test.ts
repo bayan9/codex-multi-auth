@@ -98,3 +98,24 @@ it("limits advertised context to what every serving account supports",async()=>{
  expect(model?.context_window).toBe(20000);expect(model?.max_context_window).toBe(30000);
  expect(model?.supported_reasoning_levels).toEqual([{effort:'high'},{effort:'low'}]);
 });
+
+it("fails open on an unknown catalog even when the request sets effort or tier", async () => {
+	const catalog = new AccountModelCatalog(vi.fn().mockRejectedValue(new Error("429")));
+	expect(await catalog.supports("a", "m", "high")).toBe(true);
+	expect(await catalog.supports("a", "m", undefined, "fast")).toBe(true);
+	expect(await catalog.supports("a", "m", "high", "fast")).toBe(true);
+});
+it("advertises only effort and tier pairs that a single account can serve", async () => {
+	const catalogs: Record<string, unknown[]> = {
+		a: [{ slug: "m", supported_reasoning_levels: [{ effort: "high" }], service_tiers: [] }],
+		b: [{ slug: "m", supported_reasoning_levels: [{ effort: "low" }], service_tiers: [{ id: "priority" }] }],
+	};
+	const catalog = new AccountModelCatalog(async (key) => ({ models: catalogs[key] }));
+	const [model] = await catalog.list(["a", "b"]);
+	const efforts = (model?.supported_reasoning_levels as { effort: string }[]).map((level) => level.effort);
+	const tiers = ((model?.service_tiers ?? []) as { id: string }[]).map((tier) => tier.id);
+	expect(efforts.sort()).toEqual(["high", "low"]);
+	for (const effort of efforts)
+		for (const tier of tiers)
+			expect((await catalog.supports("a", "m", effort, tier)) || (await catalog.supports("b", "m", effort, tier))).toBe(true);
+});

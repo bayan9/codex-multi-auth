@@ -86,6 +86,7 @@ export class AccountModelCatalog {
 	/** True unless a successfully fetched catalog omits the model. */
 	async supports(accountKey: string, model: string, effort?: string, tier?: string): Promise<boolean> {
 		const models = await this.read(accountKey);
-		return models === null ? !effort && (!tier || tier === "default" || tier === "auto") : models.some((entry) => entry.slug === model && supportsCatalogSettings(entry, effort, tier));
+		// Unknown is not evidence against any setting; upstream still validates it.
+		return models === null || models.some((entry) => entry.slug === model && supportsCatalogSettings(entry, effort, tier));
 	}
 }

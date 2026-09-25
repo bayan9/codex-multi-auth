@@ -10,6 +10,8 @@ type Lease = {
 const leases = new AsyncLocalStorage<Map<string, Lease>>();
 const host = createHash("sha256").update(hostname()).digest("hex").slice(0, 16);
 const ownerPattern = /^([a-f0-9]{16})\.([1-9][0-9]*)\.([a-f0-9-]{36})$/;
+/** Owners this process published but failed to release; no live lease holds them. */
+const abandoned = new Set<string>();
 function code(error: unknown): string | undefined {
     return (error as NodeJS.ErrnoException | undefined)?.code;
 }
@@ -57,16 +59,18 @@ async function recoverDeadOwner(path: string): Promise<void> {
     const owner = ownerPattern.exec(name);
     if (!owner || owner[1] !== host || !Number.isSafeInteger(Number(owner[2])))
         return;
-    if (!dead(Number(owner[2])))
+    if (!abandoned.has(name) && !dead(Number(owner[2])))
         return;
     try {
         await fs.unlink(join(path, name));
     }
     catch (error) {
-        if (code(error) === "ENOENT")
-            return;
-        throw error;
+        if (code(error) !== "ENOENT")
+            throw error;
+        abandoned.delete(name);
+        return;
     }
+    abandoned.delete(name);
     // Never recursively remove: another writer may already have published a new nonempty lock.
     await removeEmpty(path);
 }
@@ -124,15 +128,23 @@ export async function withFileTransactionLock<T>(path: string, action: () => Pro
     }
     finally {
         const directory = published ? lock : candidate;
-        await withRetry(async () => {
-            try {
-                await fs.unlink(join(directory, owner));
-            }
-            catch (error) {
-                if (code(error) !== "ENOENT")
-                    throw error;
-            }
-            await removeEmpty(directory);
-        }, { maxAttempts: 6, backoffMs: 25 });
+        try {
+            await withRetry(async () => {
+                try {
+                    await fs.unlink(join(directory, owner));
+                }
+                catch (error) {
+                    if (code(error) !== "ENOENT")
+                        throw error;
+                }
+                await removeEmpty(directory);
+            }, { maxAttempts: 6, backoffMs: 25 });
+        }
+        catch {
+            // Best effort: never replace the action's committed outcome. Our own pid
+            // stays alive, so remember the owner for recoverDeadOwner to reclaim.
+            if (published)
+                abandoned.add(owner);
+        }
     }
 }

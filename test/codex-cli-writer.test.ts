@@ -98,6 +98,19 @@ describe("codex-cli writer", () => {
     try{expect(await writing).toBe(false);expect(await readFile(authPath,"utf8")).toBe(original);}
     finally{reader.mockRestore();renamer.mockRestore();}
   });
+
+  it("resolves false instead of rejecting when the native binding lock cannot be set up", async () => {
+    const mkdtemp = fsPromises.mkdtemp.bind(fsPromises);
+    const spy = vi.spyOn(fsPromises, "mkdtemp").mockImplementation(async (...args) => {
+      if (String(args[0]).includes(".native-bind")) throw Object.assign(Error("fixture denied"), { code: "EACCES" });
+      return mkdtemp(...args);
+    });
+    try {
+      await expect(setCodexCliActiveSelection({ accountId: "inference", accessToken: "inference", refreshToken: "inference-refresh" })).resolves.toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
   it("returns false when neither accounts.json nor auth.json exists", async () => {
     const updated = await setCodexCliActiveSelection({ accountId: "missing" });
     expect(updated).toBe(false);

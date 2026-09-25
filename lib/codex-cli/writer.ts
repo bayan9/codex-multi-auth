@@ -697,6 +697,15 @@ export async function setCodexCliActiveSelection(
 			});
 			return false;
 		}
+	}).catch((error: unknown) => {
+		// A held or unusable native-bind lock must not break the boolean contract.
+		incrementCodexCliMetric("writeFailures");
+		log.warn("Failed to persist Codex CLI active selection", {
+			operation: "write-active-selection",
+			outcome: "native-bind-lock-unavailable",
+			error: String((error as NodeJS.ErrnoException | undefined)?.code ?? error),
+		});
+		return false;
 	}));
 }
 
