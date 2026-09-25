@@ -2174,13 +2174,23 @@ describe("reviewed provider transitions",()=>{
   await seedExistingAppBindState({...options,port:freePort,baseUrl:oldUrl});
   // The recorded router is gone and its pid now belongs to an unrelated live process.
   await writeFile(resolveAppBindPaths(options).statusPath,JSON.stringify({version:1,state:"running",pid:process.pid,baseUrl:oldUrl,port:freePort,startedAt:1,updatedAt:1}));
+  let routerPid: number | null | undefined;
   try {
    const result=await bindCodexAppRuntimeRotation({...options,nativeOpenai:true,verifyProcessIdentity:async()=>false});
+   routerPid=result.status.router?.pid;
    expect(result.status.state?.nativeOpenai).toBe(true);
    expect(result.status.state?.baseUrl).toBe("http://127.0.0.1:54323");
-   expect(result.status.router?.pid).not.toBe(process.pid);
+   expect(routerPid).not.toBe(process.pid);
   } finally {
-   await unbindCodexAppRuntimeRotation({platform:process.platform,home:root,env});
+   // Same paths as the bind; the host platform is deliberate, because stopping the
+   // real detached child must use the host's process-identity probe.
+   await unbindCodexAppRuntimeRotation({...options,platform:process.platform});
+   const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
+   if(routerPid&&routerPid!==process.pid){
+    const stopped=await vi.waitFor(()=>{if(alive(routerPid!))throw Error("router still running");return true;},{timeout:5000}).catch(()=>false);
+    if(!stopped)process.kill(routerPid,"SIGKILL");
+    expect(stopped).toBe(true);
+   }
   }
  },20_000);
  it("refuses a mode change when a live router only fails its identity probe",async()=>{
