@@ -159,6 +159,8 @@ export interface DetachedProcessStopOptions {
 	/** Expected per-process nonce when verifying a persisted PID. */
 	identityToken?: string;
 	verifyProcessIdentity?: ProcessIdentityVerifier;
+	/** Called once the recorded PID is verified as this router, before it is stopped. */
+	onOwnershipVerified?: () => void;
 }
 
 export interface RuntimeRotationAppHelperStatus {
@@ -756,6 +758,7 @@ export async function stopRuntimeRotationRouterProcess(
 	if (!verified) {
 		return false;
 	}
+	options.onOwnershipVerified?.();
 	return stopDetachedProcess(router.pid, platform, options);
 }
 
@@ -1427,9 +1430,18 @@ async function bindCodexAppRuntimeRotationLocked(
 	const catalogAccount = options.nativeOpenai === false ? undefined : options.catalogAccount ?? existingState?.catalogAccount;
 	if (existingState && (!!existingState.nativeOpenai !== nativeOpenai || JSON.stringify(catalogAccount) !== JSON.stringify(existingState.catalogAccount))) {
 		const router = await readRouterStatus(paths.statusPath);
+		let ownRouter = false;
 		await stopRouter(router, platform, existingState.routerScriptPath, {
-			log: options.log, identityToken: existingState.identityToken, verifyProcessIdentity: options.verifyProcessIdentity		});
-		if (router?.pid && isProcessAlive(router.pid)) throw new Error("Stop the existing app router before changing provider mode");
+			log: options.log, identityToken: existingState.identityToken, verifyProcessIdentity: options.verifyProcessIdentity,
+			onOwnershipVerified: () => { ownRouter = true; },
+		});
+		// Refuse only when the recorded PID is verifiably our router and it survived
+		// the stop. A recycled PID now owned by another process must not block
+		// mode changes forever (unbind treats the same case as a warning).
+		if (router?.pid && isProcessAlive(router.pid)) {
+			if (ownRouter) throw new Error("Stop the existing app router before changing provider mode");
+			options.log?.(`Warning: recorded router pid ${router.pid} is not the app router; continuing`);
+		}
 	}
 
 	const host = existingState?.host ?? "127.0.0.1";

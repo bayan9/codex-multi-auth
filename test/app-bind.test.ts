@@ -2133,6 +2133,13 @@ describe("reviewed provider transitions",()=>{
   await bindCodexAppRuntimeRotation({...options,nativeOpenai:true});
   expect((await getAppBindStatus(options)).state?.catalogAccount).toBeUndefined();
  });
+ it("allows a mode change when the recorded router pid now belongs to another process",async()=>{
+  const options=await fixture();
+  await writeFile(resolveAppBindPaths(options).statusPath,JSON.stringify({pid:process.pid,baseUrl:"http://127.0.0.1:43210",port:43210,startedAt:1,updatedAt:1}));
+  const verifyProcessIdentity=vi.fn(async()=>false);
+  await bindCodexAppRuntimeRotation({...options,nativeOpenai:true,verifyProcessIdentity});
+  expect((await getAppBindStatus(options)).state?.nativeOpenai).toBe(true);
+ });
  it("allows a mode change with a dead recorded router",async()=>{
   const options=await fixture();
   await withDeadPid(async pid=>{
