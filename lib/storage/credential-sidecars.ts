@@ -22,11 +22,18 @@ export async function clearCredentialSidecars(): Promise<void> {
 		),
 	);
 	const dir = getCodexMultiAuthDir();
+	// Each writer read-modify-writes under its file lock; deleting under the same
+	// lock stops an in-flight refresh or redemption renaming its old state (and a
+	// last-resort policy) back after the reset.
 	for (const path of [
 		join(dir, "reset-credits.json"),
 		join(dir, "api-capability-probes.json"),
-		join(dir, "inference-activity"),
 	]) {
-		await withRetry(() => fs.rm(path, { recursive: true, force: true }), retry);
+		await withFileTransactionLock(path, () =>
+			withRetry(() => fs.rm(path, { force: true }), retry),
+		);
 	}
+	// Per-account timestamps only; their writers take no lock and hold no secrets.
+	const activity = join(dir, "inference-activity");
+	await withRetry(() => fs.rm(activity, { recursive: true, force: true }), retry);
 }
