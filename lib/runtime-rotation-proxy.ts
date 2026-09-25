@@ -1218,7 +1218,11 @@ async function handleRequestInner(
 				writeUnauthorized(res);
 				return;
 			}
-            if (snapshot.verified || snapshot.storage === null) {
+			if (snapshot.transientFailure && snapshot.routingAvailable === false && (apiKeyClient || await nativeOAuth())) {
+                writeJson(res, 503, {error:{code:"native_account_storage_unavailable",message:"Account storage is temporarily unavailable. Retry when it is readable."}});
+                return;
+            }
+            if (snapshot.verified || (snapshot.storage === null && !snapshot.transientFailure)) {
 			const accounts = accountManager.getAccountsSnapshot();
 			const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
 			if (!sameInventory) {
@@ -1505,7 +1509,13 @@ async function handleRequestInner(
 					errorCode: forwarded ? null : responseOutcome.finish().errorCode ?? "stream_forward_failed",
 					...(scanner.result() ?? {}),
 				});
-			} finally {
+            } catch (error) {
+                if (error instanceof ClientCancellationError || res.destroyed) {
+                    if (!res.destroyed) res.destroy();
+                    return;
+                }
+                throw error;
+            } finally {
 				res.off("close", abort);
 			}
 			return;
@@ -2214,9 +2224,13 @@ async function handleRequestInner(
 			}
 
 			if (state.nativeOpenai && state.readNativeAccountStorage) {
-				const latest = (await state.readNativeAccountStorage()).storage;
+				const latestSnapshot = await state.readNativeAccountStorage();
+                const latest = latestSnapshot.storage;
+                const retained = latestSnapshot.transientFailure && latestSnapshot.routingAvailable === true && (apiKeyClient || await nativeOAuth())
+                    ? state.activeAccountManager.getAccountsSnapshot().find(item => item.recordId === refreshed.account.recordId)
+                    : undefined;
 				const disk = latest?.accounts.find(item => item.recordId && item.recordId === refreshed.account.recordId)
-					?? latest?.accounts.find(item => item.accountId === refreshed.account.accountId && item.email === refreshed.account.email);
+					?? latest?.accounts.find(item => item.accountId === refreshed.account.accountId && item.email === refreshed.account.email) ?? retained;
 				const workspace = disk?.workspaces?.find(item => item.id === accountId);
 				const stillEligible = disk && disk.enabled !== false && !disk.authInvalidatedAt &&
 					(workspace ? workspace.enabled !== false : accountId === disk.accountId);

@@ -220,14 +220,22 @@ function collectCandidatesFromPayload(
  * Removes duplicate candidates by accountId.
  */
 function uniqueCandidates(candidates: AccountIdCandidate[]): AccountIdCandidate[] {
-	const seen = new Set<string>();
-	const result: AccountIdCandidate[] = [];
+	const byId = new Map<string, AccountIdCandidate>();
 	for (const candidate of candidates) {
-		if (seen.has(candidate.accountId)) continue;
-		seen.add(candidate.accountId);
-		result.push(candidate);
+		const kept = byId.get(candidate.accountId);
+		if (!kept) {
+			byId.set(candidate.accountId, { ...candidate });
+			continue;
+		}
+		const wasPersonal = isPersonalAccountCandidate(kept);
+		if (kept.isPersonal === undefined && candidate.isPersonal !== undefined) {
+			kept.isPersonal = candidate.isPersonal;
+		}
+		if (!wasPersonal && isPersonalAccountCandidate(candidate) && kept.isPersonal !== false) {
+			kept.label = candidate.label;
+		}
 	}
-	return result;
+	return [...byId.values()];
 }
 
 /** Explicit metadata wins over the conventional Personal display name. */

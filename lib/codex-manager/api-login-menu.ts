@@ -121,7 +121,9 @@ export async function runApiLoginMenu(
 		d.log("Run login --api in an interactive terminal.");
 		return 1;
 	}
-	let routes = await d.load();
+	let routes: ApiRouteCredential[];
+ try {routes = await d.load();}
+ catch {d.log("API route configuration could not be read. Check api-routes.json and retry.");return 1;}
 	for (;;) {
 		const choice = await d.select(
 			[
@@ -217,9 +219,13 @@ export async function runApiLoginMenu(
 			d.log(
 				"Saved. Choose an API or ZDR model explicitly in Codex. Desktop login is unchanged.",
 			);
-		} catch {
-			routes = await d.load();
-			d.log(
+		} catch (error) {
+            const changed = error instanceof Error && error.message.startsWith("API route configuration changed");
+            let reloaded = false;
+            try {routes = await d.load();reloaded = true;} catch { /* Keep the last readable configuration. */ }
+			d.log(changed ? (reloaded
+                ? "API routes changed in another process; the latest configuration was reloaded. Repeat the edit."
+                : "API routes changed in another process and could not be reloaded. Reopen the menu before editing.") :
 				"API setup did not complete. No partial credential was saved; check the key, permissions, and configuration.",
 			);
 		}

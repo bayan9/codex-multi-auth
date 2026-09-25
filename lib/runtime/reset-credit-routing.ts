@@ -14,7 +14,7 @@ export async function recoverResetQuota(options:{
 }):Promise<boolean>{
  if(!options.native||options.pinned||parseModelRoute(options.model).kind!=='oauth')return false;
  const family=options.family??'codex';
- const candidates=[...options.scopes].flatMap(([index,scopes])=>{const account=options.manager.getAccountByIndex(index);return account?scopes.map(scope=>({account,scope})):[];});
+ const candidates=[...options.scopes].flatMap(([index,scopes])=>{const account=options.manager.getAccountByIndex(index);return account&&!account.authInvalidatedAt?scopes.map(scope=>({account,scope})):[];});
  if(!candidates.length)return false;
  // Any usable capacity (including the reserve), unknown quota, or non-quota
  // failure prevents an automatic credit from being spent.

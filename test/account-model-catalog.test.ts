@@ -12,17 +12,20 @@ describe("live account model catalogs", () => {
 	it("stops waiting as soon as a cold eligible candidate resolves", async () => {
 		let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
 		const catalog=new AccountModelCatalog(async key=>{if(key==="slow")await gate;return {models:[{slug:"model"}]};});
-		try {expect(await catalog.prepareRouting(["slow","ready"],"model",undefined,undefined,()=>true,30)).toBe("ready");}
+		try {expect(await catalog.prepareRouting(["slow","ready"],"model",undefined,undefined,()=>true,10000)).toBe("ready");}
 		finally {release();await catalog.list(["slow"]);}
 	});
 	it("bounds cold discovery and never treats an expired entitlement as current",async()=>{
+        vi.useFakeTimers();
 		let now=0,release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
 		const catalog=new AccountModelCatalog(async()=>{if(now)await gate;return {models:[{slug:"model"}]};},()=>now,100);
 		await catalog.list(["a"]);now=101;
 		try {
 			expect(catalog.supportsCached("a","model")).toBe(false);
-			expect(await catalog.prepareRouting(["a"],"model",undefined,undefined,()=>true,10)).toBe("pending");
-		}finally{release();await catalog.list(["a"]);}
+			const pending=catalog.prepareRouting(["a"],"model",undefined,undefined,()=>true,10);
+            await vi.advanceTimersByTimeAsync(10);
+            expect(await pending).toBe("pending");
+		}finally{release();await catalog.list(["a"]);vi.useRealTimers();}
 	});
 	it("unions live models, preserves future metadata, and respects a pin", async () => {
 		const fetchCatalog = vi.fn(async (key: string) => ({
@@ -129,12 +132,13 @@ it("distinguishes a successful empty catalog from an unavailable workspace", asy
 });
 
 it("starts the next workspace as soon as any discovery slot finishes",async()=>{
+ vi.useFakeTimers();
  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
  const started:string[]=[];
  const catalog=new AccountModelCatalog(async key=>{started.push(key);if(key==="slow") await gate;return {models:[{slug:key}]};});
  const pending=catalog.list(["slow","two","three","four"]);
  try {await vi.waitFor(()=>expect(started).toContain("four"),{timeout:100});}
- finally{release();await pending;}
+ finally{release();await pending;vi.useRealTimers();}
  expect(started).toEqual(["slow","two","three","four"]);
 });
 
@@ -187,7 +191,8 @@ it("advertises only effort and tier pairs that a single account can serve", asyn
 	};
 	const catalog = new AccountModelCatalog(async (key) => ({ models: catalogs[key] }));
 	const [model] = await catalog.list(["a", "b"]);
-	const efforts = (model?.supported_reasoning_levels as { effort: string }[]).map((level) => level.effort);
+	expect(model).toBeDefined();
+	const efforts = (model!.supported_reasoning_levels as { effort: string }[]).map((level) => level.effort);
 	const tiers = ((model?.service_tiers ?? []) as { id: string }[]).map((tier) => tier.id);
 	expect(efforts.sort()).toEqual(["high", "low"]);
 	for (const effort of efforts)

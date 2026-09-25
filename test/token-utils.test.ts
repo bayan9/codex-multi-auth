@@ -859,3 +859,12 @@ describe("Token Utils Module", () => {
 		});
 	});
 });
+
+it("preserves Personal metadata when the token and organization identify the same workspace",()=>{
+ mockedDecodeJWT.mockReturnValue({[JWT_CLAIM_PATH]:{chatgpt_account_id:"personal-id",organizations:[{id:"business-id",title:"Business",is_default:true,is_personal:false},{id:"personal-id",title:"Personal",is_personal:true}]}});
+ const candidates=getAccountIdCandidates("fixture");
+ expect(candidates.map(c=>c.accountId)).toEqual(["personal-id","business-id"]);
+ expect(candidates[0]).toMatchObject({isPersonal:true});
+ expect(candidates[0]?.label).toContain("Personal");
+ expect(selectBestAccountCandidate(candidates)?.accountId).toBe("personal-id");
+});

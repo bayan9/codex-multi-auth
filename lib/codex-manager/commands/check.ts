@@ -1,9 +1,9 @@
+import { runWithGlobalStoragePath } from "../../storage/path-state.js";
+
 export interface CheckCommandDeps {
  runHealthCheck: (options: { liveProbe: boolean; discoverModels: boolean }) => Promise<void>;
  runResetCheck: () => Promise<number>;
  runCapabilityCheck: () => Promise<boolean>;
- getStoragePath: () => string | null;
- setStoragePath: (path: string | null) => void;
  logInfo?: (message: string) => void;
  logError?: (message: string) => void;
 }
@@ -18,14 +18,10 @@ export async function runCheckCommand(deps: CheckCommandDeps, args: string[] = [
   (deps.logError ?? console.error)(usage);
   return 1;
  }
- const previous = deps.getStoragePath();
- deps.setStoragePath(null);
- try {
+ return runWithGlobalStoragePath(async () => {
   if (scope === "resets") return await deps.runResetCheck();
   if (scope === "capabilities") return await deps.runCapabilityCheck() ? 0 : 1;
   else await deps.runHealthCheck({ liveProbe: true, discoverModels: scope === undefined });
   return 0;
- } finally {
-  deps.setStoragePath(previous);
- }
+ });
 }

@@ -284,30 +284,17 @@ describe("AccountManager.applyManualSelection", () => {
 });
 
 describe("AccountManager save resilience", () => {
-	it("recreates storage that was deleted after a switch", async () => {
-		// Regression: strict reads previously accepted a missing file only while
-		// affinityGeneration was 0, so any pool that had ever been switched could
-		// never recreate its storage; every later save threw ENOENT forever.
-		const path = makeTmpStoragePath();
-		const storage = createStorage(2, {
-			pinnedAccountIndex: 1,
-			affinityGeneration: 5,
-		});
-		writeStorageFile(path, storage);
-		setStoragePathDirect(path);
-		const manager = new AccountManager(undefined, storage);
-
-		rmSync(path, { force: true });
-		await manager.saveToDisk();
-
-		expect(existsSync(path)).toBe(true);
-		const onDisk = JSON.parse(readFileSync(path, "utf8")) as {
-			affinityGeneration?: unknown;
-			pinnedAccountIndex?: unknown;
-		};
-		expect(onDisk.affinityGeneration).toBe(5);
-		expect(onDisk.pinnedAccountIndex).toBe(1);
-	});
+	it("refuses to recreate deleted storage from a stale manager after a switch", async () => {
+        // A missing primary is authoritative. An in-flight daemon must not
+        // restore credentials removed after its snapshot was loaded.
+        const path = makeTmpStoragePath();
+        const storage = createStorage(2, {pinnedAccountIndex:1,affinityGeneration:5});
+        writeStorageFile(path,storage);setStoragePathDirect(path);
+        const manager = new AccountManager(undefined,storage);
+        rmSync(path,{force:true});
+        await expect(manager.saveToDisk()).rejects.toMatchObject({code:"ESTALE"});
+        expect(existsSync(path)).toBe(false);
+    });
 
 	it("does not restore stale account state after an intentional clear", async () => {
 		const path = makeTmpStoragePath();

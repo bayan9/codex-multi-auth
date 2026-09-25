@@ -18,9 +18,9 @@ describe("API model discovery and isolated inference", () => {
 	it("serves an explicitly visible model while discovery persistence is blocked",async()=>{
 		let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
 		const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>init?.method==="POST"?new Response("ok"):Response.json({data:[{id:"exclusive"}]}));
-		const runtime=new ApiModelRuntime(fetcher as typeof fetch,Date.now,async route=>{await gate;throw Error("fixture lock unavailable");return route;});
+		const runtime=new ApiModelRuntime(fetcher as typeof fetch,Date.now,async ():Promise<ApiRouteCredential>=>{await gate;throw Error("fixture lock unavailable");});
 		try {
-			const result=await Promise.race([runtime.request("zdr/exclusive",{model:"zdr/exclusive"},[credential("private")]),new Promise<null>(resolve=>setTimeout(()=>resolve(null),100))]);
+			const result=await runtime.request("zdr/exclusive",{model:"zdr/exclusive"},[credential("private")]);
 			expect(result?.status).toBe(200);
 		}finally{release();}
 	});
@@ -417,7 +417,7 @@ it("uses cached request capabilities without running probes or inspecting anothe
  const routes=[credential('private'),credential('ordinary','api')];await runtime.catalogs(routes);
  block=true;now+=16*60000;enrich.mockClear();fetcher.mockClear();
  try {
-  const response=await Promise.race([runtime.request('zdr/exclusive',{reasoning:{effort:'low'}},routes),new Promise<null>(r=>setTimeout(()=>r(null),100))]);
+  const response=await runtime.request('zdr/exclusive',{reasoning:{effort:'low'}},routes);
   expect(response?.status).toBe(200);expect(enrich).not.toHaveBeenCalled();
   expect(fetcher.mock.calls.some(([,init])=>new Headers(init?.headers).get('authorization')==='Bearer test-ordinary')).toBe(false);
  }finally{release();}
@@ -446,4 +446,20 @@ it("enriches capability metadata when a failed cold catalog recovers",async()=>{
  await runtime.request('zdr/exclusive',{reasoning:{effort:'high'}},[credential('private')]);
  now+=6000;healthy=true;
  expect((await runtime.request('zdr/exclusive',{reasoning:{effort:'high'}},[credential('private')])).status).toBe(200);
+});
+
+it.each([true,false])("uses typed cancellation and never retries another credential (preaborted=%s)",async preaborted=>{
+ const {ClientCancellationError}=await import("../lib/request/client-cancellation.js");
+ const controller=new AbortController();let entered!:()=>void;
+ const started=new Promise<void>(resolve=>entered=resolve);
+ const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>{
+  if(init?.method!=="POST")return Response.json({data:[{id:"exclusive"}]});
+  entered();return new Promise<Response>((_resolve,reject)=>init?.signal?.addEventListener("abort",()=>reject(Error("aborted")),{once:true}));
+ });
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch);
+ if(preaborted)controller.abort();
+ const pending=runtime.request("zdr/exclusive",{model:"zdr/exclusive"},[credential("one"),credential("two")],controller.signal);
+ const assertion=expect(pending).rejects.toBeInstanceOf(ClientCancellationError);
+ if(!preaborted){await started;controller.abort();}
+ await assertion;expect(fetcher.mock.calls.filter(c=>c[1]?.method==="POST")).toHaveLength(preaborted?0:1);
 });

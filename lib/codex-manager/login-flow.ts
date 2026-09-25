@@ -644,7 +644,7 @@ async function runAuthLoginFlow(
 								"Warning: the automatically selected workspace is not authorized for these credentials; using the account the backend reports as default instead. Re-authenticate while that workspace is active in ChatGPT to bind it.",
 							);
 						}
-					} else if (authorized) {
+					} else if (authorized?.accountIds.includes(resolved.accountIdOverride.trim())) {
 						// The id is authorized now: drop a mirror left by an earlier login.
 						// Without an answer (fail open) the saved mirror is kept.
 						resolved = { ...resolved, codexCliMirror: null };
@@ -659,7 +659,7 @@ async function runAuthLoginFlow(
 				});
 			} catch (error) {
 				if (error instanceof CodexValidationError) {
-					console.error(`Re-authentication failed: ${error.message}`);
+					console.error(`${expectedAccount ? "Re-authentication" : "Login"} failed: ${error.message}`);
 					return 1;
 				}
 				throw error;

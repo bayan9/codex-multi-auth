@@ -170,7 +170,7 @@ export const UI_COPY = {
 		addAnotherQuestion: (count: number) =>
 			`Add another account? (${count} added) (y/n): `,
 		selectModePrompt:
-			"(api) API models, (a) add, (c) check, (b) best, fi(x), (s) settings, (d) deep, (g) problem, (f) fresh, (q) back [a/c/b/x/s/d/g/f/q]: ",
+			"(api) API models, (a) add, (c) check, (b) best, fi(x), (s) settings, (d) deep, (g) problem, (f) fresh, (q) back [api/a/c/b/x/s/d/g/f/q]: ",
 		invalidModePrompt: "Use one of: api, a, c, b, x, s, d, g, f, q.",
 	},
 } as const;

@@ -364,3 +364,17 @@ it("handles upgraded socket errors while authentication is pending", async()=>{
   expect(()=>socket.emit("error",Object.assign(Error("reset"),{code:"ECONNRESET"}))).not.toThrow();
  } finally {resolve(new Response(null,{status:401}));await new Promise(r=>setImmediate(r));probe.mockRestore();socket.destroy();}
 });
+
+it("cancels queued creates as well as the streaming turn without blocking new work", async () => {
+ const f = await fixture();
+ const ws = await f.connect();
+ const created = once(ws, "message");
+ const first = turn(ws, {model:"stall",input:[]});
+ await created;
+ ws.send(JSON.stringify({type:"response.create",model:"discarded",input:[]}));
+ ws.send(JSON.stringify({type:"response.cancel"}));
+ expect((await first).at(-1)?.type).toBe("error");
+ await turn(ws,{model:"after-cancel",input:[]});
+ await vi.waitFor(()=>expect(f.calls.some(call=>call.model==="after-cancel")).toBe(true));
+ expect(f.calls.map(call=>call.model)).toEqual(["stall","after-cancel"]);
+});

@@ -1,6 +1,6 @@
 # Model route pools: integration review
 
-## VERDICT: NEEDS_CHANGES for release; prepared as a draft
+## Review scope and release caveats
 
 This is a focused native self-review, not an independent review. The review fixes
 and broader routing changes have been integrated locally. This review does not
@@ -45,7 +45,7 @@ not establish provider retention approval.
    tool or endpoint works. Runtime capability failures are learned without treating
    transient authentication or throttling errors as missing entitlements.
 8. **MEDIUM — release validation outstanding:** Wrapper/helper tests still fail
-   in the full suite. Two known failures also occur on the base. The stress case failed twice
+   in the full suite. The deterministic failures also occur on the base. The stress case failed twice
    on the integrated tree, then passed with only diagnostic assertion text changed;
    it also passes on the base. Its intermittency remains unresolved. This work does not
    broaden helper startup behavior or silently skip those tests.
@@ -55,19 +55,12 @@ not establish provider retention approval.
 
 ## Verification
 
-- Full integrated suite: 6,393 passed, three failed, ten skipped by existing gates.
-  Review, routing, workspace, privacy-pool and transport regressions passed.
-- Additional missing-store/intentional-clear and canonical backup-fixture tests:
-  50 passed.
+- Current validation results and outstanding suite failures are tracked in
+  [PR #705](https://github.com/ndycode/codex-multi-auth/pull/705).
 - Typecheck and lint passed. Production dependency audit reports zero
   vulnerabilities; development audit passes its allowlist.
 - Hono and nanoid security updates are included; WebSocket dependencies are pinned.
 - Added lines contain no private account names, identifiers, credentials or private
   model/program labels. Email fixtures use reserved example domains.
 - No live account configuration, desktop binary or installed router was changed
-  during this integration. No publication is implied by this draft.
-
-## RETENTIONS
-
-The reusable distinction between availability caches and authorization freshness
-was submitted to the personal memory bank. No shared-bank write was made.
+  during this integration. Publication and deployment status are tracked in the PR.

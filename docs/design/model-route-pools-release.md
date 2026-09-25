@@ -22,12 +22,10 @@ short-lived runtime rejection evidence handles changes between checks. Responses
 WebSockets use the same routing and authentication boundary as HTTP, with bounded
 connection-local continuations and no replay after generation starts.
 
-Validation: 6,393 full-suite tests passed; two reproducible base wrapper failures
-and one intermittent helper stress failure remain. The stress case subsequently
-passed in isolation, but remains a release caveat. Typecheck, lint, build, production
-audit and development-audit allowlist pass. Production advisories are remediated.
-Serial creates and explicit rejection of unsupported steering controls remain
-transport limits. A new live desktop acceptance test was not run for this draft.
+Validation results, release caveats, and current deployment status are tracked in
+[PR #705](https://github.com/ndycode/codex-multi-auth/pull/705). Wrapper/helper
+failures remain visible there. Serialized response creation and explicit rejection
+of unsupported steering controls remain transport limits.
 
 Voice is a separate experimental follow-up and is excluded from the tested text
 release. It requires a successful native/public Live handshake and microphone

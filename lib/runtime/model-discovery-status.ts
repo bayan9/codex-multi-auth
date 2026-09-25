@@ -1,3 +1,4 @@
+import { withFileTransactionLock } from "../storage/file-lock.js";
 import { styleReportText as paint } from "../ui/format.js";
 import { withCheckProgress } from "../ui/check-progress.js";
 import { mapWithConcurrency } from "../concurrency.js";
@@ -180,7 +181,7 @@ let inventoryWrites: Promise<void> = Promise.resolve();
 export function saveModelInventory(value: ModelInventory): Promise<void> {
 	const path = inventoryPath();
 	const pending = inventoryWrites.then(() =>
-		saveModelInventorySerial(value, path),
+		withFileTransactionLock(path, () => saveModelInventorySerial(value, path)),
 	);
 	inventoryWrites = pending.catch(() => undefined);
 	return pending;

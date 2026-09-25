@@ -1,9 +1,9 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AccountManager } from "../lib/accounts.js";
-import { saveAccounts, loadAccounts, clearAccounts, setStoragePathDirect, cloneTrackedAccountStorage, withAccountAndFlaggedStorageTransaction } from "../lib/storage.js";
+import { saveAccounts, loadAccounts, getStoragePath, clearAccounts, setStoragePathDirect, cloneTrackedAccountStorage, withAccountAndFlaggedStorageTransaction } from "../lib/storage.js";
 import { withRetry } from "../lib/fs-retry.js";
 const dirs: string[] = [];
 afterEach(async () => { setStoragePathDirect(null); for (const dir of dirs.splice(0))
@@ -248,4 +248,17 @@ it.each([false, true])("clears the loser's auth-failure cooldown when this proce
     expect(row.coolingDownUntil).toBeUndefined();
     expect(row.cooldownReason).toBeUndefined();
     expect(manager.isAccountCoolingDown(manager.getAccountByIndex(0)!)).toBe(false);
+});
+
+it("refuses backup recovery as the merge base after primary corruption", async () => {
+ await setup();
+ const proposed = (await loadAccounts())!;
+ const path = getStoragePath();
+ const backup = structuredClone(proposed);
+ backup.accounts.push({recordId:"backup-only",accountId:"backup-only",refreshToken:"fixture-old",addedAt:1,lastUsed:1});
+ await writeFile(path + ".bak", JSON.stringify(backup));
+ await writeFile(path, "{corrupt");
+ proposed.accounts[0]!.accountLabel = "Local edit";
+ await expect(saveAccounts(proposed)).rejects.toMatchObject({code:"ESTALE"});
+ expect(await readFile(path,"utf8")).toBe("{corrupt");
 });

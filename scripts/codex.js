@@ -6558,21 +6558,23 @@ async function main() {
 	// Resolve `--account` / CODEX_MULTI_AUTH_FORCE_ACCOUNT before forwarding: strip
 	// the launcher-only flag from the Codex args and publish the resolved pin, or
 	// fail hard so a forced account can never silently fall back to another one.
+	if (hasNativeAppBinding(process.env)) {
+        const forced = resolveForcedAccountSelector(rawArgs, process.env);
+        if (forced.error || forced.selector !== null) {
+            console.error(forced.error ?? "Native app binding uses the persistent inference selection. Use codex-multi-auth switch instead of --account.");
+            return 1;
+        }
+        delete process.env.CODEX_MULTI_AUTH_FORCE_ACCOUNT_INDEX;
+        const result = await forwardToRealCodexOnce(realCodexBin, forced.strippedArgs, process.env);
+        return result.exitCode;
+    }
 	const forcedAccount = await applyForcedAccountSelection(rawArgs, process.env);
 	if (forcedAccount.error) {
 		console.error(forcedAccount.error);
 		return 1;
 	}
 	const forwardArgs = [...forcedAccount.forwardArgs];
-	if (hasNativeAppBinding(process.env)) {
-		if (process.env.CODEX_MULTI_AUTH_FORCE_ACCOUNT_INDEX) {
-			console.error("Native app binding uses the persistent inference selection. Use codex-multi-auth switch instead of --account.");
-			return 1;
-		}
-		// Preserve native model IDs, reasoning settings, account/read and desktop login.
-		const result = await forwardToRealCodexOnce(realCodexBin, forwardArgs, process.env);
-		return result.exitCode;
-	}
+
 
 	if (process.stdin.isTTY && process.stdout.isTTY && !bypass) {
 		const pickerRequest = getResumePickerRequest(forwardArgs);

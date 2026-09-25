@@ -383,7 +383,7 @@ export async function fetchCodexQuotaSnapshot(
 	for (const model of models) {
 		attemptedAnyModel = true;
 		try {
-			const instructions = options.primeUnusedSubscription ? "Reply with exactly OK." : await getCodexInstructions(model);
+			const instructions = await getCodexInstructions(model);
 			const probeBody: RequestBody = {
 				model,
 				stream: true,

@@ -515,8 +515,9 @@ describe("workspace choice before account persistence",()=>{
  });
  it("refuses ambiguous noninteractive setup before writing",async()=>{
   runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
-  chooseLoginWorkspaceMock.mockRejectedValue(new CodexValidationError("Workspace choice required"));
+  chooseLoginWorkspaceMock.mockRejectedValue(new CodexValidationError("Multiple workspaces found; use --org"));
   expect(await runAuthLogin(["--manual"],deps())).toBe(1);
+  expect(loggedLines(errorSpy)).toContain("Login failed: Multiple workspaces found; use --org");
   expect(persistAccountPoolMock).not.toHaveBeenCalled();
   expect(syncSelectionToCodexMock).not.toHaveBeenCalled();
  });
@@ -655,4 +656,14 @@ it("does not discover workspace access when the workspace chooser is cancelled",
  expect(await runAuthLogin(["--manual"],deps())).toBe(0);
  expect(fetchAuthorizedAccountsMock).not.toHaveBeenCalled();
  expect(persistAccountPoolMock).not.toHaveBeenCalled();
+});
+
+it.each([undefined,"selected-workspace"])("preserves the native mirror when discovery cannot authorize the selected workspace (default=%s)",async defaultAccountId=>{
+ const selected={...TOKEN_SUCCESS,accountIdOverride:"selected-workspace",accountIdSource:"manual",codexCliMirror:{forAccountId:"selected-workspace",accountId:"native-default"}};
+ runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
+ resolveAccountSelectionMock.mockReturnValue(selected);
+ fetchAuthorizedAccountsMock.mockResolvedValue({accountIds:["native-default"],defaultAccountId});
+ expect(await runAuthLogin(["--manual","--org","selected-workspace"],deps())).toBe(0);
+ expect(persistAccountPoolMock).toHaveBeenCalledExactlyOnceWith([selected],false,PLAIN_PERSIST_OPTIONS);
+ expect(syncSelectionToCodexMock).toHaveBeenCalledExactlyOnceWith(selected);
 });

@@ -330,7 +330,7 @@ export class ApiModelRuntime {
 				)
 			)
 				continue;
-			if (signal?.aborted) throw new Error("API request cancelled");
+			if (signal?.aborted) throw new ClientCancellationError();
 			const controller = new AbortController();
 			const abort = () => controller.abort();
 			signal?.addEventListener("abort", abort, { once: true });
@@ -396,7 +396,7 @@ export class ApiModelRuntime {
                 }
 			} catch (error) {
                 if (error instanceof ClientCancellationError) throw error;
-				if (signal?.aborted) throw new Error("API request cancelled");
+				if (signal?.aborted) throw new ClientCancellationError();
 				lastStatus = 502;
 			} finally {
 				clearTimeout(timer);

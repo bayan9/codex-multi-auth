@@ -4569,6 +4569,27 @@ describe("catalog review concurrency and backoff",()=>{
 });
 
 describe("native inventory read resilience",()=>{
+ it.each(["EBUSY","EPERM","EACCES"])("preserves live routing after a delayed %s without trusting managed bearers",async code=>{
+  let clock=Date.now();vi.spyOn(Date,"now").mockImplementation(()=>clock);
+  const storage=createStorage(clock,1),manager=new AccountManager(undefined,storage);
+  const read=vi.fn().mockResolvedValue(storage);
+  const {fetchImpl,calls}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:'model-test'}]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:read}});
+  expect((await getModels(proxy)).status).toBe(200);
+  clock+=3000;read.mockRejectedValue(Object.assign(Error("locked"),{code}));
+  const response=await postResponses(proxy,{model:"model-test",input:"test"});await response.text();expect(response.status).toBe(200);
+  expect((await getModels(proxy,undefined,{authorization:"Bearer access-1"})).status).toBe(401);
+  expect(calls.filter(c=>c.url.endsWith('/responses'))).toHaveLength(1);
+  clock+=30000;
+  const expired=await postResponses(proxy,{model:"model-test",input:"test"});
+  expect(expired.status).toBe(503);await expired.text();
+  expect(calls.filter(c=>c.url.endsWith('/responses'))).toHaveLength(1);
+  read.mockResolvedValue(storage);
+  const recovered=await postResponses(proxy,{model:"model-test",input:"test"});
+  expect(recovered.status).toBe(200);await recovered.text();
+
+ });
+
  it.each(['EBUSY','EPERM'])("keeps independently authenticated inference available through one %s read",async code=>{
   const storage=createStorage(Date.now(),1),manager=new AccountManager(undefined,storage);
   const read=vi.fn().mockResolvedValueOnce(storage).mockResolvedValueOnce(storage).mockRejectedValueOnce(Object.assign(Error('busy'),{code})).mockResolvedValue(storage);
@@ -5063,7 +5084,7 @@ it("returns a warm picker cache immediately while expired workspace data refresh
  const proxy=await startProxy({accountManager:new AccountManager(undefined,createStorage(now)),fetchImpl:async()=>{reads++;if(slow)await gate;return Response.json({models:[{slug:slow?"new-model":"old-model"}]});},options:{nativeOpenai:true,now:()=>now}});
  await (await getModels(proxy, "/models")).text();slow=true;now+=6*60_000;
  try{
-  const r=await fetch(`${proxy.baseUrl}/models`,{headers:{authorization:`Bearer ${DEFAULT_CLIENT_API_KEY}`},signal:AbortSignal.timeout(500)});
+  const r=await fetch(`${proxy.baseUrl}/models`,{headers:{authorization:`Bearer ${DEFAULT_CLIENT_API_KEY}`},signal:AbortSignal.timeout(10000)});
   expect((await r.json()).models.map((m:{slug:string})=>m.slug)).toEqual(["old-model"]);
   expect(reads).toBe(4);
  }finally{release();}

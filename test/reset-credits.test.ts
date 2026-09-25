@@ -1,3 +1,4 @@
+import { promises as fs } from "node:fs";
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,4 +74,13 @@ it('shares a concurrent automatic check across service instances instead of repe
  f.read.mockImplementation(async t=>{entered();await gate;return payload(t.accountId,false,0);});
  const first=f.service.automatic([target('a')]);await started;const other=new ResetCreditService(join(dir,'state.json'),{read:f.read,consume:f.consume});const second=other.automatic([target('a')]);
  const results=Promise.allSettled([first,second]);await new Promise(r=>setTimeout(r,1300));release();expect((await results).map(r=>r.status)).toEqual(['fulfilled','fulfilled']);expect(f.read).toHaveBeenCalledTimes(1);
+});
+
+it("retries a transient EPERM publishing reset state",async()=>{
+ const f=fixture(); const rename=fs.rename.bind(fs);
+ const spy=vi.spyOn(fs,"rename");
+ let failed=false;
+ spy.mockImplementation(async(from,to)=>{if(!failed&&String(to)===join(dir,"state.json")){failed=true;throw Object.assign(Error("locked"),{code:"EPERM"});}return rename(from,to);});
+ try {await expect(f.service.refresh([target("a")])).resolves.toBeDefined();expect(failed).toBe(true);expect((await f.service.status()).snapshots.a?.availableCount).toBe(2);}
+ finally {spy.mockRestore();}
 });

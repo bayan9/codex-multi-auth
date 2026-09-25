@@ -92,3 +92,20 @@ it("requires operator-declared ZDR classification instead of inferring it from d
  expect(choicesOffered.join(" ")).toContain("not detected from the key");
  expect(save.mock.calls[0]?.[0]?.[0]?.kind).toBe("api");
 });
+
+it("reports an unreadable route configuration without rejecting the dashboard",async()=>{
+ const log=vi.fn();const select=vi.fn();
+ await expect(runApiLoginMenu({load:async()=>{throw Error("Invalid API route configuration");},select,log})).resolves.toBe(1);
+ expect(log).toHaveBeenCalledWith(expect.stringMatching(/configuration.*read/i));expect(select).not.toHaveBeenCalled();
+});
+it.each([false,true])("reports a concurrent edit and tolerates recovery reload failure=%s",async failReload=>{
+ const route:ApiRouteCredential={id:"fixture",label:"Fixture",kind:"api",apiKey:"fixture",priority:9,enabled:true,visibleModels:[]};
+ const choices=["fixture","toggle","back"];const log=vi.fn();
+ const load=vi.fn().mockResolvedValueOnce([route]);
+ if(failReload)load.mockRejectedValueOnce(Error("busy"));else load.mockResolvedValueOnce([{...route,label:"Updated"}]);
+ const select=vi.fn(async(_items:unknown)=>choices.shift()??null);
+ await expect(runApiLoginMenu({load,select,log,save:async()=>{throw Error("API route configuration changed; reopen the menu before saving.");}})).resolves.toBe(0);
+ expect(log.mock.calls.flat().join(" ")).toMatch(/changed in another process/);
+ expect(log.mock.calls.flat().join(" ")).not.toMatch(/check the key/);
+ expect(select.mock.calls[2]?.[0]).toEqual(expect.arrayContaining([expect.objectContaining({label:expect.stringContaining(failReload?"Fixture":"Updated")})]));
+});

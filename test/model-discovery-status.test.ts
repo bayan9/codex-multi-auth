@@ -287,3 +287,29 @@ it("reports a failed capability refresh to the focused CLI caller", async () => 
   fetchImpl:vi.fn(async()=>new Response(null,{status:503})),loadInventory:async()=>null,
  })).toBe(false);
 });
+
+it("serializes independent inventory writers and preserves both successful baselines",async()=>{
+ const {promises:fs}=await import("node:fs");
+ const first=await import("../lib/runtime/model-discovery-status.js");
+ vi.resetModules();const second=await import("../lib/runtime/model-discovery-status.js");
+ const originalWrite=fs.writeFile.bind(fs),originalRename=fs.rename.bind(fs);
+ let release!:()=>void,entered!:()=>void,checkpoint!:()=>void;
+ const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r),overlap=new Promise<void>(r=>checkpoint=r);
+ let parked=false;
+ const write=vi.spyOn(fs,"writeFile").mockImplementation(async(...args)=>{
+  if(String(args[1]).startsWith('{"version":1,"checkedAt":101,')){parked=true;entered();await gate;}
+  await originalWrite(...args);
+  if(String(args[1]).startsWith('{"version":1,"checkedAt":102,'))checkpoint();
+ });
+ const rename=vi.spyOn(fs,"rename").mockImplementation(async(...args)=>{if(parked&&String(args[1]).endsWith("model-discovery.json.write-lock"))checkpoint();return originalRename(...args);});
+ const entry=(id:string,ok:boolean)=>({id,label:id,kind:"oauth" as const,enabled:true,error:!ok,checkedAt:ok?101:102,models:ok?[id]:[],visibleModels:[]});
+ let pending:Promise<unknown>|undefined;
+ try {
+  const a=first.saveModelInventory({version:1,checkedAt:101,entries:[entry("writer-a",true),entry("writer-b",false)]});
+  await started;
+  const b=second.saveModelInventory({version:1,checkedAt:102,entries:[entry("writer-a",false),entry("writer-b",true)]});
+  pending=Promise.all([a,b]);await overlap;await new Promise(r=>setImmediate(r));release();await pending;
+  const result=await second.loadModelInventory();
+  expect(result?.entries.map(e=>e.lastSuccessful?.models)).toEqual([["writer-a"],["writer-b"]]);
+ }finally{release();await pending;write.mockRestore();rename.mockRestore();}
+});

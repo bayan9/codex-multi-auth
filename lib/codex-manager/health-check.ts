@@ -431,7 +431,9 @@ export async function runHealthCheck(
 		),
 	);
 	if (options.discoverModels) {
-  await refreshAndPrintResetCredits(console.log);
+  await refreshAndPrintResetCredits(console.log).catch(() => {
+   console.log("Reset-credit availability could not be refreshed; cached counts may be stale.");
+  });
   await refreshAndPrintModelInventory(console.log);
  }
 }

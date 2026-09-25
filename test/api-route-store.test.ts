@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { promises as fs } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtemp, readFile, stat, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -181,4 +182,11 @@ it("preserves validated program configuration through discovery updates",async()
  const updated=await updateApiModelDiscovery(route,["example","gpt-fixture"],file);
  expect(updated.accessPrograms).toEqual(route.accessPrograms);
  expect(updated.modelAccessPrograms).toEqual(route.modelAccessPrograms);
+});
+
+it("retries EPERM when publishing API route configuration",async()=>{
+ const path=join(await tempDir(),"routes.json"),rename=fs.rename.bind(fs);let failed=false;
+ const spy=vi.spyOn(fs,"rename").mockImplementation(async(from,to)=>{if(String(to)===path&&!failed){failed=true;throw Object.assign(Error("locked"),{code:"EPERM"});}return rename(from,to);});
+ try {await saveApiRoutes([],path);expect(failed).toBe(true);expect(await loadApiRoutes(path)).toEqual([]);}
+ finally{spy.mockRestore();}
 });

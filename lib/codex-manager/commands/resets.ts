@@ -1,5 +1,6 @@
 import { AccountManager } from '../../accounts.js';
-import { loadAccounts, setStoragePath } from '../../storage.js';
+import { loadAccounts } from '../../storage.js';
+import { runWithGlobalStoragePath } from '../../storage/path-state.js';
 import { createResetCreditService, resetTargetForStoredAccount, resetAccountLabel } from '../../runtime/account-reset-credits.js';
 import { withCheckProgress } from '../../ui/check-progress.js';
 const usage='Usage: codex-multi-auth resets list [--refresh] | redeem <account-number> | auto manual|last-resort';
@@ -7,7 +8,7 @@ export async function runResetsCommand(args:string[]):Promise<number>{
  const [command='list',value,...extra]=args;
  if(command==='--help'||command==='-h'){console.log(usage);return 0;}
  if(extra.length||!['list','redeem','auto'].includes(command)||(command==='list'&&value!==undefined&&value!=='--refresh')||(command==='redeem'&&!/^[1-9][0-9]*$/.test(value??''))||(command==='auto'&&value!=='manual'&&value!=='last-resort')){console.error(usage);return 1;}
- setStoragePath(null);
+ return runWithGlobalStoragePath(async () => {
  const storage=await loadAccounts();const manager=new AccountManager(undefined,storage);const service=createResetCreditService(manager);
  try{
   if(command==='auto'){await service.setPolicy(value as 'manual'|'last-resort');console.log(`Automatic reset redemption: ${value}`);return 0;}
@@ -22,4 +23,5 @@ export async function runResetsCommand(args:string[]):Promise<number>{
   (storage?.accounts??[]).forEach((a,i)=>{const target=resetTargetForStoredAccount(a);const snapshot=target?(refreshed??state.snapshots)[target.key]:undefined;console.log(`${resetAccountLabel(a,i)}: ${snapshot?.availableCount??'unknown'} reset credits${snapshot?` (checked ${Math.max(0,Math.floor((Date.now()-snapshot.updatedAt)/1000))}s ago)`:''}${target?.key===state.pending?.key?' [redemption pending; retry this account]':''}`);});return 0;
  }catch{console.error(command==='list'?'Reset-credit availability could not be refreshed. No credits were redeemed.':command==='auto'?'Reset-credit settings could not be updated.':'Reset operation could not be confirmed. No new automatic redemption will be attempted while a result is pending; use resets list and retry the same account.');return 1;}
  finally{await manager.flushPendingSave();}
+ });
 }

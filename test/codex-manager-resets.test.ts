@@ -35,3 +35,13 @@ it('reports reset availability read failures without claiming a pending redempti
  expect(console.error).toHaveBeenCalledWith('Reset-credit availability could not be refreshed. No credits were redeemed.');
  expect(f.redeem).not.toHaveBeenCalled();
 });
+
+it.each([false,true])('restores the caller storage state after standalone reset list (failure=%s)',async fails=>{
+ const {runWithStoragePathState,getStoragePathState}=await import('../lib/storage/path-state.js');
+ const previous={currentStoragePath:'/fixture/shared/project/accounts.json',currentProjectRoot:'/fixture/project',currentLegacyProjectStoragePath:'/fixture/project/.legacy/accounts.json',currentLegacyWorktreeStoragePath:'/fixture/old-worktree/accounts.json'};
+ if(fails)f.list.mockRejectedValueOnce(Error('provider unavailable'));
+ await runWithStoragePathState(previous,async()=>{
+  expect(await runResetsCommand(['list'])).toBe(fails?1:0);
+  expect(getStoragePathState()).toEqual(previous);
+ });
+});

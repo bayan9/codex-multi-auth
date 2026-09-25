@@ -798,6 +798,18 @@ failure.
   scripts or storage migrations were added.
 - `codex-multi-auth login` remains browser-first by default.
 - New logins prefer a uniquely identified Personal workspace over an organization default. If several workspaces exist without a unique Personal choice, interactive login requires selecting one before saving; noninteractive login requires `--org`. Cancelling the choice saves nothing. Explicit overrides and targeted re-authentication take precedence.
+- `check` now refreshes reset credits and model/capability discovery, and completes
+  a tiny first-use request for genuinely unused Personal subscriptions. This uses
+  subscription quota. API capability probes remain opt-in and billable. Use
+  `check accounts|resets|capabilities` to run one portion; unknown arguments exit 1.
+- `status` labels the forecast as "Forecast suggestion". `status --json` adds
+  `apiAccounts`, `totalAccountCount`, `selectionMode`, `modelInventory`, and
+  per-account priority, forecast, and reset-credit fields.
+- New commands include `login --api`, `resets list|redeem|auto`, and
+  `account priority <index> <0..9>`. API credentials and reset state live in the
+  new local files `api-routes.json` (mode 0600) and `reset-credits.json`.
+- This routing release adds no npm scripts and requires no manual storage migration.
+
 - `codex-multi-auth login --org <org_id>` binds the login to one ChatGPT workspace.
 - `codex-multi-auth login --device-auth` uses OpenAI Codex device-code login. It prints `https://auth.openai.com/codex/device` and a one-time code, then polls for completion without opening a browser or starting the local callback server.
 - `codex-multi-auth login --account <identity> --preserve-selection` refreshes a saved account transactionally without changing which account is selected. If the provider returns a different account id/email, the write is refused and the previous credentials remain intact. Refreshing the account that is currently active still writes its new tokens to the native `~/.codex/auth.json`, so plain `codex` keeps working; refreshing any other account leaves that file alone. A manual `switch <n>` pin survives the refresh, and an account you disabled stays disabled. `--account` cannot be combined with `--org` — re-authenticate the saved row on its own workspace, or register the other workspace with `--org` on its own. Combine it with `--device-auth` for remote shells.
@@ -919,7 +931,7 @@ identities. Historical inference times are not guessed when no record exists.
 JSON status preserves the legacy `accounts[].lastUsed` field and adds
 `accounts[].lastInferenceRequestAt`, `apiAccounts`, and `totalAccountCount`.
 
-#### Reading status and check output
+### Reading status and check output
 
 Terminal reports highlight account headings, successful probes, warnings, and
 new or changed capabilities using the configured UI theme. Text labels remain

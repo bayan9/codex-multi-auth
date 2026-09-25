@@ -2040,6 +2040,28 @@ function cloneFlaggedStorageForPersistence(
 		accounts: structuredClone(storage?.accounts ?? []),
 	};
 }
+async function loadPrimaryAccountsForMerge(): Promise<AccountStorageV3 | null> {
+	const path = getStoragePath();
+	if (existsSync(getIntentionalResetMarkerPath(path))) {
+		return createEmptyStorageWithMetadata(false, "intentional-reset");
+	}
+	try {
+		const { normalized } = await loadAccountsFromPath(path, {
+			normalizeAccountStorage,
+			isRecord,
+		});
+		if (!normalized) throw new Error("Invalid primary account storage");
+		return normalized;
+	} catch (cause) {
+		// A confirmed deletion is authoritative; never resurrect a backup here.
+		if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw Object.assign(
+			new Error("Account storage changed concurrently; reload before saving."),
+			{ code: "ESTALE", cause },
+		);
+	}
+}
+
 export async function withAccountStorageTransaction<T>(
 	handler: (
 		current: AccountStorageV3 | null,
@@ -2048,7 +2070,7 @@ export async function withAccountStorageTransaction<T>(
 ): Promise<T> {
 	return runWithAccountStorageTransaction(handler, {
 		getStoragePath,
-		loadCurrent: () => loadAccountsInternal(saveAccountsUnlocked),
+		loadCurrent: loadPrimaryAccountsForMerge,
 		saveAccounts: saveAccountsUnlocked,
 	});
 }
@@ -2066,7 +2088,7 @@ export async function withAccountAndFlaggedStorageTransaction<T>(
 	return withStorageLock(async () => {
 		const storagePath = getStoragePath();
 		const state = {
-			snapshot: await loadAccountsInternal(saveAccountsUnlocked),
+			snapshot: await loadPrimaryAccountsForMerge(),
 			storagePath,
 			active: true,
 		};
@@ -2174,7 +2196,7 @@ export async function saveAccounts(storage: AccountStorageV3): Promise<void> {
 		withStorageLock,
 		saveUnlocked: async proposed => {
 			const baseline = loadedAccountSnapshots.get(proposed);
-			const snapshot = baseline ? mergeAccountSnapshot(baseline, await loadAccountsInternal(saveAccountsUnlocked), proposed) : proposed;
+			const snapshot = baseline ? mergeAccountSnapshot(baseline, await loadPrimaryAccountsForMerge(), proposed) : proposed;
 			await saveAccountsUnlocked(snapshot);
 			if (baseline) {
 				for (const key of Object.keys(proposed)) Reflect.deleteProperty(proposed, key);

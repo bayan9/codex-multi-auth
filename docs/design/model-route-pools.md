@@ -1,6 +1,7 @@
 # Explicit model routing pools
 
 ## Scope and design
+
 Keep desktop authentication and native features separate from inference credentials.
 Discover the union of enabled subscription account catalogs. Preserve the reference model metadata and aggregate advertised native effort and
 speed choices. Check the requested combination against each credential.
@@ -25,6 +26,7 @@ and must not authorize stale access. No prompts or credentials belong in discove
 status. API model discovery identifies IDs. Public model documentation supplies explicitly documented effort levels; optional billable credential probes verify missing effort levels and speed tiers. Tool capabilities are not inferred.
 
 ## Verification gates
+
 Policy, storage and API dispatch tests precede implementation. Integration tests
 exercise the actual loopback proxy for catalog union, API-only dispatch, and
 fail-closed boundaries. Follow with CLI tests, streaming/error tests, type checking,
@@ -101,7 +103,6 @@ A chosen speed is part of routing eligibility. The proxy does not change it;
 upstream capacity can still downgrade processing. Public API model ID
 listing alone cannot establish a speed entitlement; OAuth speed capabilities must
 not be copied onto API/ZDR credentials.
-
 
 ## API effort and speed verification
 

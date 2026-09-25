@@ -1,3 +1,4 @@
+import { withRetry } from "../fs-retry.js";
 import { resolve } from "node:path";
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -47,7 +48,7 @@ export class ResetCreditService {
   try {
    const file=await fs.open(path,'wx',0o600);
    try {await file.writeFile(JSON.stringify(stateSchema.parse(state))+'\n');await file.sync();} finally {await file.close();}
-   await fs.rename(path,this.path);
+   await withRetry(()=>fs.rename(path,this.path),{maxAttempts:6,backoffMs:25});
   }
   finally {await fs.rm(path,{force:true});}
  }

@@ -402,6 +402,7 @@ export class ResponsesWebSocketGateway {
 		let queue = Promise.resolve(),
 			queued = 0,
 			queuedBytes = 0;
+		let generation = 0;
 		const send = (event: Json) => {
 			if (ws.readyState !== WebSocket.OPEN) return;
 			if (ws.bufferedAmount > this.maxBytes) {
@@ -426,6 +427,8 @@ export class ResponsesWebSocketGateway {
 				return;
 			}
 			if (event.type === "response.cancel") {
+				// Invalidate work accepted before cancellation, including queued creates.
+				generation++;
 				session.controller?.abort();
 				for (const channel of session.channels.values()) channel.terminate();
 				return;
@@ -441,9 +444,10 @@ export class ResponsesWebSocketGateway {
 				return;
 			}
 			queuedBytes += eventBytes;
+			const acceptedGeneration = generation;
 			queue = queue
 				.then(async () => {
-					if (session.closed) return;
+					if (session.closed || acceptedGeneration !== generation) return;
 					try {
 						if (typeof event.model !== "string" || !Array.isArray(event.input))
 							throw Error("invalid_request_body");

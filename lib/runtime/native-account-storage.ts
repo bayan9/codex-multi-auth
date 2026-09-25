@@ -5,6 +5,9 @@ import { isRecord } from "../utils.js";
 export interface NativeAccountSnapshot {
     storage: AccountStorageV3 | null;
     verified: boolean;
+    transientFailure?: boolean;
+    /** Independent client auth may retain routing for at most 30 seconds. */
+    routingAvailable?: boolean;
 }
 /** Cache parsed primary storage only; backup recovery must never resurrect revoked credentials. */
 export function createNativeAccountStorageReader(read?: () => Promise<AccountStorageV3 | null>, path = getStoragePath()): () => Promise<NativeAccountSnapshot> {
@@ -38,7 +41,7 @@ export function createNativeAccountStorageReader(read?: () => Promise<AccountSto
                     // Availability grace is bounded, never refreshes its own age, and cannot
                     // authenticate a managed bearer. Retry the changed file on the next request.
                     signature = undefined;
-                    return { storage: Date.now() - lastSuccess < 2000 ? structuredClone(cached) : null, verified: false };
+                    return { storage: Date.now() - lastSuccess < 2000 ? structuredClone(cached) : null, verified: false, transientFailure: true, routingAvailable: cached !== null && Date.now() - lastSuccess < 30000 };
                 }
                 cached = null;
                 signature = undefined;
