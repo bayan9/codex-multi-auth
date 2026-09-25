@@ -1,4 +1,4 @@
-import { mergeAccountSnapshot } from "./storage/snapshot-merge.js";
+import { mergeAccountCooldown, mergeAccountSnapshot } from "./storage/snapshot-merge.js";
 import type { Auth } from "@codex-ai/sdk";
 import { createHash } from "node:crypto";
 import { saveAccountsWithRetry } from "./storage/save-retry.js";
@@ -2172,6 +2172,7 @@ export class AccountManager {
    rescuedBaseline = structuredClone(this.persistenceBaseline);
    const baselineRow = rescuedBaseline.accounts.find(matches);
    if (!baselineRow) throw error;
+   const cooldown = mergeAccountCooldown(prior, disk, refreshed);
    // Persist the stable identity before rotating a legacy row's identity material.
    row.recordId = refreshed.recordId;
    baselineRow.recordId = refreshed.recordId;
@@ -2184,11 +2185,26 @@ export class AccountManager {
     if (value === undefined) {delete row[field];delete baselineRow[field];}
     else {Object.assign(row, { [field]: value });Object.assign(baselineRow, { [field]: value });}
    }
+   Object.assign(row, cooldown);
   }
   await persist(merged);
+  if (refreshed) {
+   const saved = merged.accounts.find(row => row.recordId === refreshed.recordId);
+   const live = this.accounts.find(row => row.recordId === refreshed.recordId);
+   // A successful refresh must retain blockers learned by another request,
+   // including an observation made while the storage write was pending.
+   if (saved && live) Object.assign(live, mergeAccountCooldown(refreshed, saved, live));
+  }
   // Keep the baseline in this manager's inventory/intent space. Adopting added
   // disk records here would misread their absence in the next save as deletion.
   this.persistenceBaseline = rescuedBaseline ?? structuredClone(proposed);
+  if (refreshed) {
+   const saved = merged.accounts.find(row => row.recordId === refreshed.recordId);
+   const baseline = this.persistenceBaseline.accounts.find(row => row.recordId === refreshed.recordId);
+   // The adopted blocker is now known persisted state, so a later explicit
+   // clear must compare against it rather than the pre-refresh clear.
+   if (saved && baseline) Object.assign(baseline, { coolingDownUntil: saved.coolingDownUntil, cooldownReason: saved.cooldownReason });
+  }
  }
 
 	async saveToDisk(): Promise<void> {

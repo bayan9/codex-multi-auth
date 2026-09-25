@@ -60,6 +60,14 @@ function mergeWorkspaces(base: AccountMetadataV3, disk: AccountMetadataV3, local
     const untracked = [base, disk, local].every(row => row.currentWorkspaceIndex === undefined);
     return { workspaces, currentWorkspaceIndex: untracked && index === 0 ? undefined : index };
 }
+/** Preserve concurrent cooldown observations while allowing an unchanged blocker to clear. */
+export function mergeAccountCooldown(base: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">, disk: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">, local: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">): Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason"> {
+    const cleared = base.coolingDownUntil !== undefined && (
+        (disk.coolingDownUntil === undefined && (local.coolingDownUntil === undefined || local.coolingDownUntil === base.coolingDownUntil)) ||
+        (local.coolingDownUntil === undefined && disk.coolingDownUntil === base.coolingDownUntil));
+    const cooldown = (disk.coolingDownUntil ?? 0) >= (local.coolingDownUntil ?? 0) ? disk : local;
+    return { coolingDownUntil: cleared ? undefined : cooldown.coolingDownUntil, cooldownReason: cleared ? undefined : cooldown.cooldownReason };
+}
 /** Runtime observations commute; user-owned edits retain conflict detection. */
 function mergeRuntimeAccount(base: AccountMetadataV3, disk: AccountMetadataV3, local: AccountMetadataV3): AccountMetadataV3 {
     const limits: Record<string, number> = {};
@@ -70,14 +78,9 @@ function mergeRuntimeAccount(base: AccountMetadataV3, disk: AccountMetadataV3, l
         const value = clear ? undefined : Math.max(a ?? 0, b ?? 0);
         if (value !== undefined) limits[key] = value;
     }
-    const cleared = base.coolingDownUntil !== undefined && (
-        (disk.coolingDownUntil === undefined && (local.coolingDownUntil === undefined || local.coolingDownUntil === base.coolingDownUntil)) ||
-        (local.coolingDownUntil === undefined && disk.coolingDownUntil === base.coolingDownUntil));
-    const cooldown = (disk.coolingDownUntil ?? 0) >= (local.coolingDownUntil ?? 0) ? disk : local;
     const runtime = {
         rateLimitResetTimes: Object.keys(limits).length ? limits : undefined,
-        coolingDownUntil: cleared ? undefined : cooldown.coolingDownUntil,
-        cooldownReason: cleared ? undefined : cooldown.cooldownReason,
+        ...mergeAccountCooldown(base, disk, local),
         lastSwitchReason: local.lastSwitchReason ?? disk.lastSwitchReason,
         ...(disk.workspaces || local.workspaces ? mergeWorkspaces(base, disk, local) : {}),
     };
