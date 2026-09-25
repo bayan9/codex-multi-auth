@@ -513,27 +513,36 @@ describe("403 probe outcomes", () => {
 		const before = posts;
 		now += 60_001;
 		await reader.enrich([{ slug: "fixture" }], false, route);
-		return { efforts, tiers, reprobedSoon: posts > before };
+		return { efforts, tiers, status: (model?.capability_probe_status ?? {}) as Record<string, string>, reprobedSoon: posts > before };
 	};
 	it("drops everything the credential verified on a 403 that names the key or project", async () => {
 		const result = await run(() => Response.json({ error: { code: "insufficient_permissions", message: "fixture" } }, { status: 403 }));
 		expect(result.efforts).not.toContain("xhigh");
 		expect(result.tiers).toEqual([]);
 	});
-	it("removes only the probed effort on a model-entitlement 403", async () => {
+	it("hides the whole model on this credential after a model-entitlement 403", async () => {
 		const result = await run((body) => (body.reasoning as { effort?: string } | undefined)?.effort === "xhigh"
 			? Response.json({ error: { code: "model_access_denied", message: "fixture" } }, { status: 403 })
+			: null);
+		expect(result.efforts).toEqual([]);
+		expect(result.tiers).toEqual([]);
+		expect(result.status.responses).toBe("unsupported");
+		expect(result.reprobedSoon).toBe(false);
+	});
+	it("removes only the named effort on a 403 whose param is the probed setting", async () => {
+		const result = await run((body) => (body.reasoning as { effort?: string } | undefined)?.effort === "xhigh" && !body.tools && !body.service_tier
+			? Response.json({ error: { code: "unsupported_value", param: "reasoning.effort" } }, { status: 403 })
 			: null);
 		expect(result.efforts).not.toContain("xhigh");
 		expect(result.efforts).toContain("high");
 		expect(result.tiers).toEqual(expect.arrayContaining(["priority", "ultrafast"]));
 		expect(result.reprobedSoon).toBe(false);
 	});
-	it("removes only the probed effort on an unexplained 403 and retries the probe soon", async () => {
+	it("changes nothing on an unexplained 403 and retries the probe soon", async () => {
 		const result = await run((body) => (body.reasoning as { effort?: string } | undefined)?.effort === "xhigh" && !body.service_tier && !body.tools
 			? new Response("denied", { status: 403 })
 			: null);
-		expect(result.efforts).not.toContain("xhigh");
+		expect(result.efforts).toContain("xhigh");
 		expect(result.efforts).toContain("high");
 		expect(result.tiers).toEqual(expect.arrayContaining(["priority", "ultrafast"]));
 		expect(result.reprobedSoon).toBe(true);

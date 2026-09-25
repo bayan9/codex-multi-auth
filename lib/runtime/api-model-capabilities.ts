@@ -71,18 +71,20 @@ const CREDENTIAL_ACCESS_CODES = new Set([
 	"ip_not_authorized", "unsupported_country_region_territory",
 ]);
 /**
- * A 403 either removes the credential's access ("lost"), is tied to the probed
- * setting or model entitlement ("setting"), or says neither ("ambiguous").
+ * A 403 either removes the credential's access ("lost"), denies the whole model
+ * on this credential ("model"), denies only the probed setting ("setting"), or
+ * explains nothing ("ambiguous").
  */
-function classifyProbe403(data: unknown, setting: { effort?: string; tier?: string; compatibility?: boolean }): "lost" | "setting" | "ambiguous" {
+function classifyProbe403(data: unknown, setting: { effort?: string; tier?: string; compatibility?: boolean }): "lost" | "model" | "setting" | "ambiguous" {
 	const error = isRecord(data) && isRecord(data.error) ? data.error : null;
 	if (!error) return "ambiguous";
 	const code = String(error.code ?? ""), param = String(error.param ?? "");
 	if (CREDENTIAL_ACCESS_CODES.has(code) || ["api_key", "organization", "project"].includes(param)) return "lost";
+	// Same model-level denial codes the runtime capability classifier uses.
+	if (classifyCapabilityFailure(403, data) === "model") return "model";
 	if (setting.effort && ["reasoning.effort", "reasoning"].includes(param)) return "setting";
 	if (setting.tier && param === "service_tier") return "setting";
 	if (setting.compatibility && ["tools", "tool_choice"].includes(param)) return "setting";
-	if (classifyCapabilityFailure(400, data) === "model" || param === "model") return "setting";
 	return "ambiguous";
 }
 export class ApiModelCapabilities {
@@ -215,26 +217,29 @@ export class ApiModelCapabilities {
 		// inconclusive and keeps what an earlier probe verified. Only
 		// "unsupported" or "downgraded" removes a setting otherwise.
 		let lostAccess = false;
+		// A model-level denial hides the model on this credential: no efforts, no tiers.
+		let modelDenied = false;
 		const previous = this.probes.get(key);
 		const keep = (name: string, status: string): string =>
-			status === "unverified" && !lostAccess && previous?.status[name] === "verified" ? "verified" : status;
+			status === "unverified" && !lostAccess && !modelDenied && previous?.status[name] === "verified" ? "verified" : status;
 		const attempt = async (setting: {
 			effort?: string;
 			tier?: string;
 			compatibility?: boolean;
 		}): Promise<string> => {
-			// Only a 403 that names the key/org/project drops everything this credential
-			// verified. One tied to the setting removes that setting; an unexplained one
-			// removes only the probed setting too, and the probe is retried soon.
+			// Lost access drops everything this credential verified; a model-level
+			// denial hides the model; a 403 naming the probed setting removes only it.
+			// An unexplained 403 changes nothing and the probe is retried soon.
 			const denied403 = (data: unknown): string => {
 				const kind = classifyProbe403(data, setting);
 				if (kind === "lost") { credentialUnavailable = true; lostAccess = true; return "unverified"; }
-				if (kind === "ambiguous") credentialUnavailable = true;
-				// The compatibility probe stands for the whole model: never hide it on an unexplained 403.
-				return setting.compatibility && kind === "ambiguous" ? "unverified" : "unsupported";
+				if (kind === "model") { modelDenied = true; return "unsupported"; }
+				if (kind === "setting") return "unsupported";
+				credentialUnavailable = true;
+				return "unverified";
 			};
 			return this.withProbeSlot(async () => {
-				if (credentialUnavailable) return "unverified";
+				if (credentialUnavailable || modelDenied) return "unverified";
 				try {
 					const response = await this.fetchImpl(
 						"https://api.openai.com/v1/responses",
@@ -387,7 +392,13 @@ export class ApiModelCapabilities {
 			result.status[tier] = effective;
 			if (effective === "verified") result.tiers.push(tier);
 		}
-		if (credentialUnavailable) result.status.retry = "transient";
+		if (modelDenied) {
+			result.levels = [];
+			result.tiers = [];
+			for (const name of Object.keys(result.status)) result.status[name] = "unsupported";
+			result.status.responses = "unsupported";
+		}
+		if (credentialUnavailable && !modelDenied) result.status.retry = "transient";
 		result.at = this.now();
 		if (this.probes.size >= 1000)
 			this.probes.delete(this.probes.keys().next().value ?? "");
