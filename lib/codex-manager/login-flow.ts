@@ -606,6 +606,12 @@ async function runAuthLoginFlow(
 					? loginOptions.org
 					: await chooseLoginWorkspace(getAccountIdCandidates(tokenResult.access, tokenResult.idToken));
 				if (workspaceOverride === null) {
+					// Same as an OAuth cancel: back to the dashboard when it launched
+					// this sign-in, otherwise exit.
+					if (!explicitSignInMode && existingCount > 0) {
+						console.log(stylePromptText("Cancelled. Account was not saved.", "muted"));
+						continue loginFlow;
+					}
 					console.log("Cancelled. Account was not saved.");
 					return 0;
 				}

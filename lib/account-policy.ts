@@ -61,7 +61,7 @@ function normalizePolicy(key: string, value: unknown): AccountPolicy {
 		accountKey: key,
 		tags,
 		weight: normalizeWeight(record.weight),
-		priority: typeof record.priority === "number" && Number.isInteger(record.priority) && record.priority >= 0 && record.priority <= 9 ? record.priority : 1,
+		priority: normalizePriority(record.priority),
 		paused: record.paused === true,
 		drained: record.drained === true,
 		note: note.length > 0 ? note.slice(0, 500) : null,
@@ -192,6 +192,11 @@ export async function saveAccountPolicyStore(
 	await queued;
 }
 
+/** Tiers are integers 0-9; anything else (including legacy absence) is tier 1. */
+function normalizePriority(value: unknown): number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 9 ? value : 1;
+}
+
 export function upsertAccountPolicy(
 	store: AccountPolicyStore,
 	accountKey: string,
@@ -210,6 +215,7 @@ export function upsertAccountPolicy(
 		),
 	].sort();
 	next.weight = normalizeWeight(next.weight);
+	next.priority = normalizePriority(next.priority);
 	next.updatedAt = now;
 	store.accounts[accountKey] = next;
 	return next;

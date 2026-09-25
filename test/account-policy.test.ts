@@ -127,3 +127,10 @@ describe("account policy store", () => {
 	});
 });
 
+
+it.each([[12, 1], [-1, 1], [2.5, 1], [Number.NaN, 1], [0, 0], [9, 9], [4, 4]])("normalizes an upserted priority %s the way loading does (%s)", async (priority, expected) => {
+	const { upsertAccountPolicy } = await import("../lib/account-policy.js");
+	const store = { version: 1 as const, accounts: {} };
+	const saved = upsertAccountPolicy(store, "fixture", (policy) => { policy.priority = priority; });
+	expect(saved.priority).toBe(expected);
+});
