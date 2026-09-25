@@ -440,16 +440,27 @@ function applyAccountStorageMutations(
 		if (mutation.before.accountLabel !== mutation.after.accountLabel) {
 			target.accountLabel = mutation.after.accountLabel;
 		}
+		// The pointer indexes the list, so the two move together: copying only
+		// the list would keep a pointer moved on disk meanwhile, possibly out
+		// of range of the new list.
 		if (
-			mutation.before.currentWorkspaceIndex !== mutation.after.currentWorkspaceIndex
-		) {
-			target.currentWorkspaceIndex = mutation.after.currentWorkspaceIndex;
-		}
-		if (
+			mutation.before.currentWorkspaceIndex !== mutation.after.currentWorkspaceIndex ||
 			JSON.stringify(mutation.before.workspaces) !==
-			JSON.stringify(mutation.after.workspaces)
+				JSON.stringify(mutation.after.workspaces)
 		) {
-			target.workspaces = mutation.after.workspaces;
+			const workspaces = mutation.after.workspaces;
+			const pointer = mutation.after.currentWorkspaceIndex;
+			target.workspaces = workspaces;
+			target.currentWorkspaceIndex =
+				!workspaces ||
+				(typeof pointer === "number" && pointer >= 0 && pointer < workspaces.length)
+					? pointer
+					: Math.max(
+							0,
+							workspaces.findIndex(
+								(workspace) => workspace.id === mutation.after.accountId,
+							),
+						);
 		}
 	}
 }

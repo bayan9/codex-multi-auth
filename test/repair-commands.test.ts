@@ -2246,4 +2246,57 @@ describe("repair-commands direct deps coverage", () => {
 		expect(persist).toHaveBeenCalledTimes(1);
 		expect(codexCliWriterMocks.setCodexCliActiveSelection).not.toHaveBeenCalled();
 	});
+
+	// CodeRabbit (round 4): the rebind trims the list but leaves the pointer
+	// at 0, while another process moved the on-disk pointer to 1. Copying the
+	// list alone saved `workspaces: [personal-id]` with `currentWorkspaceIndex: 1`.
+	it("runFix saves the workspace list and pointer together after a concurrent pointer move", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		const loaded = orgAccountStorage(Date.now() + 60_000);
+		const loadedAccount = loaded.accounts[0];
+		if (!loadedAccount) throw new Error("fixture has no account");
+		loadedAccount.currentWorkspaceIndex = 0;
+		storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(loaded));
+		const onDisk = structuredClone(loaded);
+		const onDiskAccount = onDisk.accounts[0];
+		if (!onDiskAccount) throw new Error("fixture has no account");
+		onDiskAccount.currentWorkspaceIndex = 1;
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		const persist = vi.fn(async () => {});
+		storageMocks.withAccountStorageTransaction.mockImplementation(
+			async (fn: (storage: unknown, persist: unknown) => Promise<void>) =>
+				fn(onDisk, persist),
+		);
+		const reboundUnauthorizedAccountIdentity = vi.fn(
+			async (account: {
+				accountId?: string;
+				accountIdSource?: string;
+				workspaces?: Array<{ id: string; name?: string; enabled: boolean }>;
+			}) => {
+				account.accountId = "personal-id";
+				account.accountIdSource = "token";
+				account.workspaces = [{ id: "personal-id", name: "Personal", enabled: true }];
+				return { accountId: "personal-id", changed: true, rejected: "org-team" };
+			},
+		);
+		silenceConsole("log");
+
+		await runFix(
+			["--json", "--live"],
+			createDeps({ hasUsableAccessToken: () => true, reboundUnauthorizedAccountIdentity }),
+		);
+
+		const persisted = persist.mock.calls[0]?.[0] as {
+			accounts: Array<{ currentWorkspaceIndex?: number; workspaces?: Array<{ id: string }> }>;
+		};
+		const saved = persisted.accounts[0];
+		expect(saved?.workspaces?.map((workspace) => workspace.id)).toEqual(["personal-id"]);
+		expect(saved?.currentWorkspaceIndex).toBe(0);
+	});
 });
