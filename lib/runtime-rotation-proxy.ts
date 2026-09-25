@@ -2796,11 +2796,13 @@ async function handleRequestInner(
 					state.status.lastStreamQuotaUpdateAt = snapshot.updatedAt;
 				},
 			});
+			let streamErrored = false;
 			const forwarded = await forwardStreamingResponse(
 				upstream,
 				res,
 				state.status,
 				() => {
+					streamErrored = true;
 					// Deliberately NOT the pre-header transport policy above,
 					// which skips recordFailure (#677). By this point the
 					// upstream accepted the request and began responding, so a
@@ -2825,10 +2827,13 @@ async function handleRequestInner(
 				{...(budgetAdvisory.level === "soft" ? buildContextBudgetHeaders(budgetAdvisory) : {}),...(state.catalogEtag ? {"x-models-etag":state.catalogEtag} : {})},
 				() => {usageScanner.result();return responseOutcome.finish();},
 			);
+			// The client went away mid-stream: no upstream error, and the response was
+			// neither completed nor failed. That says nothing about the account.
+			const clientDisconnected = !forwarded && !streamErrored && !res.writableEnded;
 			if (forwarded && upstream.ok) {
 				accountManager.recordSuccess(refreshed.account, context.family, context.model);
 				recordRuntimeAccountRecovery(refreshed.account.index);
-			} else {
+			} else if (!clientDisconnected) {
 				state.sessionAffinityStore?.forgetSession(context.sessionKey);
 				const rejection = classifyCapabilityFailure(400, responseOutcome.rejection);
 				if (rejection && context.model) {
@@ -2862,9 +2867,9 @@ async function handleRequestInner(
 				});
 			}
 			await usageRecorder.record({
-				outcome: forwarded && upstream.ok ? "success" : "failure",
+				outcome: forwarded && upstream.ok ? "success" : clientDisconnected ? "cancelled" : "failure",
 				statusCode: upstream.status,
-				errorCode: responseOutcome.finish().errorCode ?? (forwarded ? null : "stream_forward_failed"),
+				errorCode: clientDisconnected ? "client_disconnected" : responseOutcome.finish().errorCode ?? (forwarded ? null : "stream_forward_failed"),
 				account: refreshed.account,
 				...(usageTokens ?? {}),
 			});

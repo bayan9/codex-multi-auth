@@ -5189,6 +5189,25 @@ it("reads the subscription quota cache at most once per second across native req
  expect(readSubscriptionQuota).toHaveBeenCalledTimes(1);
 });
 
+it("keeps session affinity when the client disconnects mid-stream",async()=>{
+ const forget=vi.spyOn(SessionAffinityStore.prototype,"forgetSession");
+ const manager=new AccountManager(undefined,createStorage(Date.now(),2));
+ const failure=vi.spyOn(manager,"recordFailure");
+ let cancelled=false;
+ const {fetchImpl}=createRecordingFetch(()=>new Response(new ReadableStream<Uint8Array>({
+  start(controller){controller.enqueue(new TextEncoder().encode('data: {"type":"response.created","response":{"id":"r"}}\n\n'));},
+  cancel(){cancelled=true;},
+ }),{headers:{"content-type":"text/event-stream"}}));
+ const proxy=await startProxy({accountManager:manager,fetchImpl});
+ const response=await postResponses(proxy,{model:"gpt-5-codex",input:"fixture",stream:true},"/responses",{session_id:"affinity-session"});
+ const reader=response.body!.getReader();await reader.read();await reader.cancel();
+ await vi.waitFor(()=>expect(cancelled).toBe(true));
+ await new Promise(resolve=>setTimeout(resolve,50));
+ expect(forget).not.toHaveBeenCalled();
+ expect(failure).not.toHaveBeenCalled();
+ forget.mockRestore();
+});
+
 describe("request-level capability rejections",()=>{
  const reject=()=>Response.json({error:{code:"invalid_value",param:"reasoning.effort",message:"Unsupported effort fixture"}},{status:400});
  it.each([2,3])("forwards the upstream 400 after two accounts reject the effort (%i accounts)",async count=>{
