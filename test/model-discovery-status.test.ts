@@ -1,8 +1,25 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
 	discoverModelInventory,
 	formatModelInventory,
 } from "../lib/runtime/model-discovery-status.js";
+import { promises as isolationFs } from "node:fs";
+import { tmpdir as isolationTmpdir } from "node:os";
+import { join as isolationJoin } from "node:path";
+// Inventory writes merge with whatever is already on disk, so every test gets
+// its own multi-auth directory instead of the worker's shared one.
+let previousMultiAuthDir: string | undefined;
+let multiAuthDir: string;
+beforeEach(async () => {
+	previousMultiAuthDir = process.env.CODEX_MULTI_AUTH_DIR;
+	multiAuthDir = await isolationFs.mkdtemp(isolationJoin(isolationTmpdir(), "model-discovery-"));
+	process.env.CODEX_MULTI_AUTH_DIR = multiAuthDir;
+});
+afterEach(async () => {
+	if (previousMultiAuthDir === undefined) delete process.env.CODEX_MULTI_AUTH_DIR;
+	else process.env.CODEX_MULTI_AUTH_DIR = previousMultiAuthDir;
+	await isolationFs.rm(multiAuthDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
 describe("model discovery reporting", () => {
 	it("reports each credential independently including API-only and hidden IDs", async () => {
 		const fetcher = vi.fn(async () =>
