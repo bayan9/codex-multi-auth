@@ -964,8 +964,11 @@ accounts can share a tier. Lower tiers are considered first within the applicabl
 privacy pool, after eligibility filtering. `forecast risk` is a separate health
 estimate (0–100, lower is better), not a prediction for every model/setting
 combination. `status --json` exposes `forecastRiskScore` and `forecastRiskLevel`
-for subscription accounts. In native app-bind mode, the selected account is
-tried first when eligible, with fallback through configured tiers; a configured tier of 0 does not itself
+for subscription accounts. In native app-bind mode with no `switch` pin, the
+currently active account is a soft preference: it is favoured within the first
+eligible tier (quota ordering can still pick another account there), and requests
+fall back through configured tiers when it is unavailable. A stored `switch` pin is
+different: it is strict and never falls back. A configured tier of 0 does not itself
 mean that the account is pinned.
 
 API/ZDR setup recommends tier 9 and offers tiers 1–9 within its own pool.
