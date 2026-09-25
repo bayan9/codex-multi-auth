@@ -21,6 +21,7 @@ import { isCodexUnavailableError } from "../errors.js";
 import {
 	codexAuthAccountIdsMatch,
 	codexCliActiveIdentity,
+	isOpenAiOrgId,
 } from "../auth/token-utils.js";
 import { queuedRefresh } from "../refresh-queue.js";
 import {
@@ -1713,6 +1714,7 @@ export async function runDoctor(
 	const codexConfigFileExists = existsSync(codexConfigPath);
 	let codexAuthEmail: string | undefined;
 	let codexAuthAccountId: string | undefined;
+	let codexAuthFileAccountId: string | undefined;
 
 	addCheck({
 		key: "codex-auth-file",
@@ -1754,6 +1756,7 @@ export async function runDoctor(
 				codexAuthEmail = sanitizeEmail(
 					emailFromFile ?? extractAccountEmail(accessToken, idToken),
 				);
+				codexAuthFileAccountId = accountIdFromFile;
 				codexAuthAccountId = accountIdFromFile ?? extractAccountId(accessToken);
 				addCheck({
 					key: "codex-auth-readable",
@@ -2084,16 +2087,19 @@ export async function runDoctor(
 			const codexActiveIdentity = codexCliState?.activeAccountId
 				? codexCliActiveIdentity(codexCliState)
 				: { accountId: codexActiveAccountId };
+			// An org account_id in auth.json itself (written before #700) is
+			// rejected by Codex CLI 0.156+, so it is never aligned.
 			const isAccountIdMismatch =
-				!!managerActiveAccountId
-				&& !!codexActiveAccountId
-				&& !codexAuthAccountIdsMatch(
-					{
-						accountId: managerActiveAccountId,
-						accessToken: activeAccount?.accessToken,
-					},
-					codexActiveIdentity,
-				);
+				isOpenAiOrgId(codexAuthFileAccountId)
+				|| (!!managerActiveAccountId
+					&& !!codexActiveAccountId
+					&& !codexAuthAccountIdsMatch(
+						{
+							accountId: managerActiveAccountId,
+							accessToken: activeAccount?.accessToken,
+						},
+						codexActiveIdentity,
+					));
 
 			addCheck({
 				key: "active-selection-sync",

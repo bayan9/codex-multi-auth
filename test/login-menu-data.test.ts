@@ -487,6 +487,21 @@ describe("syncCodexCliActiveSelectionIfDrifted", () => {
 		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledTimes(1);
 	});
 
+	it("treats an org account_id stored in auth.json itself as drift (#700)", async () => {
+		loadCodexCliStateMock.mockResolvedValue({
+			activeAccountId: "org-AbC123",
+			authFileAccountId: "ORG-AbC123",
+		});
+		setCodexCliActiveSelectionMock.mockResolvedValue(true);
+
+		const result = await syncCodexCliActiveSelectionIfDrifted(
+			storageWith([account("a", { accountId: "org-AbC123" })]),
+		);
+
+		expect(result).toBe(true);
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("does nothing when there is no CLI state to compare against", async () => {
 		loadCodexCliStateMock.mockResolvedValue(null);
 

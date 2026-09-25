@@ -16,11 +16,13 @@ const jwt = (claims: Record<string, unknown>) =>
 	`h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
 
 const ACCESS_TOKEN = jwt({
+	sub: "user-org",
 	exp: 4_102_444_800,
 	"https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
 	"https://api.openai.com/profile": { email: "org@example.com" },
 });
 const ID_TOKEN = jwt({
+	sub: "user-org",
 	email: "org@example.com",
 	"https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
 });
@@ -147,5 +149,37 @@ describe("org-sourced account alignment with Codex auth.json (#700)", () => {
 
 		expect(await readFile(accountsPath, "utf-8")).toBe(accountsWrite);
 		expect(await readFile(authPath, "utf-8")).toBe(authWrite);
+	});
+
+	it("rewrites an org account_id left in auth.json by an older release, once", async () => {
+		// Written before #700: Codex CLI 0.156+ rejects this account_id.
+		await writeFile(
+			authPath,
+			JSON.stringify({
+				auth_mode: "chatgpt",
+				tokens: {
+					access_token: ACCESS_TOKEN,
+					refresh_token: "refresh-org",
+					id_token: ID_TOKEN,
+					account_id: "org-AbC123",
+				},
+			}),
+			"utf-8",
+		);
+
+		await expect(syncCodexCliActiveSelectionIfDrifted(storage())).resolves.toBe(true);
+		const rewritten = await readFile(authPath, "utf-8");
+		const tokens = (
+			JSON.parse(rewritten) as {
+				tokens?: { account_id?: string; id_token?: string };
+			}
+		).tokens;
+		expect(tokens?.account_id).toBe("ws-uuid-1");
+		expect(tokens?.id_token).toBe(ID_TOKEN);
+
+		await expect(syncCodexCliActiveSelectionIfDrifted(storage())).resolves.toBe(
+			false,
+		);
+		expect(await readFile(authPath, "utf-8")).toBe(rewritten);
 	});
 });

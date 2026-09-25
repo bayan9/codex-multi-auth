@@ -293,6 +293,11 @@ export function extractAccountId(accessToken?: string): string | undefined {
  * The auth.json writer and every stored-vs-auth.json comparison must share
  * this mapping, or org-sourced accounts read as permanently drifted.
  */
+/** Whether an id is an OpenAI platform org id ("org-..."), never a ChatGPT workspace. */
+export function isOpenAiOrgId(accountId: string | undefined): boolean {
+	return /^org-/i.test(accountId?.trim() ?? "");
+}
+
 export function resolveCodexAuthAccountId(
 	accountId: string | undefined,
 	accessToken?: string,
@@ -300,7 +305,7 @@ export function resolveCodexAuthAccountId(
 ): string | undefined {
 	const trimmed = accountId?.trim();
 	if (!trimmed) return undefined;
-	if (!/^org-/i.test(trimmed)) return trimmed;
+	if (!isOpenAiOrgId(trimmed)) return trimmed;
 	return extractAccountId(accessToken) ?? extractAccountId(idToken);
 }
 

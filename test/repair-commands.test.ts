@@ -1008,6 +1008,60 @@ describe("repair-commands direct deps coverage", () => {
 		);
 	});
 
+	it("runDoctor flags an org account_id left in auth.json until it is rewritten (#700)", async () => {
+		const accessToken = `h.${Buffer.from(
+			JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
+			}),
+		).toString("base64url")}.s`;
+		storageMocks.loadAccounts.mockResolvedValue({
+			version: 3,
+			accounts: [
+				{
+					email: "org@example.com",
+					refreshToken: "refresh-token",
+					accessToken,
+					expiresAt: 100,
+					accountId: "org-AbC123",
+					enabled: true,
+				},
+			],
+			activeIndex: 0,
+			activeIndexByFamily: {},
+		});
+		existsSyncMock.mockImplementation((path) => path === "/mock/auth.json");
+		const arrangeAuthFile = (accountId: string) => {
+			readFileMock.mockResolvedValue(
+				JSON.stringify({
+					email: "org@example.com",
+					tokens: { access_token: accessToken, account_id: accountId },
+				}),
+			);
+			codexCliStateMocks.loadCodexCliState.mockResolvedValue({
+				path: "/mock/auth.json",
+				activeAccountId: accountId,
+				activeEmail: "org@example.com",
+				authFileAccountId: accountId,
+				accounts: [{ accountId, accessToken, isActive: true }],
+			});
+		};
+		const syncCheck = async () => {
+			const consoleSpy = silenceConsole("log");
+			await runDoctor(["--json"], createDeps());
+			const payload = JSON.parse(
+				String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}"),
+			) as { checks: Array<{ key: string; severity: string }> };
+			return payload.checks.find((check) => check.key === "active-selection-sync");
+		};
+
+		arrangeAuthFile("org-AbC123");
+		expect(await syncCheck()).toMatchObject({ severity: "warn" });
+
+		// what the writer leaves behind after `doctor --fix`
+		arrangeAuthFile("ws-uuid-1");
+		expect(await syncCheck()).toMatchObject({ severity: "ok" });
+	});
+
 	it("runDoctor treats the legacy accounts.json raw org id as aligned (#700)", async () => {
 		const accessToken = `h.${Buffer.from(
 			JSON.stringify({

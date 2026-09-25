@@ -31,6 +31,12 @@ export interface CodexCliState {
 	accounts: CodexCliAccountSnapshot[];
 	activeAccountId?: string;
 	activeEmail?: string;
+	/**
+	 * The raw tokens.account_id of auth.json, set only when the state was read
+	 * from auth.json. Codex CLI 0.156+ rejects an "org-..." value there (#700),
+	 * unlike the legacy accounts.json, which keeps raw org ids.
+	 */
+	authFileAccountId?: string;
 	syncVersion?: number;
 	sourceUpdatedAtMs?: number;
 }
@@ -361,6 +367,8 @@ function parseCodexCliAuthState(
 		accounts: [snapshot],
 		activeAccountId: accountId,
 		activeEmail: email,
+		authFileAccountId:
+			readTrimmedString(tokens.account_id) ?? readTrimmedString(tokens.accountId),
 		syncVersion: readNumber(parsed.codexMultiAuthSyncVersion),
 		sourceUpdatedAtMs,
 	};
