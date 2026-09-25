@@ -5171,6 +5171,15 @@ it("returns a warm picker cache immediately while expired workspace data refresh
  }finally{release();}
 });
 
+it("reads the subscription quota cache at most once per second across native requests",async()=>{
+ const manager=new AccountManager(undefined,createStorage(Date.now()));
+ const readSubscriptionQuota=vi.fn(async()=>null);
+ const {fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):textEventStream());
+ const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readSubscriptionQuota}});
+ for(let i=0;i<3;i++){const response=await postResponses(proxy,{model:"common",input:"fixture"});expect(response.status).toBe(200);await response.text();}
+ expect(readSubscriptionQuota).toHaveBeenCalledTimes(1);
+});
+
 describe('earned reset last-resort integration',()=>{
  it('never redeems or moves traffic off a stored native pin',async()=>{
   vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});

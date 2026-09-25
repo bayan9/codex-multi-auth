@@ -67,6 +67,7 @@ import { getModelFamily, type ModelFamily } from "./prompts/codex.js";
 import { CURRENT_CODEX_MODEL } from "./request/helpers/model-map.js";
 import {
 	recordRuntimeInferenceRequest,
+	flushRuntimeInferenceActivity,
 	mutateRuntimeObservabilitySnapshot,
 	recordRuntimeAccountRecovery,
 	recordRuntimePoolExhaustion,
@@ -470,6 +471,19 @@ function createOutboundHeaders(
 	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	return headers;
+}
+
+/** Files every native Responses request reads change rarely; share one read per second. */
+const PER_REQUEST_READ_TTL_MS = 1000;
+function cachedRead<T>(state: RotationProxyState, key: string, load: () => Promise<T>): Promise<T> {
+	const cache = state.readCache ??= new Map();
+	const now = Date.now();
+	const hit = cache.get(key);
+	if (hit && hit.at <= now && now - hit.at < PER_REQUEST_READ_TTL_MS) return hit.value as Promise<T>;
+	const value = load();
+	cache.set(key, { at: now, value });
+	value.catch(() => { if (cache.get(key)?.value === value) cache.delete(key); });
+	return value;
 }
 
 function catalogAccountKey(account: ManagedAccount): string {
@@ -1141,6 +1155,7 @@ export async function startRuntimeRotationProxy(
 		close: async () => {
 			websocketGateway.close();
 			await closeServer(server, sockets);
+			await flushRuntimeInferenceActivity();
 			await state.activeAccountManager.flushPendingSave();
 		},
 		// Live client connections, which the app helper reads as evidence that a
@@ -1629,9 +1644,10 @@ async function handleRequestInner(
 			? storageMeta.pinnedAccountIndex ?? accountManager.getCurrentAccountForFamily(context.family)?.index ?? null
 			: null;
 		const workspaceCandidates = new Map<number, ReturnType<typeof workspaceModelScopes>>();
-  const subscriptionQuotaCache = state.nativeOpenai && isResponsesRequest ? await state.readSubscriptionQuota?.().catch(()=>null) ?? null : null;
+  const readSubscriptionQuota = state.readSubscriptionQuota;
+  const subscriptionQuotaCache = state.nativeOpenai && isResponsesRequest && readSubscriptionQuota ? await cachedRead(state, "subscription-quota", readSubscriptionQuota).catch(()=>null) ?? null : null;
   const subscriptionQuotaByAccount: Record<number, SubscriptionQuotaPreference> = {};
-  const resetCreditState=state.nativeOpenai&&isResponsesRequest ? await loadResetCreditState().catch(()=>null):null;
+  const resetCreditState=state.nativeOpenai&&isResponsesRequest ? await cachedRead(state, "reset-credits", loadResetCreditState).catch(()=>null):null;
   const quotaForScope = (account: ManagedAccount, scope: ReturnType<typeof workspaceModelScopes>[number]) => {
    // Cached checks describe only the stored account binding, never its sibling workspaces.
    const cached = scope.bound ? findQuotaCacheEntryForAccount(subscriptionQuotaCache,account,accountManager.getAccountsSnapshot()) : null;
@@ -1875,6 +1891,8 @@ async function handleRequestInner(
      clearQuotaScheduler:account=>state.preemptiveQuotaScheduler.clear(buildQuotaScheduleKey(account,context.family,context.model)),
     });
    } catch { state.status.lastError="Subscription reset recovery could not be confirmed; no further automatic redemption attempted."; }
+   // Recovery may have redeemed and written new reset state; the next request re-reads it.
+   state.readCache?.delete("reset-credits");
   }
 
 		// The token bucket spreads load across a selectable pool. A pin has no

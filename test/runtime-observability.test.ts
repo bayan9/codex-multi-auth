@@ -103,6 +103,23 @@ describe("runtime observability snapshot versioning", () => {
 		expect(unlinkMock).toHaveBeenCalled();
 	});
 
+	it("collapses a burst of snapshot mutations into the in-flight write and the latest one", async () => {
+		process.env.VITEST = "";
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		writeFileMock.mockImplementationOnce(async () => { await gate; });
+		renameMock.mockResolvedValue(undefined);
+		const mod = await import("../lib/runtime/runtime-observability.js");
+		for (let i = 1; i <= 10; i++) mod.mutateRuntimeObservabilitySnapshot((snapshot) => { snapshot.responsesRequests = i; });
+		await vi.waitFor(() => expect(writeFileMock).toHaveBeenCalledTimes(1));
+		for (let i = 11; i <= 20; i++) mod.mutateRuntimeObservabilitySnapshot((snapshot) => { snapshot.responsesRequests = i; });
+		release();
+		await vi.waitFor(() => expect(renameMock).toHaveBeenCalledTimes(2));
+		expect(writeFileMock).toHaveBeenCalledTimes(2);
+		const written = (writeFileMock.mock.calls as unknown[][]).map((call) => JSON.parse(String(call[1])).responsesRequests);
+		expect(written).toEqual([10, 20]);
+	});
+
 	it("does not chmod the dir on win32 and still persists the snapshot", async () => {
 		// The 0o700 re-assert is POSIX-only (win32 perms are ACL-based, mode is a
 		// no-op). Persistence must still succeed without calling chmod.

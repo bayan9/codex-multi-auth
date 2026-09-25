@@ -1,4 +1,4 @@
-import { saveInferenceRequestTime } from "./inference-activity.js";
+import { createInferenceActivityWriter } from "./inference-activity.js";
 import { createLogger } from "../logger.js";
 import { existsSync, readFileSync, promises as fs } from "node:fs";
 import { join } from "node:path";
@@ -73,6 +73,15 @@ const RETRYABLE_SNAPSHOT_ERRORS = new Set(["EBUSY", "EPERM"]);
 
 let snapshotState: RuntimeObservabilitySnapshot | null = null;
 let pendingWrite: Promise<void> | null = null;
+/** Latest snapshot waiting behind the in-flight write; newer mutations replace it. */
+let queuedSnapshot: RuntimeObservabilitySnapshot | null = null;
+const inferenceActivity = createInferenceActivityWriter(undefined, 1000, () =>
+	createLogger("runtime-observability").warn("Inference activity could not be saved"));
+
+/** Write pending inference times now (proxy shutdown). */
+export function flushRuntimeInferenceActivity(): Promise<void> {
+	return inferenceActivity.flush();
+}
 
 function getSnapshotPath(): string {
 	return join(getCodexMultiAuthDir(), SNAPSHOT_FILE_NAME);
@@ -152,11 +161,7 @@ export function recordRuntimeInferenceRequest(accountKey: string, at: number): v
   times[accountKey] = Math.max(times[accountKey] ?? 0, at);
   snapshot.lastInferenceRequestAtByAccount = normalizeInferenceTimes(times);
  });
- if (PERSIST_RUNTIME_SNAPSHOT) {
-  pendingWrite = (pendingWrite ?? Promise.resolve()).catch(()=>undefined)
-   .then(()=>saveInferenceRequestTime(accountKey, at))
-   .catch(()=>createLogger("runtime-observability").warn("Inference activity could not be saved"));
- }
+ if (PERSIST_RUNTIME_SNAPSHOT) inferenceActivity.record(accountKey, at);
 }
 
 function normalizePersistedSnapshot(
@@ -291,10 +296,18 @@ export function mutateRuntimeObservabilitySnapshot(
 	if (!PERSIST_RUNTIME_SNAPSHOT) {
 		return;
 	}
-	const nextSnapshot = structuredClone(snapshot);
+	// At most one write in flight and one queued: a burst of per-request
+	// mutations collapses into the latest snapshot instead of an unbounded chain.
+	const alreadyQueued = queuedSnapshot !== null;
+	queuedSnapshot = structuredClone(snapshot);
+	if (alreadyQueued) return;
 	pendingWrite = (pendingWrite ?? Promise.resolve())
 		.catch(() => undefined)
-		.then(() => writeSnapshot(nextSnapshot))
+		.then(() => {
+			const next = queuedSnapshot;
+			queuedSnapshot = null;
+			return next ? writeSnapshot(next) : undefined;
+		})
 		.catch(() => undefined);
 }
 

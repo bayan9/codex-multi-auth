@@ -1,4 +1,4 @@
-import {expect,it} from "vitest";
+import {expect,it,vi} from "vitest";
 import {promises as fs} from "node:fs";
 import {join} from "node:path";
 import {getCodexMultiAuthDir} from "../lib/runtime-paths.js";
@@ -26,4 +26,24 @@ it("keeps distinct logins separate even when they share a workspace account ID",
  const {inferenceAccountKey}=await import("../lib/runtime/inference-activity.js");
  expect(inferenceAccountKey({accountId:"shared",email:"one@example.com"})).not.toBe(inferenceAccountKey({accountId:"shared",email:"two@example.com"}));
  expect(inferenceAccountKey({accountId:"shared",email:"ONE@example.com"})).toBe(inferenceAccountKey({accountId:"shared",email:"one@example.com"}));
+});
+
+it("coalesces per-request inference times into one debounced write per key",async()=>{
+ vi.useFakeTimers();
+ try {
+  const {createInferenceActivityWriter}=await import("../lib/runtime/inference-activity.js");
+  const save=vi.fn(async()=>undefined);
+  const writer=createInferenceActivityWriter(save,1000);
+  const a=`sha256:${"c".repeat(64)}`,b=`sha256:${"d".repeat(64)}`;
+  for(let i=1;i<=100;i++)writer.record(a,i);
+  for(let i=1;i<=50;i++)writer.record(b,1000-i);
+  writer.record("../../outside",5);
+  expect(save).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(save.mock.calls).toEqual([[a,100],[b,999]]);
+  writer.record(a,200);
+  await writer.flush();
+  expect(save).toHaveBeenLastCalledWith(a,200);
+  expect(save).toHaveBeenCalledTimes(3);
+ } finally {vi.useRealTimers();}
 });
