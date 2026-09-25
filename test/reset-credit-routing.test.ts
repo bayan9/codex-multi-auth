@@ -44,3 +44,12 @@ it("excludes invalidated credentials from last-resort capacity gating",async()=>
  expect(await recoverResetQuota({...f.args,manager,scopes:new Map([[0,[f.scope]],[1,[invalidScope]]])})).toBe(true);
  expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith([{key:f.scope.id,accountId:f.scope.accountId}]);
 });
+
+it("keys a workspace scope and its reset target the same way when no recordId is stored",async()=>{
+ const {resetTargetForStoredAccount,isResetTargetEnabled}=await import('../lib/runtime/account-reset-credits.js');
+ const row={accountId:' workspace ',email:'user@example.com',refreshToken:'refresh-fixture',addedAt:5,lastUsed:5};
+ const scope=workspaceModelScopes({...row,index:0,access:undefined} as unknown as Parameters<typeof workspaceModelScopes>[0])[0]!;
+ const target=resetTargetForStoredAccount(row);
+ expect(target).toEqual({key:scope.id,accountId:'workspace'});
+ expect(isResetTargetEnabled(row,{key:scope.id,accountId:scope.accountId})).toBe(true);
+});

@@ -10,7 +10,8 @@ import { withCheckProgress } from '../ui/check-progress.js';
 
 export function resetTargetForStoredAccount(account:AccountMetadataV3):ResetTarget|null{
  // Organization display aliases are not native ChatGPT workspace identities.
- const id=account.accountId?.startsWith("org-") ? extractAccountId(account.accessToken) : account.accountId;
+ const stored=account.accountId?.trim();
+ const id=stored?.startsWith("org-") ? extractAccountId(account.accessToken)?.trim() : stored;
  const workspace=account.workspaces?.find(w=>w.id===id);
  if(!id||id.startsWith("org-")||account.enabled===false||workspace?.enabled===false)return null;
  return {key:modelScopeId('oauth',resolveAccountRecordId(account),id),accountId:id};

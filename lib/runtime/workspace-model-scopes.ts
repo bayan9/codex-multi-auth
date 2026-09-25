@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ManagedAccount } from "../accounts.js";
+import { resolveAccountRecordId, type ManagedAccount } from "../accounts.js";
 import { extractAccountId } from "../auth/token-utils.js";
 
 export function modelScopeId(...parts: string[]): string {
@@ -22,7 +22,8 @@ export function workspaceModelScopes(account: ManagedAccount) {
   seen.add(scope.accountId); return true;
  }).map(scope=>({
   ...scope,
-  id:modelScopeId("oauth",account.recordId ?? JSON.stringify([account.accountId,account.email,account.addedAt]),scope.accountId),
+  // Same record identity as reset-credit targets (resolveAccountRecordId), or their keys diverge.
+  id:modelScopeId("oauth",resolveAccountRecordId(account),scope.accountId),
   accountIndex:account.index,
   routable:scope.enabled && Boolean(scope.accountId),
   bound:scope.accountId===boundId,
