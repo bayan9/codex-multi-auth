@@ -60,8 +60,20 @@ function mergeWorkspaces(base: AccountMetadataV3, disk: AccountMetadataV3, local
     const untracked = [base, disk, local].every(row => row.currentWorkspaceIndex === undefined);
     return { workspaces, currentWorkspaceIndex: untracked && index === 0 ? undefined : index };
 }
-/** Preserve concurrent cooldown observations while allowing an unchanged blocker to clear. */
-export function mergeAccountCooldown(base: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">, disk: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">, local: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">): Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason"> {
+type CooldownRow = Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason" | "refreshToken">;
+/**
+ * Preserve concurrent cooldown observations while allowing an unchanged blocker to clear.
+ * An auth-failure cooldown belongs to the credential it was recorded against: once
+ * the merge keeps a different refresh token (e.g. we won a single-use refresh the
+ * other process lost with invalid_grant), that side's auth blocker is obsolete.
+ * Other cooldown reasons are observations about the account and are kept.
+ */
+export function mergeAccountCooldown(base: CooldownRow, disk: CooldownRow, local: CooldownRow): Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason"> {
+    const keptToken = local.refreshToken === base.refreshToken ? disk.refreshToken : local.refreshToken;
+    const current = (row: CooldownRow): CooldownRow => row.cooldownReason === "auth-failure" && row.refreshToken !== keptToken
+        ? { ...row, coolingDownUntil: undefined, cooldownReason: undefined } : row;
+    disk = current(disk);
+    local = current(local);
     const cleared = base.coolingDownUntil !== undefined && (
         (disk.coolingDownUntil === undefined && (local.coolingDownUntil === undefined || local.coolingDownUntil === base.coolingDownUntil)) ||
         (local.coolingDownUntil === undefined && disk.coolingDownUntil === base.coolingDownUntil));
