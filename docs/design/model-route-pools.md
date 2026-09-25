@@ -14,7 +14,7 @@ closed when exhausted. ZDR is an operator-declared credential classification;
 discovery cannot verify an organization's retention approval.
 
 Account capability eligibility precedes existing subscription health, quota,
-affinity and weight selection. Desktop pins are tried first when eligible, with fallback through configured priority tiers; explicit per-invocation pins remain hard constraints.
+affinity and weight selection. A stored `switch` pin and an explicit per-invocation pin are both hard constraints, in native mode as elsewhere.
 API credentials use ascending priority, then stable credential ID; retries stay
 within the selected pool and stop after response headers are accepted. Requests
 use the official API endpoint, fresh API authorization headers and `store:false`.
@@ -93,9 +93,9 @@ runtimes return HTTP 415 instead of forwarding an opaque request to an account.
 Subscription accounts gain integer priority tiers (0 first, default 1) stored in
 existing account policies. Filter model, requested reasoning/speed, policy, health
 and previous attempts before finding the first usable tier. Affinity and weights
-apply within that tier only. A desktop `switch` selection is tried before all configured tiers when eligible,
-then falls back through those tiers if unavailable or already attempted. Explicit per-invocation
-`--account` remains a hard constraint for callers who request isolation. Account
+apply within that tier only. A stored `switch` pin bypasses tiers: it is strict and fails with
+`codex_pinned_account_unavailable` rather than falling back. Explicit per-invocation
+`--account` is also a hard constraint for callers who request isolation. Account
 policy commands expose priority; status distinguishes preference from a hard pin.
 
 Native speed controls derive from credential-specific live catalog metadata.
@@ -217,8 +217,8 @@ paid fallback merely because subscription accounts are unavailable.
 Native subscription Responses routing uses a 5% reserve. Filter model/settings,
 workspace enablement, policy, health, exhaustion and request attempts first. If
 any eligible subscription scope has quota above the reserve (or unmeasured quota),
-reserve scopes wait. An eligible desktop pin wins within that phase; configured
-priority tiers follow, then earliest reset, then greater remaining quota, then existing preference/health logic.
+reserve scopes wait. A stored `switch` pin is strict and skips this ordering; otherwise configured
+priority tiers come first, then earliest reset, then greater remaining quota, then existing preference/health logic.
 Only when no ordinary eligible subscription remains can reserve scopes be used.
 Explicit invocation pins remain strict. No phase crosses into API/ZDR pools.
 
@@ -249,7 +249,7 @@ request. Existing countdowns, fractional usage, API credentials and business
 workspaces do not trigger extra consumption. Checks retain bounded parallelism.
 
 Ordinary inference has no special priority override for 100% accounts. It follows
-configured tiers, the native pin, capability eligibility, earliest reset and the
+configured tiers, capability eligibility, earliest reset and the
 5% reserve. Remaining quota only breaks reset-time ties. There is no target to
 consume 1% merely to change a rounded display. Explicit strict invocation pins
 and API/ZDR privacy pool isolation remain intact.

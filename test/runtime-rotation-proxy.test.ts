@@ -4782,14 +4782,24 @@ describe("model pool capability boundaries",()=>{
   expect(JSON.parse(sent[0]!.bodyText)).toMatchObject({model:"common",service_tier:"accelerated"});
  });
 
- it("treats a desktop switch as a preference and serves an exclusive model with another account",async()=>{
+ it("keeps a stored switch pin strict and never serves an exclusive model from another account",async()=>{
   vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
   const manager=new AccountManager(undefined,createStorage(Date.now()));
   const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:call.headers.get("chatgpt-account-id")==="acc_2"?"exclusive":"common"}]}):textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
   const response=await postResponses(proxy,{model:"exclusive",input:"test",stream:true});
-  expect(response.status).toBe(200);await response.text();
-  expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_2"]);
+  expect(response.status).toBe(403);expect((await response.json()).error.code).toBe("model_not_available_in_account_catalog");
+  expect(calls.filter(c=>c.url.includes("/responses"))).toHaveLength(0);
+ });
+ it("fails a stored native pin with codex_pinned_account_unavailable instead of rotating",async()=>{
+  vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
+  const manager=new AccountManager(undefined,createStorage(Date.now()));
+  manager.markAccountCoolingDown(manager.getAccountByIndex(0)!,10*60_000,"network-error");
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await postResponses(proxy,{model:"common",input:"test",stream:true});
+  expect(response.status).toBe(503);expect((await response.json()).error.code).toBe("codex_pinned_account_unavailable");
+  expect(calls.filter(c=>c.url.includes("/responses"))).toHaveLength(0);
  });
 
  it("advertises an exclusive OAuth model and sends it only to its eligible account",async()=>{
@@ -5022,15 +5032,15 @@ it("records actual inference dispatch separately from selection and catalog chec
  expect(getRuntimeObservabilitySnapshot().lastInferenceRequestAtByAccount?.[key]).toBe(used);
 });
 
-it("tries the native desktop pin before earlier tiers and falls back after capability rejection", async () => {
+it("keeps the native desktop pin strict across tiers and after a capability rejection", async () => {
  vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
  vi.spyOn(runtimePolicy,"evaluateRuntimePolicy").mockResolvedValue({allowed:true,statusCode:200,errorCode:null,reasons:[],projectKey:null,blockedAccountIndexes:new Set(),scoreBoostByAccount:{},priorityByAccount:{0:8,1:1},budgetEvaluations:[]});
  const manager=new AccountManager(undefined,createStorage(Date.now()));
  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):call.headers.get("chatgpt-account-id")==="acc_1"?Response.json({error:{code:"model_not_found",message:"Model not supported"}},{status:404}):textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
  const response=await postResponses(proxy,{model:"common",input:"test",stream:true});
- expect(response.status).toBe(200);await response.text();
- expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_1","acc_2"]);
+ expect(response.status).not.toBe(200);await response.text();
+ expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_1"]);
 });
 
 it("uses reset urgency, preserves the subscription reserve, and spends that reserve only after other subscriptions drain",async()=>{
@@ -5153,6 +5163,28 @@ it("returns a warm picker cache immediately while expired workspace data refresh
 });
 
 describe('earned reset last-resort integration',()=>{
+ it('never redeems or moves traffic off a stored native pin',async()=>{
+  vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
+  const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
+  const native=await import('../lib/runtime/native-rate-limits.js');
+  let consumptions=0;
+  const rpc=vi.spyOn(native,'nativeRateLimitsRpc').mockImplementation(async(auth,method)=>{
+   if(method==='account/rateLimitResetCredit/consume'){consumptions++;return {outcome:'reset'};}
+   const allowed=auth.accountId==='acc_2';
+   return {accountId:auth.accountId,ordinaryUsageAllowed:allowed,rateLimitResetCredits:{availableCount:1},rateLimits:{planType:'pro',primary:{usedPercent:allowed?0:100,resetsAt:Math.floor(Date.now()/1000)+3600},secondary:{usedPercent:0}}};
+  });
+  const fs=await import('node:fs/promises');const os=await import('node:os');const path=await import('node:path');const originalDir=process.env.CODEX_MULTI_AUTH_DIR;const testDir=await fs.mkdtemp(path.join(os.tmpdir(),'reset-route-pin-'));process.env.CODEX_MULTI_AUTH_DIR=testDir;
+  const service=createResetCreditService();await service.setPolicy('last-resort');
+  try{
+   const manager=new AccountManager(undefined,createStorage(Date.now()));
+   const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:'chat-fixture'}]}):textEventStream());
+   const quota={updatedAt:Date.now(),status:200,model:'chat-fixture',planType:'pro',primary:{usedPercent:100},secondary:{usedPercent:0}};
+   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readSubscriptionQuota:async()=>({byAccountId:{acc_1:quota,acc_2:quota},byEmail:{}})}});
+   const response=await postResponses(proxy,{model:'chat-fixture',input:'hello'});await response.text();
+   expect(consumptions).toBe(0);
+   expect(calls.filter(c=>c.url.endsWith('/responses')).every(c=>c.headers.get('chatgpt-account-id')==='acc_1')).toBe(true);
+  }finally{await service.setPolicy('manual');rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await fs.rm(testDir,{recursive:true,force:true,maxRetries:5});}
+ });
  it.each([true,false])('refreshes all subscription capacity before spending (other usable=%s)',async otherUsable=>{
   const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
   const native=await import('../lib/runtime/native-rate-limits.js');

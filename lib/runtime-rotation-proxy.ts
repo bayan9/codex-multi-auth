@@ -1640,7 +1640,10 @@ async function handleRequestInner(
    if(reset && reset.updatedAt > Math.max(cached?.updatedAt??0,observed?.updatedAt??0) && reset.updatedAt <= state.now() && state.now()-reset.updatedAt<=60000)return resetSnapshotQuota(reset);
    return observed && observed.updatedAt >= (cached?.updatedAt ?? 0) ? observed : cached;
   };
-  const pinnedIndex = state.forcedAccountIndex ?? (state.nativeOpenai ? null : storageMeta.pinnedAccountIndex);
+  // A stored `switch` pin is a hard constraint in native mode too (#702), not a
+  // preference: it fails with codex_pinned_account_unavailable rather than
+  // silently serving from another account.
+  const pinnedIndex = state.forcedAccountIndex ?? storageMeta.pinnedAccountIndex;
 		const isPinned = typeof pinnedIndex === "number";
 		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
 			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
