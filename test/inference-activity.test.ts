@@ -1,8 +1,21 @@
-import {expect,it,vi} from "vitest";
+import {afterEach,beforeEach,expect,it,vi} from "vitest";
 import {promises as fs} from "node:fs";
+import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {getCodexMultiAuthDir} from "../lib/runtime-paths.js";
 import {saveInferenceRequestTime,loadInferenceRequestTimes} from "../lib/runtime/inference-activity.js";
+// Each test owns its multi-auth directory: never the shared runtime-observability.json.
+let previousDir: string | undefined;
+let testDir: string;
+beforeEach(async()=>{
+ previousDir=process.env.CODEX_MULTI_AUTH_DIR;
+ testDir=await fs.mkdtemp(join(tmpdir(),"inference-activity-"));
+ process.env.CODEX_MULTI_AUTH_DIR=testDir;
+});
+afterEach(async()=>{
+ if(previousDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=previousDir;
+ await fs.rm(testDir,{recursive:true,force:true,maxRetries:5,retryDelay:50});
+});
 it("retains inference times when another process overwrites diagnostic telemetry",async()=>{
  const key=`sha256:${"a".repeat(64)}`;
  await saveInferenceRequestTime(key,2000);
