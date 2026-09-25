@@ -165,7 +165,9 @@ export class ApiModelCapabilities {
 			.update(id)
 			.digest("hex");
 		const old = this.probes.get(key);
-		if (!force && old && old.at + 900000 > this.now()) return old;
+		// A probe cut short by 401/403/429 is retried after a minute, not trusted for 15.
+		const freshFor = old?.status.retry === "transient" ? 60_000 : 900_000;
+		if (!force && old && old.at + freshFor > this.now()) return old;
 		const running = this.inFlight.get(key);
 		if (running) return running;
 		const pending = this.runProbe(route, id, documented, key).finally(() =>
@@ -187,6 +189,12 @@ export class ApiModelCapabilities {
 			status: {} as Record<string, string>,
 		};
 		let credentialUnavailable = false;
+		// An inconclusive attempt (throttle, auth, bad body) is not a revocation:
+		// keep what an earlier probe verified. Only "unsupported" or "downgraded"
+		// removes an effort or speed tier.
+		const previous = this.probes.get(key);
+		const keep = (name: string, status: string): string =>
+			status === "unverified" && previous?.status[name] === "verified" ? "verified" : status;
 		const attempt = async (setting: {
 			effort?: string;
 			tier?: string;
@@ -325,12 +333,13 @@ export class ApiModelCapabilities {
 					})),
 			);
 			for (const { effort, status } of checked) {
-				result.status[`effort:${effort}`] = status;
-				if (status === "verified") result.levels.push(effort);
+				const effective = keep(`effort:${effort}`, status);
+				result.status[`effort:${effort}`] = effective;
+				if (effective === "verified") result.levels.push(effort);
 			}
 		}
 		const effort = result.levels.includes("low") ? "low" : result.levels[0];
-		result.status.responses = await attempt({ compatibility: true, effort });
+		result.status.responses = keep("responses", await attempt({ compatibility: true, effort }));
 		const checkedTiers = await Promise.all(
 			["fast", "ultrafast"].map(async (tier) => ({
 				tier,
@@ -338,9 +347,11 @@ export class ApiModelCapabilities {
 			})),
 		);
 		for (const { tier, status } of checkedTiers) {
-			result.status[tier] = status;
-			if (status === "verified") result.tiers.push(tier);
+			const effective = keep(tier, status);
+			result.status[tier] = effective;
+			if (effective === "verified") result.tiers.push(tier);
 		}
+		if (credentialUnavailable) result.status.retry = "transient";
 		result.at = this.now();
 		if (this.probes.size >= 1000)
 			this.probes.delete(this.probes.keys().next().value ?? "");
