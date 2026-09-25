@@ -1,5 +1,4 @@
 import type { NativeAccountSnapshot } from "./native-account-storage.js";
-import type { SubscriptionPrimingTracker } from "./subscription-quota-order.js";
 import type { QuotaCacheData, QuotaCacheEntry } from "../quota-cache.js";
 import type {RuntimeCapabilityFailures} from "./runtime-capability-failures.js";
 import type {RouteModel} from "../model-route-policy.js";
@@ -90,7 +89,6 @@ export interface RotationProxyState extends RotationProxyStateInit {
  catalogOAuthModels?:RouteModel[];
  catalogApiRoutes?:ApiRouteCredential[];
  catalogInventory?:ModelInventory;
- subscriptionPriming?: SubscriptionPrimingTracker;
  subscriptionQuotaObservations?: Map<string, QuotaCacheEntry>;
 	readonly threadGoalFallbacks: Map<string, string | null>;
 	lastGlobalAccountIndex: number | null;

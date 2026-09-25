@@ -36,9 +36,9 @@ not establish provider retention approval.
    missing model. Requested effort/speed combinations are checked per workspace.
    Picker metadata can be cached while routing requires fresh eligibility.
 6. **MEDIUM — resolved:** Native pins are preferences with eligible fallback;
-   explicit invocation pins remain strict. Fresh unused subscription scopes get
-   bounded first-use precedence to start their reset window. Ordinary eligible
-   subscriptions precede the 6% reserve; API credentials never become an implicit
+   explicit invocation pins remain strict. Checks complete tiny probes for unused personal subscriptions; ordinary
+   requests have no special 100% priority. Ordinary eligible
+   subscriptions precede the 5% reserve; API credentials never become an implicit
    paid fallback. Runtime quota events update subsequent selections.
 7. **MEDIUM — bounded:** Capability probes are opt-in and billable, use a small
    fixed prompt, and are concurrency-limited. Discovery is not proof that every

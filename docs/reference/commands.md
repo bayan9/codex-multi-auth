@@ -911,27 +911,26 @@ runtime scheduling score, and does not rewrite configured priority tiers.
 
 For native subscription requests, `automatic order` estimates the order from the
 last check. It is separate from `priority tier` and can change with requested
-model/workspace and newer runtime observations. Eligible accounts above a 6%
+model/workspace and newer runtime observations. Eligible accounts above a 5%
 reserve go first. Within that phase, a desktop pin wins, then configured tiers,
 then earliest limiting-window reset, with remaining percentage breaking ties. The reserve
 is used only when ordinary eligible subscription accounts are unavailable.
 Unknown/stale reset observations do not receive a reset bonus. API/ZDR pools are
 never automatic paid fallbacks for subscription requests.
 
-A subscription with fresh zero-used quota and no reported future reset timestamp
-receives brief first-use priority before native desktop preference, configured
-tiers and reset ordering. Only eligible user requests are routed; no synthetic
-traffic is generated. A reported reset timestamp or any usage ends the boost,
-even when the display still rounds to 100%. There is no 99% consumption target.
-Attempts without confirmation are bounded to three selections or five minutes
-per workspace/window in a router process. Repeated 100% observations do not
-renew this budget. A new unused window can be primed after its known prior reset.
-Reset timestamps are provider-reported deadlines, not promises that the proxy
-can control the provider's timer. Afterward, earliest reset wins; remaining quota
-only breaks reset-time ties. Explicit strict invocation pins and API/ZDR privacy
-pool isolation remain intact. Status reports eligibility from the last check,
-not the in-memory attempt budget.
+`check` completes one tiny probe for a personal subscription that reports exactly
+zero usage and has no established reset countdown. A full relative window can
+be an unused-account placeholder; receiving headers alone does not prove the
+timer started. A completed probe is reported explicitly. Incomplete or timed-out
+streams produce a warning, and no second model is tried after that first-use
+request. Existing countdowns, fractional usage, API credentials and business
+workspaces do not trigger extra consumption. Checks retain bounded parallelism.
 
+Ordinary inference has no special priority override for 100% accounts. It follows
+configured tiers, the native pin, capability eligibility, earliest reset and the
+5% reserve. Remaining quota only breaks reset-time ties. There is no target to
+consume 1% merely to change a rounded display. Explicit strict invocation pins
+and API/ZDR privacy pool isolation remain intact.
 
 ### Earned subscription resets
 

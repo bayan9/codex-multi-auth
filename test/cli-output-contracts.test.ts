@@ -322,10 +322,9 @@ describe("cli output contracts", () => {
 			expect(Array.isArray(accounts)).toBe(true);
 			expect(accounts).toHaveLength(2);
 			for (const account of accounts) {
-				expect(sortedKeys(account)).toEqual(["automaticOrder", "current", "enabled", "forecastQuotaUpdatedAt", "forecastRiskLevel", "forecastRiskScore", "index", "label", "lastInferenceRequestAt", "lastUsed", "markers", "priority", "quotaDrainPerHour", "quotaResetAt", "reason", "resetCreditsAvailable", "resetCreditsCheckedAt", "selectionPreference", "subscriptionPrimingCandidate", "subscriptionReserve"]);
+				expect(sortedKeys(account)).toEqual(["automaticOrder", "current", "enabled", "forecastQuotaUpdatedAt", "forecastRiskLevel", "forecastRiskScore", "index", "label", "lastInferenceRequestAt", "lastUsed", "markers", "priority", "quotaDrainPerHour", "quotaResetAt", "reason", "resetCreditsAvailable", "resetCreditsCheckedAt", "selectionPreference", "subscriptionReserve"]);
 				expect(account.priority).toBeTypeOf("number");
 				expect(account.subscriptionReserve).toBeTypeOf("boolean");
-				expect(account.subscriptionPrimingCandidate).toBeTypeOf("boolean");
 				expect(account.index).toBeTypeOf("number");
 				expect(account.label).toBeTypeOf("string");
 				expect(account.enabled).toBeTypeOf("boolean");

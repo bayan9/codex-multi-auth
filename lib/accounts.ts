@@ -2230,6 +2230,9 @@ export class AccountManager {
    rescuedBaseline = structuredClone(this.persistenceBaseline);
    const baselineRow = rescuedBaseline.accounts.find(matches);
    if (!baselineRow) throw error;
+   // Persist the stable identity before rotating a legacy row's identity material.
+   row.recordId = refreshed.recordId;
+   baselineRow.recordId = refreshed.recordId;
    // Only authentication was committed. Pending additions, removals and user
    // edits must still differ from their old baseline on the next save.
    for (const field of ["accessToken", "refreshToken", "expiresAt"] as const) {

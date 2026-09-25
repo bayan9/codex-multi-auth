@@ -6,7 +6,7 @@ import { recoverResetQuota, applyConfirmedReset } from "./runtime/reset-credit-r
 import { readSubscriptionQuotaEvent } from "./runtime/subscription-quota-event.js";
 import { loadQuotaCache } from "./quota-cache.js";
 import { findQuotaCacheEntryForAccount } from "./quota-readiness.js";
-import { subscriptionQuotaPreference, compareSubscriptionQuota, SubscriptionPrimingTracker, type SubscriptionQuotaPreference } from "./runtime/subscription-quota-order.js";
+import { subscriptionQuotaPreference, compareSubscriptionQuota, type SubscriptionQuotaPreference } from "./runtime/subscription-quota-order.js";
 import { inferenceAccountKey } from "./runtime/inference-activity.js";
 import { modelScopeId, workspaceModelScopes } from "./runtime/workspace-model-scopes.js";
 import { RuntimeCapabilityFailures, classifyCapabilityFailure } from "./runtime/runtime-capability-failures.js";
@@ -1984,13 +1984,12 @@ async function handleRequestInner(
 			// calls inside `chooseAccount` are used unchanged and no lock is taken,
 			// so default behavior and perf are identical to before.
 			const selectAccount = (): ManagedAccount | null => {
-    const priming=state.subscriptionPriming ??= new SubscriptionPrimingTracker();
     for(const [index,scopes] of workspaceCandidates){
      const account=accountManager.getAccountByIndex(index);
      if(!account)continue;
-     scopes.sort((a,b)=>compareSubscriptionQuota(priming.preference(a.id,quotaForScope(account,a),state.now()),priming.preference(b.id,quotaForScope(account,b),state.now())));
+     scopes.sort((a,b)=>compareSubscriptionQuota(subscriptionQuotaPreference(quotaForScope(account,a),state.now()),subscriptionQuotaPreference(quotaForScope(account,b),state.now())));
      const scope=scopes[0];
-     if(scope)subscriptionQuotaByAccount[index]=priming.preference(scope.id,quotaForScope(account,scope),state.now());
+     if(scope)subscriptionQuotaByAccount[index]=subscriptionQuotaPreference(quotaForScope(account,scope),state.now());
     }
 				const result=chooseAccount({
 					accountManager,
@@ -2016,7 +2015,6 @@ async function handleRequestInner(
 					// created for itself.
 					allowPinnedCooldown: isPinned && transientAttempts > 0,
 				});
-    if(result && subscriptionQuotaByAccount[result.index]?.priming){const scope=workspaceCandidates.get(result.index)?.[0];if(scope)priming.recordSelection(scope.id,state.now());}
     return result;
    };
 			const selected =

@@ -602,10 +602,10 @@ it("does not score expired quota windows and identifies missing quota inputs", a
  expect(output).not.toContain("primary quota 99% used");
 });
 
-it("shows reset-aware subscription order separately from configured tiers and marks the six percent reserve",async()=>{
+it("shows reset-aware subscription order separately from configured tiers and marks the five percent reserve",async()=>{
  const now=2000;
  const accounts=Array.from({length:3},(_,i)=>({accountId:`rank-${i}`,refreshToken:`fixture-${i}`,addedAt:1,lastUsed:1}));
- const cache={byEmail:{},byAccountId:Object.fromEntries([[20,24],[40,2],[6,1]].map(([left,hours],i)=>[`rank-${i}`,{updatedAt:now,status:200,model:"fixture",planType:"pro",primary:{},secondary:{usedPercent:100-left!,resetAtMs:now+hours!*3600000}}]))};
+ const cache={byEmail:{},byAccountId:Object.fromEntries([[20,24],[40,2],[5,1]].map(([left,hours],i)=>[`rank-${i}`,{updatedAt:now,status:200,model:"fixture",planType:"pro",primary:{},secondary:{usedPercent:100-left!,resetAtMs:now+hours!*3600000}}]))};
  const logInfo=vi.fn();
  const deps=createStatusDeps({logInfo,json:true,loadAccounts:async()=>({version:3,activeIndex:0,accounts}),loadQuotaCache:async()=>cache,loadAccountPolicies:async()=>({version:1,accounts:{}}),loadAppBindStatus:async()=>({nativeOpenai:true,state:"running",pid:123,baseUrl:null,totalRequests:0,lastAccountIndex:null,lastAccountLabel:null,lastAccountEmail:null,lastAccountId:null,updatedAt:now,lastError:null})});
  await runStatusCommand(deps);
@@ -614,7 +614,7 @@ it("shows reset-aware subscription order separately from configured tiers and ma
  expect(result.accounts[2].subscriptionReserve).toBe(true);
  logInfo.mockClear();await runStatusCommand({...deps,json:false});
  expect(logInfo.mock.calls.flat().join("\n")).toContain("automatic order: #1");
- expect(logInfo.mock.calls.flat().join("\n")).toContain("6% reserve");
+ expect(logInfo.mock.calls.flat().join("\n")).toContain("5% reserve");
 });
 
 it("shows cached reset counts for the saved workspace and distinguishes unknown",async()=>{

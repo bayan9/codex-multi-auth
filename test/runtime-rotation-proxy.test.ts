@@ -4959,7 +4959,7 @@ it("uses reset urgency, preserves the subscription reserve, and spends that rese
   if(call.url.includes("/models"))return Response.json({models:[{slug:"common"}]});
   const id=call.headers.get("chatgpt-account-id");
   if(id==="acc_2")secondAccountCalls++;
-  return new Response('data: {"type":"response.completed","response":{}}\n\n',{headers:{"content-type":"text/event-stream","x-codex-secondary-used-percent":id==="acc_2"?"94":"100","x-codex-secondary-reset-after-seconds":id==="acc_2"?"7200":"86400","x-codex-plan-type":"pro"}});
+  return new Response('data: {"type":"response.completed","response":{}}\n\n',{headers:{"content-type":"text/event-stream","x-codex-secondary-used-percent":id==="acc_2"?"95":"100","x-codex-secondary-reset-after-seconds":id==="acc_2"?"7200":"86400","x-codex-plan-type":"pro"}});
  });
  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now,quotaRemainingPercentThreshold:undefined,readSubscriptionQuota:async()=>cache,readApiRoutes:async()=>[{id:"fixture-paid",label:"API",kind:"api",apiKey:"fixture-paid-key",enabled:true,priority:0,visibleModels:["common"]}]}});
  for(let i=0;i<3;i++){const response=await postResponses(proxy,{model:"common",input:"fixture",stream:true});expect(response.status).toBe(200);await response.text();}
@@ -4969,7 +4969,7 @@ it("uses reset urgency, preserves the subscription reserve, and spends that rese
  expect(secondAccountCalls).toBe(2);
 });
 
-it("starts an unused subscription before a native pin then stops when its reset date is reported",async()=>{
+it("keeps unused subscriptions behind a native pin and established reset ordering",async()=>{
  const now=Date.now();const manager=new AccountManager(undefined,createStorage(now,3));
  const entry=(left:number,hours:number)=>({status:200,updatedAt:now,planType:"pro",model:"common",primary:{},secondary:{usedPercent:100-left,resetAtMs:now+hours*3600000}});
  const cache={byAccountId:{acc_1:entry(90,3),acc_2:entry(7,2),acc_3:{...entry(100,24),secondary:{usedPercent:0}}},byEmail:{}};
@@ -4980,10 +4980,10 @@ it("starts an unused subscription before a native pin then stops when its reset 
  const first=await postResponses(proxy,{model:"common",input:"fixture",stream:true});expect(first.status).toBe(200);await first.text();
  pin=null;
  const second=await postResponses(proxy,{model:"common",input:"fixture",stream:true});expect(second.status).toBe(200);await second.text();
- expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_3","acc_2"]);
+ expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_1","acc_2"]);
 });
 
-it("switches subscriptions at six percent from quota events on a reused WebSocket", async () => {
+it("switches subscriptions at five percent from quota events on a reused WebSocket", async () => {
  const {createServer}=await import("node:http");
  const {once}=await import("node:events");
  const {default:WebSocket,WebSocketServer}=await import("ws");
@@ -4999,7 +4999,7 @@ it("switches subscriptions at six percent from quota events on a reused WebSocke
    dispatched.push(account);
    const id=`response_${dispatched.length}`;
    socket.send(JSON.stringify({type:"response.created",response:{id}}));
-   socket.send(JSON.stringify({type:"codex.rate_limits",plan_type:"pro",rate_limits:{secondary:{used_percent:dispatched.length===1?80:94,reset_at:Math.floor(now/1000)+7200}}}));
+   socket.send(JSON.stringify({type:"codex.rate_limits",plan_type:"pro",rate_limits:{secondary:{used_percent:dispatched.length===1?80:95,reset_at:Math.floor(now/1000)+7200}}}));
    socket.send(JSON.stringify({type:"response.completed",response:{id,output:[]}}));
   });
  });

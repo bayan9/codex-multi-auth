@@ -437,20 +437,21 @@ it("uses subscription quota order inside a tier before active-account preference
  expect(chooseAccount({...baseParams(m),policy,fallbackPinnedIndex:0,subscriptionQuotaByAccount:{0:q(1),1:q(20),2:q(10)}})?.index).toBe(0);
 });
 
-it("keeps six percent reserved across tiers and a native pin, then uses it as subscription-only last resort",()=>{
+it("keeps five percent reserved across tiers and a native pin, then uses it as subscription-only last resort",()=>{
  const m=manager();const policy={...policyWith(),priorityByAccount:{0:1,1:8,2:1}};
  const q=(remainingPercent:number)=>({plan:"subscription" as const,remainingPercent,resetAtMs:NOW+3600000,urgency:remainingPercent,exhausted:remainingPercent===0,observedAt:NOW});
- const params={...baseParams(m),policy,fallbackPinnedIndex:0,subscriptionQuotaByAccount:{0:q(6),1:q(20),2:q(0)}};
+ const params={...baseParams(m),policy,fallbackPinnedIndex:0,subscriptionQuotaByAccount:{0:q(5),1:q(20),2:q(0)}};
  expect(chooseAccount(params)?.index).toBe(1);
  expect(chooseAccount({...params,attemptedIndexes:new Set([1])})?.index).toBe(0);
  expect(chooseAccount({...params,attemptedIndexes:new Set([0,1])})).toBeNull();
 });
 
-it("briefly primes a full eligible subscription before tiers and the native pin",()=>{
+it("keeps native pin and configured tiers ahead of an unused subscription",()=>{
  const m=manager();const policy={...policyWith(),priorityByAccount:{0:1,1:9,2:1}};
- const q=(remainingPercent:number,priming=false)=>({plan:"subscription" as const,remainingPercent,resetAtMs:NOW+3600000,urgency:remainingPercent,priming,exhausted:false,observedAt:NOW});
- const params={...baseParams(m),policy,fallbackPinnedIndex:0,subscriptionQuotaByAccount:{0:q(20),1:q(100,true),2:q(50)}};
- expect(chooseAccount(params)?.index).toBe(1);
+ const q=(remainingPercent:number)=>({plan:"subscription" as const,remainingPercent,resetAtMs:NOW+3600000,urgency:remainingPercent,exhausted:false,observedAt:NOW});
+ const params={...baseParams(m),policy,fallbackPinnedIndex:0,subscriptionQuotaByAccount:{0:q(20),1:q(100),2:q(50)}};
+ expect(chooseAccount(params)?.index).toBe(0);
+ expect(chooseAccount({...params,fallbackPinnedIndex:null})?.index).toBe(2);
  expect(chooseAccount({...params,attemptedIndexes:new Set([1])})?.index).toBe(0);
  expect(chooseAccount({...params,policy:{...policy,blockedAccountIndexes:new Set([1])}})?.index).toBe(0);
 });

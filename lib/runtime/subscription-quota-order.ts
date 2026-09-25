@@ -2,7 +2,6 @@ import { isQuotaCacheEntryExhausted } from "../quota-readiness.js";
 import type { QuotaCacheEntry } from "../quota-cache.js";
 
 export interface SubscriptionQuotaPreference {
- priming?: boolean;
  plan: "subscription" | "free" | "unknown";
  remainingPercent: number | null;
  resetAtMs: number | null;
@@ -10,7 +9,7 @@ export interface SubscriptionQuotaPreference {
  exhausted: boolean;
  observedAt: number | null;
 }
-export const SUBSCRIPTION_RESERVE_PERCENT = 6;
+export const SUBSCRIPTION_RESERVE_PERCENT = 5;
 export const SUBSCRIPTION_QUOTA_MAX_AGE_MS = 15 * 60_000;
 
 /** Scheduling hint only; percentages are not comparable dollar/token balances. */
@@ -30,7 +29,6 @@ export function subscriptionQuotaPreference(entry: QuotaCacheEntry | null | unde
   result.resetAtMs=window.resetAtMs;
   result.urgency=result.remainingPercent/(Math.max(60_000,window.resetAtMs-now)/3_600_000);
  }
- result.priming = result.remainingPercent === 100 && result.resetAtMs === null;
  return result;
 }
 export function usesSubscriptionReserve(preference: SubscriptionQuotaPreference | undefined): boolean {
@@ -38,34 +36,5 @@ export function usesSubscriptionReserve(preference: SubscriptionQuotaPreference 
 }
 /** Negative means a should be used first. Equal hints leave existing health/affinity scoring intact. */
 export function compareSubscriptionQuota(a: SubscriptionQuotaPreference, b: SubscriptionQuotaPreference): number {
- return Number(a.exhausted)-Number(b.exhausted) || Number(usesSubscriptionReserve(a))-Number(usesSubscriptionReserve(b)) || Number(Boolean(b.priming))-Number(Boolean(a.priming)) || (a.resetAtMs ?? Infinity)-(b.resetAtMs ?? Infinity) || (b.remainingPercent ?? -1)-(a.remainingPercent ?? -1);
-}
-
-
-/** Per-proxy, per-workspace warm-up budget. Never creates synthetic requests. */
-export class SubscriptionPrimingTracker {
- private readonly cycles = new Map<string,{startedAt:number|null;resetAtMs:number|null;attempts:number;done:boolean}>();
- preference(key:string,entry:QuotaCacheEntry|null|undefined,now:number):SubscriptionQuotaPreference {
-  const preference=subscriptionQuotaPreference(entry,now);
-  let cycle=this.cycles.get(key);
-  // A confirmed new quota window may be primed again; repeated 100% reports may not.
-  if (cycle?.resetAtMs !== null && cycle?.resetAtMs !== undefined && cycle.resetAtMs <= now && preference.priming && (entry?.updatedAt ?? 0) >= cycle.resetAtMs) {
-   this.cycles.delete(key);cycle=undefined;
-  }
-  if (!cycle && preference.priming) {
-   if(this.cycles.size >= 1000)this.cycles.delete(this.cycles.keys().next().value ?? "");
-   cycle={startedAt:null,resetAtMs:preference.resetAtMs,attempts:0,done:false};this.cycles.set(key,cycle);
-  }
-  // Starting the window is the goal, not consuming a percentage. A reset
-  // timestamp or any reported usage ends priming even if the display rounds to 100%.
-  if (cycle && preference.resetAtMs !== null) {
-   cycle.resetAtMs=preference.resetAtMs;cycle.done=true;
-  }
-  if (cycle && preference.remainingPercent !== null && preference.remainingPercent < 100) cycle.done=true;
-  return {...preference,priming:Boolean(cycle && !cycle.done && cycle.attempts<3 && (cycle.startedAt === null || now-cycle.startedAt<5*60_000) && preference.priming && !preference.exhausted)};
- }
- recordSelection(key:string,now:number):void {
-  const cycle=this.cycles.get(key);
-  if(cycle){cycle.startedAt ??= now;cycle.attempts++;}
- }
+ return Number(a.exhausted)-Number(b.exhausted) || Number(usesSubscriptionReserve(a))-Number(usesSubscriptionReserve(b)) || (a.resetAtMs ?? Infinity)-(b.resetAtMs ?? Infinity) || (b.remainingPercent ?? -1)-(a.remainingPercent ?? -1);
 }

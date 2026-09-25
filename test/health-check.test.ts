@@ -239,6 +239,7 @@ describe("runHealthCheck live probe", () => {
 		await runHealthCheck({ liveProbe: true });
 
 		expect(fetchCodexQuotaSnapshotMock).toHaveBeenCalledExactlyOnceWith({
+			primeUnusedSubscription: true,
 			accountId: "acc_a",
 			accessToken: "access-a",
 			model: inspectRequestedModel(DEFAULT_LIVE_PROBE_MODEL).normalized,

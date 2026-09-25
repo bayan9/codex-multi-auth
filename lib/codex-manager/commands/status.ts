@@ -262,7 +262,7 @@ export async function runStatusCommand(
  if (appBindStatus?.nativeOpenai) {
   const candidates=storage.accounts.map((account,index)=>({account,index,quota:quotaPreferences[index] ?? subscriptionQuotaPreference(null,now),tier:accountPolicies.accounts[getAccountPolicyKey(account,index)]?.priority ?? 1}))
    .filter(a=>forecastResults[a.index]?.availability === "ready" && !a.quota.exhausted);
-  candidates.sort((a,b)=>Number(Boolean(b.quota.priming))-Number(Boolean(a.quota.priming)) || Number(usesSubscriptionReserve(a.quota))-Number(usesSubscriptionReserve(b.quota)) ||
+  candidates.sort((a,b)=>Number(usesSubscriptionReserve(a.quota))-Number(usesSubscriptionReserve(b.quota)) ||
    Number(storage.pinnedAccountIndex===b.index)-Number(storage.pinnedAccountIndex===a.index) || a.tier-b.tier || compareSubscriptionQuota(a.quota,b.quota) || Number(b.index===activeIndex)-Number(a.index===activeIndex) || a.index-b.index);
   candidates.forEach((a,index)=>automaticOrder.set(a.index,index+1));
  }
@@ -324,7 +324,6 @@ export async function runStatusCommand(
 				forecastQuotaUpdatedAt: forecastQuotas[i]?.updatedAt ?? null,
     automaticOrder: automaticOrder.get(i) ?? null,
     subscriptionReserve: usesSubscriptionReserve(quotaPreferences[i]),
-    subscriptionPrimingCandidate: quotaPreferences[i]?.priming === true,
     quotaResetAt: quotaPreferences[i]?.resetAtMs ?? null,
     quotaDrainPerHour: quotaPreferences[i]?.urgency ?? null,
 				lastInferenceRequestAt: inferenceTimes[inferenceAccountKey(account)] ?? null,
@@ -461,7 +460,7 @@ export async function runStatusCommand(
    const preference=quotaPreferences[i];
    const order=automaticOrder.get(i);
    const reset=preference?.resetAtMs ? `; limiting window resets in ${formatWaitTime(Math.max(0,preference.resetAtMs-now))}` : "; reset ordering unknown; run check";
-   const reserve=preference?.priming?"; unused subscription: start reset timer":usesSubscriptionReserve(preference)?`; ${SUBSCRIPTION_RESERVE_PERCENT}% reserve (last resort)`:"";
+   const reserve=usesSubscriptionReserve(preference)?`; ${SUBSCRIPTION_RESERVE_PERCENT}% reserve (last resort)`:"";
    logInfo(paint(`   automatic order: ${order ? `#${order}` : "unavailable"}${reset}${reserve}`,reserve?"warning":"accent"));
   }
   const quota = forecastQuotas[i];

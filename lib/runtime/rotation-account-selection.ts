@@ -93,14 +93,6 @@ export function chooseAccount(params: {
 
  const fallbackPin = params.fallbackPinnedIndex;
  const quotaByAccount = params.subscriptionQuotaByAccount;
- // Brief first use outranks native desktop preference and configured tiers.
- // Explicit invocation pins remain isolated to their requested credential.
- if (pinnedIndex === null && quotaByAccount) {
-  const full = accountManager.getAccountsSnapshot().filter(a=>quotaByAccount[a.index]?.priming && !quotaByAccount[a.index]?.exhausted && a.enabled!==false && !attemptedIndexes.has(a.index) && !policy?.blockedAccountIndexes.has(a.index) && !accountManager.getAccountRuntimeSkipReason(a.index,family,model));
-  full.sort((a,b)=>{const qa=quotaByAccount[a.index],qb=quotaByAccount[b.index];return qa && qb ? compareSubscriptionQuota(qa,qb) : 0;});
-  const first=full[0];
-  if(first)return accountManager.getAccountByIndex(first.index);
- }
  const hasNonReserve = quotaByAccount && accountManager.getAccountsSnapshot().some(a =>
   a.enabled !== false && !attemptedIndexes.has(a.index) && !policy?.blockedAccountIndexes.has(a.index) &&
   !accountManager.getAccountRuntimeSkipReason(a.index,family,model) && !quotaByAccount[a.index]?.exhausted && !usesSubscriptionReserve(quotaByAccount[a.index]));

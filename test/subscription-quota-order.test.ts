@@ -17,7 +17,7 @@ describe("subscription quota order",()=>{
   expect(subscriptionQuotaPreference(null,now).plan).toBe("unknown");
  });
  it("does not treat a paid login as a billing-policy override and preserves the reserve",()=>{
-  const reserve=subscriptionQuotaPreference(quota(6,1),now);
+  const reserve=subscriptionQuotaPreference(quota(5,1),now);
   const ordinary=subscriptionQuotaPreference(quota(20,168,"free"),now);
   expect(compareSubscriptionQuota(ordinary,reserve)).toBeLessThan(0);
  });
@@ -27,10 +27,10 @@ describe("subscription quota order",()=>{
  });
 });
 
-it("reserves exactly six percent and keeps exhaustion until reset even if the observation ages",async()=>{
+it("reserves exactly five percent and keeps exhaustion until reset even if the observation ages",async()=>{
  const {usesSubscriptionReserve}=await import("../lib/runtime/subscription-quota-order.js");
- expect(usesSubscriptionReserve(subscriptionQuotaPreference(quota(6.1,1),now))).toBe(false);
- expect(usesSubscriptionReserve(subscriptionQuotaPreference(quota(6,1),now))).toBe(true);
+ expect(usesSubscriptionReserve(subscriptionQuotaPreference(quota(5.1,1),now))).toBe(false);
+ expect(usesSubscriptionReserve(subscriptionQuotaPreference(quota(5,1),now))).toBe(true);
  expect(subscriptionQuotaPreference({...quota(0,24),updatedAt:now-3600000},now).exhausted).toBe(true);
  expect(subscriptionQuotaPreference({...quota(0,-1),updatedAt:now-3600000},now).exhausted).toBe(false);
 });
@@ -42,47 +42,6 @@ it("prioritizes an earlier reset even when a later reset has far more remaining 
 
 const unusedQuota = () => ({...quota(100,24), secondary:{usedPercent:0}});
 
-it("only primes unused subscriptions without a reported reset date",()=>{
- expect(subscriptionQuotaPreference(unusedQuota(),now).priming).toBe(true);
- expect(subscriptionQuotaPreference(quota(100,24),now).priming).toBe(false);
- expect(subscriptionQuotaPreference({...unusedQuota(),secondary:{usedPercent:0.1}},now).priming).toBe(false);
-});
-
-it("ends first-use priority as soon as a reset is reported even when still at 100 percent",async()=>{
- const {SubscriptionPrimingTracker}=await import("../lib/runtime/subscription-quota-order.js");
- const tracker=new SubscriptionPrimingTracker();
- expect(tracker.preference("scope",unusedQuota(),now).priming).toBe(true);
- tracker.recordSelection("scope",now);
- expect(tracker.preference("scope",{...quota(100,24),updatedAt:now+1},now+1).priming).toBe(false);
- expect(tracker.preference("scope",unusedQuota(),now+2).priming).toBe(false);
-});
-
-it("does not chase one percent consumption after any usage is confirmed",async()=>{
- const {SubscriptionPrimingTracker}=await import("../lib/runtime/subscription-quota-order.js");
- const tracker=new SubscriptionPrimingTracker();
- expect(tracker.preference("scope",unusedQuota(),now).priming).toBe(true);
- tracker.recordSelection("scope",now);
- const used={...unusedQuota(),updatedAt:now+1,secondary:{usedPercent:0.1}};
- expect(tracker.preference("scope",used,now+1).priming).toBe(false);
-});
-
-it("bounds attempts when no reset or usage feedback arrives, without renewing on rounded 100 percent",async()=>{
- const {SubscriptionPrimingTracker}=await import("../lib/runtime/subscription-quota-order.js");
- const tracker=new SubscriptionPrimingTracker();
- for(let i=0;i<3;i++){
-  expect(tracker.preference("scope",{...unusedQuota(),updatedAt:now+i},now+i).priming).toBe(true);
-  tracker.recordSelection("scope",now+i);
- }
- expect(tracker.preference("scope",{...unusedQuota(),updatedAt:now+4},now+4).priming).toBe(false);
- expect(tracker.preference("another",unusedQuota(),now+4).priming).toBe(true);
-});
-
-it("can prime an unused new window after the previously confirmed reset passes",async()=>{
- const {SubscriptionPrimingTracker}=await import("../lib/runtime/subscription-quota-order.js");
- const tracker=new SubscriptionPrimingTracker();
- expect(tracker.preference("scope",unusedQuota(),now).priming).toBe(true);
- tracker.recordSelection("scope",now);
- expect(tracker.preference("scope",{...quota(100,1),updatedAt:now+1},now+1).priming).toBe(false);
- const later=now+2*3600000;
- expect(tracker.preference("scope",{...unusedQuota(),updatedAt:later},later).priming).toBe(true);
+it("does not prioritize an unused subscription over an established earlier reset",()=>{
+ expect(compareSubscriptionQuota(subscriptionQuotaPreference(unusedQuota(),now),subscriptionQuotaPreference(quota(30,1),now))).toBeGreaterThan(0);
 });
