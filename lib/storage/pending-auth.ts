@@ -73,11 +73,15 @@ export async function recordPendingAuth(
 	const path = getPendingAuthPath(storagePath);
 	await withFileTransactionLock(path, async () => {
 		const prior = hash(auth.priorRefreshToken);
-		// A later rotation of the same row replaces the earlier pending one.
 		const entries = (await read(path)).filter(
 			(entry) => entry.prior !== prior && entry.prior !== hash(auth.refreshToken),
 		);
-		entries.push({ prior, refreshToken: auth.refreshToken, accessToken: auth.accessToken, expiresAt: auth.expiresAt, at: auth.at });
+		// Rotating a token that is itself only journaled: the row on disk still holds
+		// the original spent token, so extend that entry rather than add one that
+		// no disk row can match.
+		const chained = entries.find((entry) => entry.refreshToken === auth.priorRefreshToken);
+		if (chained) Object.assign(chained, { refreshToken: auth.refreshToken, accessToken: auth.accessToken, expiresAt: auth.expiresAt, at: auth.at });
+		else entries.push({ prior, refreshToken: auth.refreshToken, accessToken: auth.accessToken, expiresAt: auth.expiresAt, at: auth.at });
 		await write(path, entries);
 	});
 }

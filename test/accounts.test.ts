@@ -2108,7 +2108,7 @@ describe("AccountManager", () => {
 			expect(account.accountId).toBe("matching-account-id");
 		});
 
-		it("propagates storage write failure as retryable CodexAuthError", async () => {
+		it("keeps the rotated credential live when the storage write stays locked", async () => {
 			const { withAccountStorageTransaction } = await import(
 				"../lib/storage.js"
 			);
@@ -2142,13 +2142,12 @@ describe("AccountManager", () => {
 				expires: now + 3_600_000,
 			};
 
-			const error = await manager
-				.commitRefreshedAuth(account, refreshedAuth)
-				.catch((err) => err as CodexAuthError);
+			// The refresh already spent old-refresh upstream; dropping new-refresh
+			// would force a re-login, so it is kept (and journaled) for a later save.
+			const committed = await manager.commitRefreshedAuth(account, refreshedAuth);
 
-			expect(error).toBeInstanceOf(CodexAuthError);
-			expect(error.retryable).toBe(true);
-			expect(account.refreshToken).toBe("old-refresh");
+			expect(committed).toBe(account);
+			expect(account.refreshToken).toBe("new-refresh");
 		});
 
 		it("propagates non-transient storage write failure as terminal CodexAuthError", async () => {

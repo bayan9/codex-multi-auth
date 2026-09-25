@@ -343,3 +343,40 @@ it("recovers a rotated refresh token in a new process when the old one exits bef
  await manager.flushPendingSave();
  expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated");
 });
+
+async function withAccountsWriteLocked<T>(path: string, run: () => Promise<T>): Promise<T> {
+ const { vi } = await import("vitest");
+ const { promises: fs } = await import("node:fs");
+ const original = fs.rename.bind(fs);
+ // The read succeeds but the atomic replace keeps failing, like a scanner holding accounts.json.
+ const spy = vi.spyOn(fs, "rename").mockImplementation((async (from: unknown, to: unknown) => {
+  if (String(to) === path) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+  return original(from as string, to as string);
+ }) as typeof fs.rename);
+ try { return await run(); } finally { spy.mockRestore(); }
+}
+
+it("journals a rotated token when the accounts write keeps failing with EBUSY", async () => {
+ const manager = await setup();
+ const path = getStoragePath();
+ const committed = await withAccountsWriteLocked(path, () => manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 }));
+ expect(committed?.refreshToken).toBe("fixture-rotated");
+ expect(manager.getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated");
+ // A new process recovers it even though this one never saved.
+ const next = new AccountManager(undefined, await loadAccounts());
+ expect(next.getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated");
+ await manager.flushPendingSave();
+});
+
+it("chains a second rotation of the same account while the first is only journaled", async () => {
+ const manager = await setup();
+ const path = getStoragePath();
+ await withAccountsWriteLocked(path, async () => {
+  await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh-1", refresh: "fixture-rotated-1", expires: Date.now() + 3600000 });
+  await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh-2", refresh: "fixture-rotated-2", expires: Date.now() + 7200000 });
+ });
+ expect(JSON.parse(await readFile(path, "utf8")).accounts[0].refreshToken).toBe("fixture-first");
+ const next = new AccountManager(undefined, await loadAccounts());
+ expect(next.getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated-2");
+ await manager.flushPendingSave();
+});
