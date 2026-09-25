@@ -7,6 +7,8 @@ import { withRetry } from "../fs-retry.js";
 import { tempPathFor } from "../temp-path.js";
 import { logWarn } from "../logger.js";
 export const AUTOMATIC_CHECK_INTERVAL_MS = 15 * 60000;
+/** First tick after router start, so a short CLI session still gets its check. */
+export const AUTOMATIC_CHECK_INITIAL_DELAY_MS = 5000;
 const schema = z.record(z.string().regex(/^sha256:[a-f0-9]{64}$/), z.number().finite().nonnegative());
 const retry = { maxAttempts: 6, backoffMs: 25 };
 export interface AutomaticAccountCheckOptions {
@@ -79,18 +81,26 @@ export async function runAutomaticAccountChecks(options: AutomaticAccountCheckOp
         }
     }, { waitMs: 0 });
 }
-/** No overlapping ticks; shutdown cancels the active probe and waits for its cleanup. */
+/**
+ * No overlapping ticks; shutdown cancels the active probe and waits for its cleanup.
+ * The first tick runs shortly after start, off the startup path; the durable
+ * per-account attempts in runAutomaticAccountChecks keep it from repeating work
+ * this or another router did recently, and it does nothing without an opt-in.
+ */
 export function startAutomaticAccountChecks(run: (signal: AbortSignal) => Promise<void>) {
     const controller = new AbortController();
     let pending: Promise<void> | undefined;
-    const timer = setInterval(() => {
+    const tick = () => {
         if (pending || controller.signal.aborted)
             return;
         pending = run(controller.signal).catch(() => {
             if (!controller.signal.aborted)
                 logWarn("Automatic subscription checks unavailable; no unchecked retry was started.");
         }).finally(() => { pending = undefined; });
-    }, AUTOMATIC_CHECK_INTERVAL_MS);
+    };
+    const initial = setTimeout(tick, AUTOMATIC_CHECK_INITIAL_DELAY_MS);
+    initial.unref();
+    const timer = setInterval(tick, AUTOMATIC_CHECK_INTERVAL_MS);
     timer.unref();
-    return { async stop() { clearInterval(timer); controller.abort(); await pending; } };
+    return { async stop() { clearTimeout(initial); clearInterval(timer); controller.abort(); await pending; } };
 }

@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAccountPolicyKey, upsertAccountPolicy, type AccountPolicyStore } from "../lib/account-policy.js";
 import type { AccountStorageV3 } from "../lib/storage.js";
-import { runAutomaticAccountChecks, startAutomaticAccountChecks, AUTOMATIC_CHECK_INTERVAL_MS } from "../lib/runtime/automatic-account-checks.js";
+import { runAutomaticAccountChecks, startAutomaticAccountChecks, AUTOMATIC_CHECK_INTERVAL_MS, AUTOMATIC_CHECK_INITIAL_DELAY_MS } from "../lib/runtime/automatic-account-checks.js";
 import { removeWithRetry } from "./helpers/remove-with-retry.js";
 let dir: string;
 beforeEach(async () => { dir = await fs.mkdtemp(join(tmpdir(), "automatic-checks-")); });
@@ -73,7 +73,7 @@ it("runs periodically without overlap and aborts cleanly on stop", async () => {
     const started = new Promise<void>(r => entered = r);
     const run = vi.fn(async (signal: AbortSignal) => { entered(); await new Promise<void>(r => signal.addEventListener("abort", () => r(), { once: true })); });
     const service = startAutomaticAccountChecks(run);
-    await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INITIAL_DELAY_MS);
     await started;
     await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INTERVAL_MS * 3);
     expect(run).toHaveBeenCalledTimes(1);
@@ -81,4 +81,46 @@ it("runs periodically without overlap and aborts cleanly on stop", async () => {
     expect(run.mock.calls[0]?.[0].aborted).toBe(true);
     await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INTERVAL_MS);
     expect(run).toHaveBeenCalledTimes(1);
+});
+
+describe("initial automatic check", () => {
+    const startWith = (f: ReturnType<typeof fixture>) => startAutomaticAccountChecks(signal => runAutomaticAccountChecks({ ...f.options, signal }));
+    it("checks an opted-in account shortly after start, long before the interval", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] });
+        const f = fixture();
+        f.enable(0);
+        const service = startWith(f);
+        await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INITIAL_DELAY_MS);
+        await vi.waitFor(() => expect(f.check).toHaveBeenCalledTimes(1));
+        await service.stop();
+    });
+    it("skips the initial check when another router attempted it recently", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] });
+        const f = fixture();
+        f.enable(0);
+        await runAutomaticAccountChecks(f.options);
+        expect(f.check).toHaveBeenCalledTimes(1);
+        const service = startWith(f);
+        await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INITIAL_DELAY_MS);
+        await service.stop();
+        expect(f.check).toHaveBeenCalledTimes(1);
+    });
+    it("does nothing at start when no account opted in", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] });
+        const f = fixture();
+        const service = startWith(f);
+        await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INITIAL_DELAY_MS);
+        await service.stop();
+        expect(f.check).not.toHaveBeenCalled();
+        expect(await fs.readdir(dir)).toEqual([]);
+    });
+    it("cancels the pending initial check on stop", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] });
+        const run = vi.fn(async () => undefined);
+        const service = startAutomaticAccountChecks(run);
+        await service.stop();
+        await vi.advanceTimersByTimeAsync(AUTOMATIC_CHECK_INTERVAL_MS * 2);
+        expect(run).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+    });
 });
