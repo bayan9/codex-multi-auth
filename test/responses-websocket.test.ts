@@ -354,15 +354,19 @@ it("does not reuse a previous response ID on a replacement socket with the same 
 });
 
 it("handles upgraded socket errors while authentication is pending", async()=>{
- const server=createServer(),gateway=new ResponsesWebSocketGateway(fetch,{}),socket=new PassThrough();
- let resolve!: (value:Response)=>void;const pending=new Promise<Response>(r=>resolve=r);
- const probe=vi.spyOn(globalThis,"fetch").mockReturnValue(pending);
+ // A local auth endpoint that holds every check open, so the probe is really pending.
+ const held: import("node:http").ServerResponse[] = [];
+ let received!: () => void; const probed = new Promise<void>(r => { received = r; });
+ const auth=createServer((_req,res)=>{held.push(res);received();});
+ const authUrl=await listen(auth);
+ const server=createServer(),gateway=new ResponsesWebSocketGateway(fetch,{maxPayloadBytes:16384}),socket=new PassThrough();
  try {
-  gateway.attach(server,"http://127.0.0.1:43210");
+  gateway.attach(server,authUrl);
   const req={headers:{},url:"/responses"} as IncomingMessage;
   server.emit("upgrade",req,socket,Buffer.alloc(0));
+  await probed;
   expect(()=>socket.emit("error",Object.assign(Error("reset"),{code:"ECONNRESET"}))).not.toThrow();
- } finally {resolve(new Response(null,{status:401}));await new Promise(r=>setImmediate(r));probe.mockRestore();socket.destroy();}
+ } finally {for(const res of held){res.writeHead(401);res.end();}socket.destroy();gateway.close();auth.closeAllConnections();await new Promise<void>(r=>auth.close(()=>r()));}
 });
 
 it("cancels queued creates as well as the streaming turn without blocking new work", async () => {
@@ -595,4 +599,10 @@ it("ends a turn on response.cancelled so queued creates are not held behind it",
 	await vi.waitFor(() => expect(events.some((event) => event.type === "response.cancelled")).toBe(true));
 	expect((await turn(ws, { model: "after", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
 	expect(f.calls.map((call) => call.model)).toEqual(["cancelled-upstream", "after"]);
+});
+
+it("keeps the real status of a per-turn error with an empty body", async () => {
+	const g = await customGateway({ upstream: rejectingUpstream(404, {}), auth: (req) => req.method === "POST" ? 401 : null });
+	const ws = await g.connect();
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "error", status: 401, error: { code: "websocket_request_failed" } });
 });

@@ -588,7 +588,8 @@ export class ResponsesWebSocketGateway {
 								signal: controller.signal,
 							});
 							if (!response.ok) {
-								const data: unknown = await response.json();
+								// An empty or non-JSON error body must not turn a real 401 into a 502.
+								const data: unknown = await response.json().catch(() => undefined);
 								send(
 									isRecord(data)
 										? { ...data, type: "error", status: response.status }
