@@ -16,6 +16,7 @@ import { tempPathFor } from "../temp-path.js";
 import { decodeJWT } from "../auth/auth.js";
 import {
 	extractAccountId,
+	getAccountIdCandidates,
 	resolveCodexAuthAccountId,
 } from "../auth/token-utils.js";
 
@@ -460,8 +461,22 @@ async function writeCodexAuthState(
 	// A stale "org-..." id already in auth.json is sanitised too, not only a
 	// selected one. With no chatgpt_account_id claim, drop the field so Codex
 	// derives it from the tokens.
-	const rawAccountId =
-		selection.accountId?.trim() || readTrimmedString(existingTokens.account_id);
+	const selectedAccountId = selection.accountId?.trim();
+	let rawAccountId =
+		selectedAccountId || readTrimmedString(existingTokens.account_id);
+	if (!selectedAccountId && selectedTokenPair && rawAccountId) {
+		// New tokens without an accountId: the previous file's id may belong to
+		// another account. Keep it only when the new tokens still carry it as a
+		// workspace; otherwise follow the new token's claim.
+		const tokenClaim =
+			extractAccountId(accessToken) ?? extractAccountId(selectedIdToken);
+		const tokenWorkspaces = getAccountIdCandidates(accessToken, selectedIdToken).map(
+			(candidate) => candidate.accountId,
+		);
+		if (tokenClaim && !tokenWorkspaces.includes(rawAccountId)) {
+			rawAccountId = tokenClaim;
+		}
+	}
 	if (rawAccountId) {
 		const accountId = resolveCodexAuthAccountId(
 			rawAccountId,

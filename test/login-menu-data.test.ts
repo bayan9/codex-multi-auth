@@ -434,6 +434,59 @@ describe("syncCodexCliActiveSelectionIfDrifted", () => {
 		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
 	});
 
+	it("matches a raw org id kept by the legacy accounts.json (#700)", async () => {
+		const accessToken = `h.${Buffer.from(
+			JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
+			}),
+		).toString("base64url")}.s`;
+		loadCodexCliStateMock.mockResolvedValue({
+			activeAccountId: "org-AbC123",
+			accounts: [{ accountId: "org-AbC123", accessToken, isActive: true }],
+		});
+
+		const result = await syncCodexCliActiveSelectionIfDrifted(
+			storageWith([account("a", { accountId: "org-AbC123", accessToken })]),
+		);
+
+		expect(result).toBe(false);
+		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
+	});
+
+	it("still reports drift when an org id resolves to a different workspace (#700)", async () => {
+		const accessToken = `h.${Buffer.from(
+			JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
+			}),
+		).toString("base64url")}.s`;
+		loadCodexCliStateMock.mockResolvedValue({ activeAccountId: "ws-other" });
+		setCodexCliActiveSelectionMock.mockResolvedValue(true);
+
+		const result = await syncCodexCliActiveSelectionIfDrifted(
+			storageWith([account("a", { accountId: "org-AbC123", accessToken })]),
+		);
+
+		expect(result).toBe(true);
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not let a matching email hide an unresolvable org id (#700)", async () => {
+		loadCodexCliStateMock.mockResolvedValue({
+			activeAccountId: "ws-other",
+			activeEmail: "a@example.com",
+		});
+		setCodexCliActiveSelectionMock.mockResolvedValue(true);
+
+		const result = await syncCodexCliActiveSelectionIfDrifted(
+			storageWith([
+				account("a", { accountId: "org-AbC123", accessToken: "opaque-access" }),
+			]),
+		);
+
+		expect(result).toBe(true);
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("does nothing when there is no CLI state to compare against", async () => {
 		loadCodexCliStateMock.mockResolvedValue(null);
 

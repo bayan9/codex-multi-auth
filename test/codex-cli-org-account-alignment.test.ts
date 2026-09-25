@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -102,5 +102,50 @@ describe("org-sourced account alignment with Codex auth.json (#700)", () => {
 		}
 
 		expect(await readFile(authPath, "utf-8")).toBe(firstWrite);
+	});
+
+	it("stays aligned when the legacy accounts.json keeps the raw org id", async () => {
+		const accountsPath = process.env.CODEX_CLI_ACCOUNTS_PATH!;
+		await writeFile(
+			accountsPath,
+			JSON.stringify({
+				accounts: [
+					{
+						accountId: "org-AbC123",
+						email: "org@example.com",
+						auth: {
+							tokens: { access_token: ACCESS_TOKEN, refresh_token: "refresh-org" },
+						},
+					},
+				],
+			}),
+			"utf-8",
+		);
+		const account = storage().accounts[0]!;
+		await setCodexCliActiveSelection({
+			accountId: account.accountId,
+			email: account.email,
+			accessToken: account.accessToken,
+			refreshToken: account.refreshToken,
+			idToken: ID_TOKEN,
+		});
+		const accountsWrite = await readFile(accountsPath, "utf-8");
+		const authWrite = await readFile(authPath, "utf-8");
+		expect(
+			(JSON.parse(accountsWrite) as { activeAccountId?: string }).activeAccountId,
+		).toBe("org-AbC123");
+		expect(
+			(JSON.parse(authWrite) as { tokens?: { account_id?: string } }).tokens
+				?.account_id,
+		).toBe("ws-uuid-1");
+
+		for (let render = 0; render < 3; render += 1) {
+			await expect(syncCodexCliActiveSelectionIfDrifted(storage())).resolves.toBe(
+				false,
+			);
+		}
+
+		expect(await readFile(accountsPath, "utf-8")).toBe(accountsWrite);
+		expect(await readFile(authPath, "utf-8")).toBe(authWrite);
 	});
 });

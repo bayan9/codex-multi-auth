@@ -18,7 +18,10 @@ import {
 	CODEX_UNAVAILABLE_PROBE_NOTE,
 } from "../quota-probe.js";
 import { isCodexUnavailableError } from "../errors.js";
-import { resolveCodexAuthAccountId } from "../auth/token-utils.js";
+import {
+	codexAuthAccountIdsMatch,
+	codexCliActiveIdentity,
+} from "../auth/token-utils.js";
 import { queuedRefresh } from "../refresh-queue.js";
 import {
 	findMatchingAccountIndex,
@@ -2076,16 +2079,21 @@ export async function runDoctor(
 				!!managerActiveEmail
 				&& !!codexActiveEmail
 				&& managerActiveEmail !== codexActiveEmail;
-			// The writer stores an "org-..." id as the token's workspace id
-			// (#700), so compare against that, not the raw stored id.
-			const managerAuthAccountId = resolveCodexAuthAccountId(
-				managerActiveAccountId,
-				activeAccount?.accessToken,
-			);
+			// A stored "org-..." id is written to auth.json as the token's
+			// workspace id, while the legacy accounts.json keeps the raw id (#700).
+			const codexActiveIdentity = codexCliState?.activeAccountId
+				? codexCliActiveIdentity(codexCliState)
+				: { accountId: codexActiveAccountId };
 			const isAccountIdMismatch =
-				!!managerAuthAccountId
+				!!managerActiveAccountId
 				&& !!codexActiveAccountId
-				&& managerAuthAccountId !== codexActiveAccountId;
+				&& !codexAuthAccountIdsMatch(
+					{
+						accountId: managerActiveAccountId,
+						accessToken: activeAccount?.accessToken,
+					},
+					codexActiveIdentity,
+				);
 
 			addCheck({
 				key: "active-selection-sync",

@@ -155,6 +155,42 @@ describe("codex-cli writer", () => {
     expect(written.tokens?.account_id).toBe("ws-uuid-3");
   });
 
+  it("does not carry the previous workspace id onto new tokens without an accountId (#700)", async () => {
+    const jwt = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const writeExisting = (accountId: string) =>
+      writeFile(
+        authPath,
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            access_token: "old-access",
+            refresh_token: "old-refresh",
+            account_id: accountId,
+          },
+        }),
+        "utf-8",
+      );
+    const readAccountId = async () =>
+      (JSON.parse(await readFile(authPath, "utf-8")) as {
+        tokens?: { account_id?: string };
+      }).tokens?.account_id;
+
+    await writeExisting("ws-previous-account");
+    await setCodexCliActiveSelection({
+      accessToken: jwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "ws-new-account" },
+      }),
+      refreshToken: "r",
+    });
+    expect(await readAccountId()).toBe("ws-new-account");
+
+    // a token without any claim gives nothing better, so the id is kept
+    await writeExisting("ws-previous-account");
+    await setCodexCliActiveSelection({ accessToken: "opaque-access", refreshToken: "r" });
+    expect(await readAccountId()).toBe("ws-previous-account");
+  });
+
   it("keeps a same-identity id_token when a resync passes no idToken", async () => {
     const jwt = (claims: Record<string, unknown>) =>
       `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;

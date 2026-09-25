@@ -304,6 +304,49 @@ export function resolveCodexAuthAccountId(
 	return extractAccountId(accessToken) ?? extractAccountId(idToken);
 }
 
+interface CodexAccountIdentity {
+	accountId?: string;
+	accessToken?: string;
+}
+
+/**
+ * The Codex CLI state's active account id with the access token of the
+ * snapshot it came from, so an "org-..." id (the legacy accounts.json keeps
+ * the raw id) can be resolved against that account's own token.
+ */
+export function codexCliActiveIdentity(state: {
+	activeAccountId?: string;
+	accounts?: ReadonlyArray<CodexAccountIdentity & { isActive?: boolean }>;
+}): CodexAccountIdentity {
+	const accountId = state.activeAccountId?.trim();
+	const accounts = state.accounts ?? [];
+	const snapshot =
+		accounts.find((entry) => !!accountId && entry.accountId?.trim() === accountId) ??
+		accounts.find((entry) => entry.isActive);
+	return { accountId, accessToken: snapshot?.accessToken };
+}
+
+/**
+ * Whether two account ids name the same Codex account. Equal raw ids match;
+ * otherwise each side goes through resolveCodexAuthAccountId with its own
+ * token, so a stored "org-..." id matches the workspace id the writer put in
+ * auth.json. Unresolvable ids (org id, no claim) never match a different id.
+ */
+export function codexAuthAccountIdsMatch(
+	left: CodexAccountIdentity,
+	right: CodexAccountIdentity,
+): boolean {
+	const leftId = left.accountId?.trim();
+	const rightId = right.accountId?.trim();
+	if (!leftId || !rightId) return false;
+	if (leftId === rightId) return true;
+	const leftResolved = resolveCodexAuthAccountId(leftId, left.accessToken);
+	return (
+		!!leftResolved &&
+		leftResolved === resolveCodexAuthAccountId(rightId, right.accessToken)
+	);
+}
+
 /**
  * Extracts the email address from OAuth tokens.
  * Checks id_token first (where OpenAI puts email), then falls back to access_token.

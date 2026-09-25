@@ -1,5 +1,8 @@
 import { extractAccountId, sanitizeEmail } from "../accounts.js";
-import { resolveCodexAuthAccountId } from "../auth/token-utils.js";
+import {
+	codexAuthAccountIdsMatch,
+	codexCliActiveIdentity,
+} from "../auth/token-utils.js";
 import type { ExistingAccountInfo } from "../cli.js";
 import { loadCodexCliState } from "../codex-cli/state.js";
 import { setCodexCliActiveSelection } from "../codex-cli/writer.js";
@@ -541,15 +544,15 @@ function activeAccountMatchesCodexCliState(
 	state: Awaited<ReturnType<typeof loadCodexCliState>>,
 ): boolean {
 	if (!state) return true;
-	// Compare what the writer would put in auth.json, not the raw stored id: an
-	// "org-..." id is written as the token's workspace id (#700).
-	const accountId = resolveCodexAuthAccountId(
-		account.accountId,
-		account.accessToken,
-	);
-	const activeAccountId = state.activeAccountId?.trim();
-	if (accountId && activeAccountId) {
-		return accountId === activeAccountId;
+	// A stored "org-..." id is written to auth.json as the token's workspace
+	// id, while the legacy accounts.json keeps the raw id (#700); match either.
+	const accountId = account.accountId?.trim();
+	const activeIdentity = codexCliActiveIdentity(state);
+	if (accountId && activeIdentity.accountId) {
+		return codexAuthAccountIdsMatch(
+			{ accountId, accessToken: account.accessToken },
+			activeIdentity,
+		);
 	}
 
 	const email = sanitizeEmail(account.email);
