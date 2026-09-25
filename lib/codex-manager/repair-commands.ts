@@ -164,6 +164,7 @@ function printFixUsage(): void {
 			"  - Refreshes tokens for enabled accounts",
 			"  - Disables hard-failed accounts (never deletes)",
 			"  - Recommends a better current account when needed",
+			"  - With --live, rebinds an org workspace id the backend no longer authorizes",
 		].join("\n"),
 	);
 }
@@ -387,6 +388,8 @@ function hasAccountStorageMutation(
 		|| before.accountId !== after.accountId
 		|| before.accountIdSource !== after.accountIdSource
 		|| before.enabled !== after.enabled
+		|| before.accountLabel !== after.accountLabel
+		|| before.currentWorkspaceIndex !== after.currentWorkspaceIndex
 	);
 }
 
@@ -430,6 +433,17 @@ function applyAccountStorageMutations(
 		target.accountId = mutation.after.accountId;
 		target.accountIdSource = mutation.after.accountIdSource;
 		target.enabled = mutation.after.enabled;
+		// Only the workspace rebind in `fix --live` moves these; copying them
+		// unconditionally would clobber a label/workspace change made on disk
+		// since this run loaded storage.
+		if (mutation.before.accountLabel !== mutation.after.accountLabel) {
+			target.accountLabel = mutation.after.accountLabel;
+		}
+		if (
+			mutation.before.currentWorkspaceIndex !== mutation.after.currentWorkspaceIndex
+		) {
+			target.currentWorkspaceIndex = mutation.after.currentWorkspaceIndex;
+		}
 	}
 }
 
@@ -1270,6 +1284,19 @@ export async function runFix(
 	const reports: FixAccountReport[] = [];
 	const refreshFailures = new Map<number, TokenFailure>();
 	const hardDisabledIndexes: number[] = [];
+	// A rebind mutates the account before its live probe, so a later rebind
+	// attempt on the refresh path sees a `token` source and reports nothing.
+	// Tracking it per index keeps the note on whichever report ends up final.
+	const reboundIndexes = new Set<number>();
+	const noteRebound = (index: number): void => {
+		reboundIndexes.add(index);
+		accountStorageChanged = true;
+		if (workingQuotaCache) {
+			quotaEmailFallbackState = deps.buildQuotaEmailFallbackState(
+				storage.accounts,
+			);
+		}
+	};
 
 	for (let i = 0; i < storage.accounts.length; i += 1) {
 		const account = storage.accounts[i];
@@ -1290,17 +1317,14 @@ export async function runFix(
 			let refreshAfterLiveProbeFailure = false;
 			if (options.live) {
 				const currentAccessToken = account.accessToken;
-				let reboundNote = "";
-				if (currentAccessToken) {
-					const rebound = await deps.reboundUnauthorizedAccountIdentity(
+				if (
+					currentAccessToken &&
+					(await deps.reboundUnauthorizedAccountIdentity(
 						account,
 						currentAccessToken,
-					);
-					if (rebound) {
-						accountStorageChanged = true;
-						reboundNote =
-							"workspace was not authorized for these credentials; rebound to the account's default identity. ";
-					}
+					))
+				) {
+					noteRebound(i);
 				}
 				const probeAccountId = currentAccessToken
 					? account.accountId ?? extractAccountId(currentAccessToken)
@@ -1325,12 +1349,10 @@ export async function runFix(
 						reports.push({
 							index: i,
 							label,
-							outcome: reboundNote ? "rebound-unauthorized-workspace" : "healthy",
-							message: `${reboundNote}${
-								display.showQuotaDetails
-									? `live session OK (${deps.formatCompactQuotaSnapshot(snapshot)})`
-									: "live session OK"
-							}`,
+							outcome: "healthy",
+							message: display.showQuotaDetails
+								? `live session OK (${deps.formatCompactQuotaSnapshot(snapshot)})`
+								: "live session OK",
 						});
 						continue;
 					} catch {
@@ -1397,14 +1419,14 @@ export async function runFix(
 					) || quotaCacheChanged;
 			}
 			if (options.live) {
-				const rebound = await deps.reboundUnauthorizedAccountIdentity(
-					account,
-					refreshResult.access,
-				);
-				const reboundNote = rebound
-					? "workspace was not authorized for these credentials; rebound to the account's default identity. "
-					: "";
-				if (rebound) accountStorageChanged = true;
+				if (
+					await deps.reboundUnauthorizedAccountIdentity(
+						account,
+						refreshResult.access,
+					)
+				) {
+					noteRebound(i);
+				}
 				const probeAccountId = account.accountId ?? nextAccountId;
 				if (probeAccountId) {
 					try {
@@ -1426,12 +1448,10 @@ export async function runFix(
 						reports.push({
 							index: i,
 							label,
-							outcome: reboundNote ? "rebound-unauthorized-workspace" : "healthy",
-							message: `${reboundNote}${
-								display.showQuotaDetails
-									? `refresh + live probe succeeded (${deps.formatCompactQuotaSnapshot(snapshot)})`
-									: "refresh + live probe succeeded"
-							}`,
+							outcome: "healthy",
+							message: display.showQuotaDetails
+								? `refresh + live probe succeeded (${deps.formatCompactQuotaSnapshot(snapshot)})`
+								: "refresh + live probe succeeded",
 						});
 						continue;
 					} catch (error) {
@@ -1533,6 +1553,14 @@ export async function runFix(
 		})),
 	);
 	const recommendation = recommendForecastAccount(forecastResults);
+	for (const report of reports) {
+		if (!reboundIndexes.has(report.index)) continue;
+		report.label = formatAccountLabel(storage.accounts[report.index], report.index);
+		report.message = `workspace was not authorized for these credentials; rebound to the account's default identity. ${report.message}`;
+		if (report.outcome === "healthy") {
+			report.outcome = "rebound-unauthorized-workspace";
+		}
+	}
 	const reportSummary = summarizeFixReports(reports);
 	const accountMutations = collectAccountStorageMutations(
 		originalAccounts,
@@ -1546,6 +1574,25 @@ export async function runFix(
 				: createEmptyAccountStorage();
 			applyAccountStorageMutations(nextStorage, accountMutations);
 			await persist(nextStorage);
+		});
+	}
+
+	// ~/.codex/auth.json still carries the rejected id for the active account,
+	// and Codex CLI keeps refusing it until something rewrites that file.
+	let codexActiveSynced: boolean | null = null;
+	const reboundActiveAccount = storage.accounts[activeIndex];
+	if (
+		!options.dryRun &&
+		reboundIndexes.has(activeIndex) &&
+		reboundActiveAccount &&
+		reboundActiveAccount.enabled !== false
+	) {
+		codexActiveSynced = await setCodexCliActiveSelection({
+			accountId: reboundActiveAccount.accountId,
+			email: reboundActiveAccount.email,
+			accessToken: reboundActiveAccount.accessToken,
+			refreshToken: reboundActiveAccount.refreshToken,
+			expiresAt: reboundActiveAccount.expiresAt,
 		});
 	}
 
@@ -1576,6 +1623,7 @@ export async function runFix(
 					changed,
 					quotaCacheChanged,
 					quotaCacheSaveError,
+					codexActiveSynced,
 					summary: reportSummary,
 					recommendation,
 					recommendedSwitchCommand:
@@ -1620,6 +1668,14 @@ export async function runFix(
 			),
 		);
 	}
+	if (codexActiveSynced === false) {
+		console.log(
+			deps.stylePromptText(
+				`Warning: the rebound active account could not be synced into Codex auth state; run \`codex-multi-auth switch ${activeIndex + 1}\` to retry.`,
+				"warning",
+			),
+		);
+	}
 	if (display.showPerAccountRows) {
 		console.log("");
 		for (const report of reports) {
@@ -1628,7 +1684,8 @@ export async function runFix(
 					? "✓"
 					: report.outcome === "disabled-hard-failure"
 						? "✗"
-						: report.outcome === "warning-soft-failure"
+						: report.outcome === "warning-soft-failure" ||
+								report.outcome === "rebound-unauthorized-workspace"
 							? "!"
 							: "-";
 			const tone: PromptTone =
@@ -1636,7 +1693,8 @@ export async function runFix(
 					? "success"
 					: report.outcome === "disabled-hard-failure"
 						? "danger"
-						: report.outcome === "warning-soft-failure"
+						: report.outcome === "warning-soft-failure" ||
+								report.outcome === "rebound-unauthorized-workspace"
 							? "warning"
 							: "muted";
 			console.log(

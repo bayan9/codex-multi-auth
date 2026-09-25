@@ -52,7 +52,10 @@ import {
 	runSignInFlow,
 	syncSelectionToCodex,
 } from "./login-oauth.js";
-import { constrainAutomaticSelection } from "../auth/account-access.js";
+import {
+	applyAuthorizedAccountConstraint,
+	fetchAuthorizedAccounts,
+} from "../auth/account-access.js";
 import { persistAndSyncSelectedAccount } from "./persist-selected-account.js";
 import {
 	type RepairCommandDeps,
@@ -596,13 +599,30 @@ async function runAuthLoginFlow(
 			// CLI >= 0.156.0 checks that against wham/accounts/check and refuses
 			// every request with "selected workspace missing from routing
 			// discovery", so ask the same question before persisting the id.
-			// Only for an automatic selection: `--org` is explicit intent, and a
-			// targeted re-auth is identity-checked by persistAccountPool.
-			if (!loginOptions.org && !expectedAccount) {
-				resolved = await constrainAutomaticSelection(
+			// A targeted re-auth is skipped: persistAccountPool identity-checks it
+			// and would reject a rewritten id.
+			let codexSelection = resolved;
+			if (!expectedAccount && resolved.accountIdOverride) {
+				const constrained = applyAuthorizedAccountConstraint(
 					resolved,
-					tokenResult.access,
+					await fetchAuthorizedAccounts(tokenResult.access),
 				);
+				if (constrained.result?.changed) {
+					codexSelection = constrained.selection;
+					if (resolved.accountIdSource === "manual") {
+						// `--org` / CODEX_AUTH_ACCOUNT_ID is explicit intent, so the saved
+						// binding is kept as chosen. Codex CLI would refuse it though, so
+						// ~/.codex/auth.json gets the id the backend does authorize.
+						console.warn(
+							"Warning: the workspace you selected is not authorized for these credentials. It is saved as chosen, but the Codex CLI auth file gets the backend's default account instead, because Codex CLI 0.156+ refuses unauthorized workspaces.",
+						);
+					} else {
+						resolved = constrained.selection;
+						console.warn(
+							"Warning: the automatically selected workspace is not authorized for these credentials; using the account the backend reports as default instead. Re-authenticate while that workspace is active in ChatGPT to bind it.",
+						);
+					}
+				}
 			}
 			let persistResult: Awaited<ReturnType<typeof persistAccountPool>>;
 			try {
@@ -626,7 +646,7 @@ async function runAuthLoginFlow(
 			// drift check compares identity, not tokens, so a same-identity refresh
 			// never looks like drift.
 			if (!persistResult || persistResult.isActiveAccount) {
-				await syncSelectionToCodex(resolved);
+				await syncSelectionToCodex(codexSelection);
 			}
 
 			const latestStorage = await loadAccounts();

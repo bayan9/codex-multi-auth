@@ -1776,4 +1776,198 @@ describe("repair-commands direct deps coverage", () => {
 
 		expect(reboundUnauthorizedAccountIdentity).not.toHaveBeenCalled();
 	});
+
+	// Mirrors the real reboundUnauthorizedAccountIdentity contract: only an
+	// org-sourced id is ever rebound, so a second call after the first rebind
+	// (source now "token") returns null.
+	function orgRebinder(workspaces = false) {
+		return vi.fn(
+			async (account: {
+				accountId?: string;
+				accountIdSource?: string;
+				accountLabel?: string;
+				currentWorkspaceIndex?: number;
+			}) => {
+				if (account.accountIdSource !== "org") return null;
+				account.accountId = "personal-id";
+				account.accountIdSource = "token";
+				if (workspaces) {
+					account.accountLabel = "Personal";
+					account.currentWorkspaceIndex = 0;
+				}
+				return { accountId: "personal-id", changed: true, rejected: "org-team" };
+			},
+		);
+	}
+
+	function orgAccountStorage(expiresAt: number) {
+		return {
+			version: 3 as const,
+			accounts: [
+				{
+					email: "org@example.com",
+					refreshToken: "org-refresh",
+					accessToken: "org-access",
+					expiresAt,
+					accountId: "org-team",
+					accountIdSource: "org" as const,
+					accountLabel: "Team",
+					workspaces: [
+						{ id: "personal-id", name: "Personal", enabled: true },
+						{ id: "org-team", name: "Team", enabled: true },
+					],
+					currentWorkspaceIndex: 1,
+					enabled: true,
+				},
+			],
+			activeIndex: 0,
+			activeIndexByFamily: {},
+		};
+	}
+
+	// Greptile P2: the valid-token rebind happens before the live probe. When
+	// that probe fails the refresh path's rebind sees a "token" source and
+	// returns null, which used to drop the note from the final report while
+	// the rebind itself was still saved.
+	it("runFix keeps the rebind note exactly once when the first live probe fails", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		storageMocks.loadAccounts.mockResolvedValueOnce(orgAccountStorage(Date.now() + 60_000));
+		refreshQueueMocks.queuedRefresh.mockReset();
+		refreshQueueMocks.queuedRefresh.mockResolvedValue({
+			type: "success",
+			access: "org-access-fresh",
+			refresh: "org-refresh-next",
+			expires: Date.now() + 120_000,
+		});
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot
+			.mockRejectedValueOnce(new Error("probe exploded"))
+			.mockResolvedValueOnce({ status: 200, model: "gpt-5-codex", primary: {}, secondary: {} });
+		const reboundUnauthorizedAccountIdentity = orgRebinder();
+		const consoleSpy = silenceConsole("log");
+
+		await runFix(
+			["--json", "--live"],
+			createDeps({ hasUsableAccessToken: () => true, reboundUnauthorizedAccountIdentity }),
+		);
+
+		expect(reboundUnauthorizedAccountIdentity).toHaveBeenCalledTimes(2);
+		const payload = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}")) as {
+			summary: { warnings: number; healthy: number };
+			reports: Array<{ outcome: string; message: string }>;
+		};
+		expect(payload.reports).toHaveLength(1);
+		expect(payload.reports[0]?.outcome).toBe("rebound-unauthorized-workspace");
+		expect(payload.reports[0]?.message.match(/not authorized/g)).toHaveLength(1);
+		expect(payload.summary).toMatchObject({ warnings: 1, healthy: 0 });
+	});
+
+	it("runFix keeps the rebind note on a soft-failure report after the refresh-path probe fails", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		storageMocks.loadAccounts.mockResolvedValueOnce(orgAccountStorage(Date.now() + 60_000));
+		refreshQueueMocks.queuedRefresh.mockReset();
+		refreshQueueMocks.queuedRefresh.mockResolvedValue({
+			type: "success",
+			access: "org-access-fresh",
+			refresh: "org-refresh-next",
+			expires: Date.now() + 120_000,
+		});
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockRejectedValue(new Error("probe exploded"));
+		const consoleSpy = silenceConsole("log");
+
+		await runFix(
+			["--json", "--live"],
+			createDeps({
+				hasUsableAccessToken: () => true,
+				reboundUnauthorizedAccountIdentity: orgRebinder(),
+			}),
+		);
+
+		const payload = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}")) as {
+			reports: Array<{ outcome: string; message: string }>;
+		};
+		expect(payload.reports[0]?.outcome).toBe("warning-soft-failure");
+		expect(payload.reports[0]?.message).toContain("not authorized");
+		expect(payload.reports[0]?.message).toContain("live probe failed");
+	});
+
+	// Codex CLI reads ~/.codex/auth.json, not the pool: without a sync it keeps
+	// sending the rejected id after `fix --live` reported the account healthy.
+	it("runFix syncs a rebound active account into Codex auth state and persists its workspace pointer", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		const onDisk = orgAccountStorage(Date.now() + 60_000);
+		storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(onDisk));
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		const persist = vi.fn(async () => {});
+		storageMocks.withAccountStorageTransaction.mockImplementation(
+			async (fn: (storage: unknown, persist: unknown) => Promise<void>) =>
+				fn(structuredClone(onDisk), persist),
+		);
+		codexCliWriterMocks.setCodexCliActiveSelection.mockResolvedValueOnce(true);
+		const consoleSpy = silenceConsole("log");
+
+		await runFix(
+			["--json", "--live"],
+			createDeps({
+				hasUsableAccessToken: () => true,
+				reboundUnauthorizedAccountIdentity: orgRebinder(true),
+			}),
+		);
+
+		expect(codexCliWriterMocks.setCodexCliActiveSelection).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({
+				accountId: "personal-id",
+				accessToken: "org-access",
+				refreshToken: "org-refresh",
+			}),
+		);
+		const persisted = persist.mock.calls[0]?.[0] as {
+			accounts: Array<{ accountId?: string; accountLabel?: string; currentWorkspaceIndex?: number }>;
+		};
+		expect(persisted.accounts[0]).toMatchObject({
+			accountId: "personal-id",
+			accountLabel: "Personal",
+			currentWorkspaceIndex: 0,
+		});
+		const payload = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}")) as {
+			codexActiveSynced: boolean | null;
+		};
+		expect(payload.codexActiveSynced).toBe(true);
+	});
+
+	it("runFix does not sync Codex auth state for a rebind in dry-run or on a non-active account", async () => {
+		for (const [args, activeIndex] of [
+			[["--json", "--live", "--dry-run"], 0],
+			[["--json", "--live"], 1],
+		] as const) {
+			quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+			storageMocks.loadAccounts.mockResolvedValueOnce(orgAccountStorage(Date.now() + 60_000));
+			quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+			quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+				status: 200,
+				model: "gpt-5-codex",
+				primary: {},
+				secondary: {},
+			});
+			silenceConsole("log");
+
+			await runFix(
+				[...args],
+				createDeps({
+					hasUsableAccessToken: () => true,
+					resolveActiveIndex: () => activeIndex,
+					reboundUnauthorizedAccountIdentity: orgRebinder(),
+				}),
+			);
+		}
+
+		expect(codexCliWriterMocks.setCodexCliActiveSelection).not.toHaveBeenCalled();
+	});
 });

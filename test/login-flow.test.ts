@@ -13,6 +13,7 @@ const {
 	resolveAccountSelectionMock,
 	persistAccountPoolMock,
 	syncSelectionToCodexMock,
+	fetchAuthorizedAccountsMock,
 } = vi.hoisted(() => ({
 	loadAccountsMock: vi.fn(),
 	getNamedBackupsMock: vi.fn(),
@@ -23,7 +24,14 @@ const {
 	resolveAccountSelectionMock: vi.fn(),
 	persistAccountPoolMock: vi.fn(),
 	syncSelectionToCodexMock: vi.fn(),
+	fetchAuthorizedAccountsMock: vi.fn(),
 }));
+
+vi.mock("../lib/auth/account-access.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../lib/auth/account-access.js")>();
+	return { ...actual, fetchAuthorizedAccounts: fetchAuthorizedAccountsMock };
+});
 
 vi.mock("../lib/storage.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../lib/storage.js")>();
@@ -163,6 +171,7 @@ beforeEach(() => {
 		});
 	});
 	syncSelectionToCodexMock.mockResolvedValue(undefined);
+	fetchAuthorizedAccountsMock.mockResolvedValue(null);
 	promptAddAnotherAccountMock.mockResolvedValue(false);
 	// Keep every prompt on its deterministic non-TTY fallback.
 	process.stdin.isTTY = false;
@@ -479,5 +488,71 @@ describe("runAuthLogin onboarding without explicit flags", () => {
 
 		expect(await runAuthLogin([], deps())).toBe(0);
 		expect(warnSpy).not.toHaveBeenCalled();
+	});
+});
+
+// Codex CLI 0.156+ refuses a tokens.account_id missing from
+// wham/accounts/check (issue #700), so the login checks the id first.
+describe("runAuthLogin workspace authorization guard", () => {
+	const AUTHORIZED = {
+		accountIds: ["personal-id"],
+		defaultAccountId: "personal-id",
+	};
+	const SIGNED_IN = { type: "success" as const, access: "access-token" };
+
+	it.each([
+		["an --org flag", ["--manual", "--org", "org-team"]],
+		["CODEX_AUTH_ACCOUNT_ID", ["--manual"]],
+	])(
+		"keeps an explicit binding from %s saved but syncs Codex CLI to an authorized id",
+		async (_source, args) => {
+			const manual = {
+				...SIGNED_IN,
+				accountIdOverride: "org-team",
+				accountIdSource: "manual" as const,
+			};
+			runSignInFlowMock.mockResolvedValue(SIGNED_IN);
+			resolveAccountSelectionMock.mockReturnValue(manual);
+			fetchAuthorizedAccountsMock.mockResolvedValue(AUTHORIZED);
+
+			expect(await runAuthLogin(args, deps())).toBe(0);
+
+			expect(persistAccountPoolMock).toHaveBeenCalledExactlyOnceWith(
+				[manual],
+				false,
+				PLAIN_PERSIST_OPTIONS,
+			);
+			expect(syncSelectionToCodexMock).toHaveBeenCalledExactlyOnceWith(
+				expect.objectContaining({
+					accountIdOverride: "personal-id",
+					accountIdSource: "token",
+				}),
+			);
+			expect(loggedLines(warnSpy).join("\n")).toContain("not authorized");
+		},
+	);
+
+	it("replaces an unauthorized automatic selection and says so without debug logging", async () => {
+		runSignInFlowMock.mockResolvedValue(SIGNED_IN);
+		resolveAccountSelectionMock.mockReturnValue({
+			...SIGNED_IN,
+			accountIdOverride: "org-team",
+			accountIdSource: "org",
+		});
+		fetchAuthorizedAccountsMock.mockResolvedValue(AUTHORIZED);
+
+		expect(await runAuthLogin(["--manual"], deps())).toBe(0);
+
+		const rewritten = expect.objectContaining({
+			accountIdOverride: "personal-id",
+			accountIdSource: "token",
+		});
+		expect(persistAccountPoolMock).toHaveBeenCalledExactlyOnceWith(
+			[rewritten],
+			false,
+			PLAIN_PERSIST_OPTIONS,
+		);
+		expect(syncSelectionToCodexMock).toHaveBeenCalledExactlyOnceWith(rewritten);
+		expect(loggedLines(warnSpy).join("\n")).toContain("not authorized");
 	});
 });

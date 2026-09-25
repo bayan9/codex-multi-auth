@@ -1,5 +1,5 @@
 import { CODEX_BASE_URL } from "../constants.js";
-import { logWarn } from "../logger.js";
+import type { Workspace } from "../storage/public-types.js";
 import type { AccountIdSource } from "../types.js";
 
 /**
@@ -141,6 +141,8 @@ export function constrainSelectionToAuthorized(
 export interface AccountSelectionLike {
 	accountIdOverride?: string;
 	accountIdSource?: AccountIdSource;
+	accountLabel?: string;
+	workspaces?: Workspace[];
 }
 
 /**
@@ -149,7 +151,9 @@ export interface AccountSelectionLike {
  * On a rewrite the source becomes `token`: the backend's default account IS the
  * account these credentials are, so it must auto-follow later token refreshes
  * (see `shouldUpdateAccountIdFromToken`) instead of being pinned the way an
- * explicit org/manual choice is.
+ * explicit org/manual choice is. The label follows the new id too; an empty
+ * label (not undefined) is deliberate, because the account-pool merge keeps
+ * the saved label on undefined and would go on naming the rejected workspace.
  */
 export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>(
 	selection: T,
@@ -166,6 +170,10 @@ export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>
 			...selection,
 			accountIdOverride: result.accountId,
 			accountIdSource: "token",
+			accountLabel:
+				selection.workspaces?.find(
+					(workspace) => workspace.id === result.accountId,
+				)?.name ?? "",
 		},
 		result,
 	};
@@ -175,6 +183,9 @@ export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>
 export interface StoredAccountIdentity {
 	accountId?: string;
 	accountIdSource?: AccountIdSource;
+	accountLabel?: string;
+	workspaces?: Workspace[];
+	currentWorkspaceIndex?: number;
 }
 
 /**
@@ -203,49 +214,18 @@ export async function reboundUnauthorizedAccountIdentity(
 
 	account.accountId = result.accountId;
 	account.accountIdSource = "token";
+	// The plugin host sends workspaces[currentWorkspaceIndex].id in preference
+	// to accountId, so the workspace pointer has to follow the rebind or that
+	// path keeps using the rejected id.
+	const workspaceIndex =
+		account.workspaces?.findIndex(
+			(workspace) => workspace.id === result.accountId,
+		) ?? -1;
+	if (workspaceIndex >= 0) {
+		account.currentWorkspaceIndex = workspaceIndex;
+		account.accountLabel = account.workspaces?.[workspaceIndex]?.name ?? "";
+	} else if (account.accountLabel !== undefined) {
+		account.accountLabel = "";
+	}
 	return result;
-}
-
-/**
- * Fetches authorization and applies it to a resolved selection in one step,
- * warning when it had to override the choice.
- *
- * Call this ONLY for an automatically derived selection. A selection the user
- * named (`login --org`) or a targeted re-authentication of a saved row must keep
- * its id: the former is explicit intent, and the latter is checked against
- * `expectedAccount` by `persistAccountPool`, which would reject a rewritten id
- * as an identity mismatch.
- */
-export async function constrainAutomaticSelection<
-	T extends AccountSelectionLike,
->(
-	selection: T,
-	accessToken: string,
-	options: FetchAuthorizedAccountsOptions = {},
-): Promise<T> {
-	if (!readString(selection.accountIdOverride)) return selection;
-
-	const authorized = await fetchAuthorizedAccounts(accessToken, options);
-	const applied = applyAuthorizedAccountConstraint(selection, authorized);
-	if (applied.result) warnAboutConstrainedSelection(applied.result);
-	return applied.selection;
-}
-
-/**
- * Logs the one thing a user needs to know when their selection was overridden:
- * the workspace they picked is not one these credentials can use, so the login
- * landed on the backend's default instead.
- */
-export function warnAboutConstrainedSelection(
-	result: ConstrainedSelection,
-): void {
-	if (!result.changed) return;
-	logWarn(
-		"Selected workspace is not authorized for these credentials; using the account the backend reports as default instead. Re-authenticate while that workspace is active in ChatGPT to bind it.",
-		{
-			operation: "constrain-account-selection",
-			rejectedAccountIdSuffix: result.rejected?.slice(-6),
-			appliedAccountIdSuffix: result.accountId.slice(-6),
-		},
-	);
 }

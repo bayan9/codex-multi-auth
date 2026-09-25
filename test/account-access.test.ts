@@ -6,6 +6,7 @@ import {
 	applyAuthorizedAccountConstraint,
 	reboundUnauthorizedAccountIdentity,
 } from "../lib/auth/account-access.js";
+import { CODEX_BASE_URL } from "../lib/constants.js";
 
 /**
  * Codex CLI >= 0.156.0 validates the account it is told to act as against
@@ -113,7 +114,7 @@ describe("fetchAuthorizedAccounts", () => {
 			defaultAccountId: "personal-id",
 		});
 		const [url, init] = fetchMock.mock.calls[0] ?? [];
-		expect(String(url)).toContain("/wham/accounts/check");
+		expect(String(url)).toBe(`${CODEX_BASE_URL}/wham/accounts/check`);
 		const headers = new Headers(
 			(init as RequestInit | undefined)?.headers ?? {},
 		);
@@ -315,5 +316,84 @@ describe("reboundUnauthorizedAccountIdentity", () => {
 
 		expect(result).toBeNull();
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("workspace metadata follows a rewritten account id", () => {
+	const authorized = {
+		accountIds: ["personal-id"],
+		defaultAccountId: "personal-id",
+	};
+	const workspaces = [
+		{ id: "personal-id", name: "Personal", enabled: true },
+		{ id: "org-team", name: "Team", enabled: true },
+	];
+
+	it("relabels a rewritten login selection from the authorized workspace", () => {
+		const { selection } = applyAuthorizedAccountConstraint(
+			{
+				accountIdOverride: "org-team",
+				accountIdSource: "org" as const,
+				accountLabel: "Team",
+				workspaces,
+			},
+			authorized,
+		);
+
+		expect(selection.accountLabel).toBe("Personal");
+	});
+
+	// Empty, not undefined: the account-pool merge keeps the saved label on
+	// undefined and would keep naming the rejected workspace.
+	it("blanks the label when the authorized id is not a tracked workspace", () => {
+		const { selection } = applyAuthorizedAccountConstraint(
+			{ accountIdOverride: "org-team", accountLabel: "Team" },
+			authorized,
+		);
+
+		expect(selection.accountLabel).toBe("");
+	});
+
+	// The plugin host sends workspaces[currentWorkspaceIndex].id ahead of
+	// accountId, so a rebind that leaves the pointer on the rejected workspace
+	// changes nothing on that path.
+	it("moves a rebound account's workspace pointer and label to the authorized id", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response(JSON.stringify({ accounts: [{ id: "personal-id" }], default_account_id: "personal-id" }), {
+				status: 200,
+			}),
+		);
+		const account = {
+			accountId: "org-team",
+			accountIdSource: "org" as const,
+			accountLabel: "Team",
+			workspaces: structuredClone(workspaces),
+			currentWorkspaceIndex: 1,
+		};
+
+		await reboundUnauthorizedAccountIdentity(account, "token-abc", { fetch: fetchMock });
+
+		expect(account).toMatchObject({
+			accountId: "personal-id",
+			accountLabel: "Personal",
+			currentWorkspaceIndex: 0,
+		});
+	});
+
+	it("blanks a rebound account's label when the authorized id is not tracked", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response(JSON.stringify({ accounts: [{ id: "personal-id" }], default_account_id: "personal-id" }), {
+				status: 200,
+			}),
+		);
+		const account = {
+			accountId: "org-team",
+			accountIdSource: "org" as const,
+			accountLabel: "Team",
+		};
+
+		await reboundUnauthorizedAccountIdentity(account, "token-abc", { fetch: fetchMock });
+
+		expect(account.accountLabel).toBe("");
 	});
 });
