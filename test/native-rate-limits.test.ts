@@ -33,9 +33,10 @@ it('keeps the token-bearing home under the user-private multi-auth directory and
  const stale=join(root,'tmp','reset-rpc-stale');await mkdir(stale,{recursive:true});await writeFile(join(stale,'auth.json'),'{"tokens":{"access_token":"leaked"}}');
  const old=new Date(Date.now()-60*60*1000);await utimes(stale,old,old);
  const fresh=join(root,'tmp','reset-rpc-running');await mkdir(fresh,{recursive:true});
+ const previous=process.env.CODEX_MULTI_AUTH_DIR;
  process.env.CODEX_MULTI_AUTH_DIR=root;
  try{await nativeRateLimitsRpc(auth,'account/rateLimits/read',{}, {command:[process.execPath,script]});}
- finally{delete process.env.CODEX_MULTI_AUTH_DIR;}
+ finally{if(previous===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=previous;}
  const seen=JSON.parse(await readFile(join(dir,'seen.json'),'utf8'));
  expect(seen.home.startsWith(join(root,'tmp','reset-rpc-'))).toBe(true);
  await expect(stat(stale)).rejects.toMatchObject({code:'ENOENT'});
