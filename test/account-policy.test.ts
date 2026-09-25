@@ -33,6 +33,27 @@ describe("account policy store", () => {
 		await removeWithRetry(tempDir, { recursive: true, force: true });
 	});
 
+	it("keeps automatic first-use priming off for fresh accounts and pre-2.17 policy files", async () => {
+		const { getAccountPolicyKey, getAccountPolicyPath, loadAccountPolicyStore, upsertAccountPolicy } = await import("../lib/account-policy.js");
+		const { runAutomaticAccountChecks } = await import("../lib/runtime/automatic-account-checks.js");
+		const accounts = [{ accountId: "fixture-new", refreshToken: "fixture-new", addedAt: 1, lastUsed: 1 }, { accountId: "fixture-legacy", refreshToken: "fixture-legacy", addedAt: 1, lastUsed: 1 }];
+		const legacyKey = getAccountPolicyKey(accounts[1]!);
+		// A policy file written before this PR: no autoPrime (or priority) field.
+		await fs.writeFile(getAccountPolicyPath(), JSON.stringify({ version: 1, accounts: { [legacyKey]: { accountKey: legacyKey, tags: ["team"], weight: 2, paused: false, drained: false, note: null, updatedAt: 1 } } }));
+		const store = await loadAccountPolicyStore();
+		expect(store.accounts[legacyKey]?.autoPrime).toBe(false);
+		// A fresh account that only gets an unrelated policy edit.
+		const fresh = upsertAccountPolicy(store, getAccountPolicyKey(accounts[0]!), (policy) => { policy.note = "fixture"; });
+		expect(fresh.autoPrime).toBe(false);
+		const check = vi.fn();
+		await runAutomaticAccountChecks({ path: join(tempDir, "attempts.json"), loadAccounts: async () => ({ version: 3, activeIndex: 0, accounts }), loadPolicies: async () => store, check, now: () => 1000 });
+		expect(check).not.toHaveBeenCalled();
+		// Turning it on affects only that account.
+		upsertAccountPolicy(store, legacyKey, (policy) => { policy.autoPrime = true; });
+		await runAutomaticAccountChecks({ path: join(tempDir, "attempts.json"), loadAccounts: async () => ({ version: 3, activeIndex: 0, accounts }), loadPolicies: async () => store, check, now: () => 1000 });
+		expect(check.mock.calls.map((call) => call[1])).toEqual([1]);
+	});
+
 	it("stores policy rows by hashed account identity", async () => {
 		const {
 			getAccountPolicyKey,
