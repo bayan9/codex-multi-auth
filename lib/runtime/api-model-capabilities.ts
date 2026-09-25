@@ -64,6 +64,27 @@ function parseInputModalities(id: string, text: string): string[] | undefined {
 	// The native coding picker currently accepts text and image inputs.
 	return [...new Set(modalities.filter(value => value === "text" || value === "image"))];
 }
+/** Codes and params that say the key, organization or project itself lacks access. */
+const CREDENTIAL_ACCESS_CODES = new Set([
+	"invalid_api_key", "insufficient_permissions", "permission_denied", "unauthorized",
+	"organization_deactivated", "account_deactivated", "project_not_found", "project_archived",
+	"ip_not_authorized", "unsupported_country_region_territory",
+]);
+/**
+ * A 403 either removes the credential's access ("lost"), is tied to the probed
+ * setting or model entitlement ("setting"), or says neither ("ambiguous").
+ */
+function classifyProbe403(data: unknown, setting: { effort?: string; tier?: string; compatibility?: boolean }): "lost" | "setting" | "ambiguous" {
+	const error = isRecord(data) && isRecord(data.error) ? data.error : null;
+	if (!error) return "ambiguous";
+	const code = String(error.code ?? ""), param = String(error.param ?? "");
+	if (CREDENTIAL_ACCESS_CODES.has(code) || ["api_key", "organization", "project"].includes(param)) return "lost";
+	if (setting.effort && ["reasoning.effort", "reasoning"].includes(param)) return "setting";
+	if (setting.tier && param === "service_tier") return "setting";
+	if (setting.compatibility && ["tools", "tool_choice"].includes(param)) return "setting";
+	if (classifyCapabilityFailure(400, data) === "model" || param === "model") return "setting";
+	return "ambiguous";
+}
 export class ApiModelCapabilities {
 	private activeProbes = 0;
 	private readonly probeWaiters: Array<() => void> = [];
@@ -201,8 +222,18 @@ export class ApiModelCapabilities {
 			effort?: string;
 			tier?: string;
 			compatibility?: boolean;
-		}): Promise<string> =>
-			this.withProbeSlot(async () => {
+		}): Promise<string> => {
+			// Only a 403 that names the key/org/project drops everything this credential
+			// verified. One tied to the setting removes that setting; an unexplained one
+			// removes only the probed setting too, and the probe is retried soon.
+			const denied403 = (data: unknown): string => {
+				const kind = classifyProbe403(data, setting);
+				if (kind === "lost") { credentialUnavailable = true; lostAccess = true; return "unverified"; }
+				if (kind === "ambiguous") credentialUnavailable = true;
+				// The compatibility probe stands for the whole model: never hide it on an unexplained 403.
+				return setting.compatibility && kind === "ambiguous" ? "unverified" : "unsupported";
+			};
+			return this.withProbeSlot(async () => {
 				if (credentialUnavailable) return "unverified";
 				try {
 					const response = await this.fetchImpl(
@@ -253,7 +284,7 @@ export class ApiModelCapabilities {
 					if (response.status === 401) lostAccess = true;
 					// Probe bodies are tiny, but an upstream error must not grow local memory unboundedly.
 					const reader = response.body?.getReader();
-					if (!reader) { if (response.status === 403) {credentialUnavailable = true; lostAccess = true;} return "unverified"; }
+					if (!reader) return response.status === 403 ? denied403(null) : "unverified";
 					const chunks: Uint8Array[] = [];
 					let bytes = 0;
 					try {
@@ -271,16 +302,9 @@ export class ApiModelCapabilities {
 					try {
 						data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 					} catch {
-                        if (response.status === 403) {credentialUnavailable = true; lostAccess = true;}
-						return "unverified";
+						return response.status === 403 ? denied403(null) : "unverified";
 					}
-                    if (response.status === 403) {
-                        const error = isRecord(data) && isRecord(data.error) ? data.error : null;
-                        const scoped = error && ["invalid_value", "unsupported_value", "unsupported_parameter"].includes(String(error.code)) &&
-                            (setting.effort && ["reasoning.effort", "reasoning"].includes(String(error.param)) || setting.tier && error.param === "service_tier" || setting.compatibility && ["tools", "tool_choice"].includes(String(error.param)));
-                        if (scoped) return "unsupported";
-                        credentialUnavailable = true; lostAccess = true;
-                    }
+					if (response.status === 403) return denied403(data);
 					if (!response.ok) {
 						if (setting.compatibility) {
 							const error =
@@ -334,6 +358,7 @@ export class ApiModelCapabilities {
 					return "unverified";
 				}
 			});
+		};
 		{
 			const checked = await Promise.all(
 				[...efforts]

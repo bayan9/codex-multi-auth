@@ -488,3 +488,54 @@ it("a setting-specific 403 removes only the denied effort", async () => {
  expect(model?.supported_reasoning_levels).not.toEqual(expect.arrayContaining([expect.objectContaining({effort:"xhigh"})]));
  expect(model?.service_tiers).toEqual(expect.arrayContaining([expect.objectContaining({id:"priority"})]));
 });
+
+describe("403 probe outcomes", () => {
+	const run = async (deny: (body: Record<string, unknown>) => Response | null) => {
+		let now = 1;
+		let denying = false;
+		let posts = 0;
+		const fetcher = vi.fn(async (_u: unknown, init?: RequestInit) => {
+			if (init?.method !== "POST") return new Response("missing", { status: 404 });
+			posts++;
+			const body = JSON.parse(String(init.body));
+			const denied = denying ? deny(body) : null;
+			if (denied) return denied;
+			if (body.tools) return Response.json({ output: [{ type: "function_call", name: "capability_probe" }] });
+			return Response.json({ reasoning: body.reasoning, service_tier: body.service_tier ?? "default" });
+		});
+		const reader = new ApiModelCapabilities(fetcher as typeof fetch, () => now);
+		await reader.enrich([{ slug: "fixture" }], false, route);
+		denying = true;
+		now += 900_001;
+		const [model] = await reader.enrich([{ slug: "fixture" }], false, route);
+		const efforts = (model?.supported_reasoning_levels as { effort: string }[] | undefined ?? []).map((level) => level.effort);
+		const tiers = (model?.service_tiers as { id: string }[] | undefined ?? []).map((tier) => tier.id);
+		const before = posts;
+		now += 60_001;
+		await reader.enrich([{ slug: "fixture" }], false, route);
+		return { efforts, tiers, reprobedSoon: posts > before };
+	};
+	it("drops everything the credential verified on a 403 that names the key or project", async () => {
+		const result = await run(() => Response.json({ error: { code: "insufficient_permissions", message: "fixture" } }, { status: 403 }));
+		expect(result.efforts).not.toContain("xhigh");
+		expect(result.tiers).toEqual([]);
+	});
+	it("removes only the probed effort on a model-entitlement 403", async () => {
+		const result = await run((body) => (body.reasoning as { effort?: string } | undefined)?.effort === "xhigh"
+			? Response.json({ error: { code: "model_access_denied", message: "fixture" } }, { status: 403 })
+			: null);
+		expect(result.efforts).not.toContain("xhigh");
+		expect(result.efforts).toContain("high");
+		expect(result.tiers).toEqual(expect.arrayContaining(["priority", "ultrafast"]));
+		expect(result.reprobedSoon).toBe(false);
+	});
+	it("removes only the probed effort on an unexplained 403 and retries the probe soon", async () => {
+		const result = await run((body) => (body.reasoning as { effort?: string } | undefined)?.effort === "xhigh" && !body.service_tier && !body.tools
+			? new Response("denied", { status: 403 })
+			: null);
+		expect(result.efforts).not.toContain("xhigh");
+		expect(result.efforts).toContain("high");
+		expect(result.tiers).toEqual(expect.arrayContaining(["priority", "ultrafast"]));
+		expect(result.reprobedSoon).toBe(true);
+	});
+});
