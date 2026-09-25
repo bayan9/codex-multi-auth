@@ -1,3 +1,4 @@
+import { ClientCancellationError } from "../request/client-cancellation.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import {
 	RuntimeCapabilityFailures,
@@ -142,9 +143,10 @@ export class ApiModelRuntime {
 		forceProbes = false,
 		waitForCapabilities = true,
 		waitForPersistence = true,
+        requestKind?: "oauth" | "api" | "zdr",
 	): Promise<RouteCatalog[]> {
 		this.activeKeys = new Set(routes.map((route) => this.key(route)));
-		return mapWithConcurrency(routes, 3, async (route) => {
+		return mapWithConcurrency(requestKind ? routes.filter(route => route.kind === requestKind) : routes, 3, async (route) => {
 					const key = this.key(route),
 						cached = this.cache.get(key);
 					if (
@@ -219,11 +221,11 @@ export class ApiModelRuntime {
 						visibleModels: route.visibleModels,
 					};
 					this.snapshots.set(key, snapshot);
-					if (route.enabled && entry && !entry.error && this.enrichModels) {
+					if (route.enabled && entry && !entry.error && this.enrichModels && (!requestKind || !cached || cached.error)) {
 						const pending = this.enrichModels(
 							entry.models.filter((m) => route.visibleModels.includes(m.slug)),
 							refresh,
-							route,
+                            requestKind ? {...route, probeCapabilities:false} : route,
 							forceProbes,
 						).then((enriched) => {
 							const byId = new Map(enriched.map((m) => [m.slug, m]));
@@ -286,7 +288,7 @@ export class ApiModelRuntime {
 					"model_requires_other_endpoint",
 					"This model uses a media, audio, embedding, or legacy endpoint and cannot serve a Codex Responses turn. Select a text/coding model.",
 				);
-			route = resolveModelRoute(alias, await this.catalogs(routes, false, false, true, false), {
+			route = resolveModelRoute(alias, await this.catalogs(routes, false, false, true, false, parseModelRoute(alias).kind), {
 				serviceTier:
 					typeof body.service_tier === "string" ? body.service_tier : undefined,
 				reasoningEffort:
@@ -383,9 +385,17 @@ export class ApiModelRuntime {
 					);
 					continue;
 				}
-				if (![401, 403, 429, 500, 502, 503, 504].includes(response.status))
-					return this.failure(response.status, "api_request_rejected");
-			} catch {
+				if (![401, 403, 429, 500, 502, 503, 504].includes(response.status)) {
+                    const source = isRecord(data) && isRecord(data.error) ? data.error : {};
+                    const error: Record<string,string> = {message:"Upstream rejected the API request.",code:"api_request_rejected"};
+                    for (const field of ["code","type","param"]) {
+                        const value=source[field];
+                        if (typeof value === "string" && /^[A-Za-z0-9_.]{1,80}$/.test(value)) error[field]=value;
+                    }
+                    return Response.json({error},{status:response.status});
+                }
+			} catch (error) {
+                if (error instanceof ClientCancellationError) throw error;
 				if (signal?.aborted) throw new Error("API request cancelled");
 				lastStatus = 502;
 			} finally {

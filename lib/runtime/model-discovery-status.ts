@@ -47,6 +47,7 @@ const entrySchema = z.object({
 	entitlements: z.array(entitlementSchema).max(1000).optional(),
 });
 const schema = z.object({
+    apiConfigurationUnavailable: z.boolean().optional(),
 	version: z.literal(1),
 	checkedAt: z.number(),
 	clientVersion: z
@@ -299,14 +300,16 @@ export async function refreshAndPrintModelInventory(
 			return;
 		}
   const value = await withCheckProgress("Discovering workspace models and API/ZDR capabilities", async () => {
+        let apiConfigurationUnavailable = false;
 		const value = await discoverModelInventory(
 			await loadAccounts(),
-			await loadApiRoutes(),
+			await loadApiRoutes().catch(() => {apiConfigurationUnavailable=true;log("API configuration unavailable; checking subscription models only.");return [];}),
 			{
 				clientVersion: previous?.clientVersion,
 				updateApiDiscovery: updateApiModelDiscovery,
 			},
 		);
+        if(apiConfigurationUnavailable)value.apiConfigurationUnavailable=true;
 		await saveModelInventory(value);
    return value;
   }, log);
@@ -329,7 +332,10 @@ function entitlementFeatures(entry: NonNullable<ModelInventory["entries"][number
 /** Compare stable credential/workspace scopes, keeping the last successful baseline through outages. */
 export function withInventoryChanges(current: ModelInventory, previous: ModelInventory | null): ModelInventory {
  const prior = new Map(previous?.entries.filter(e=>e.id).map(e=>[e.id,e]));
- return {...current, entries:current.entries.map(entry=>{
+ const entries = current.apiConfigurationUnavailable
+  ? [...current.entries, ...(previous?.entries ?? []).filter(entry => entry.kind !== "oauth" && !current.entries.some(row => row.id === entry.id)).map(entry => ({...entry,error:true,routable:false,models:[],visibleModels:[]}))]
+  : current.entries;
+ return {...current, entries:entries.map(entry=>{
   const old = entry.id ? prior.get(entry.id) : undefined;
   const baseline = old?.lastSuccessful ?? (old?.enabled && !old.error ? {models:old.models,entitlements:old.entitlements} : undefined);
   const recent = old?.changes && current.checkedAt-old.changes.observedAt < 24*60*60*1000 ? old.changes : undefined;

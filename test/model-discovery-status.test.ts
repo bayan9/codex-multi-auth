@@ -271,3 +271,11 @@ it("styles inventory meaningfully without changing plain output or inventory dat
   expect(JSON.stringify(inventory)).toBe(before);
  } finally {vi.unstubAllEnvs();resetUiRuntimeOptions();}
 });
+it("retains the API comparison baseline through an invalid configuration without advertising its models",async()=>{
+ const {withInventoryChanges}=await import('../lib/runtime/model-discovery-status.js');
+ const previous={version:1 as const,checkedAt:1,entries:[{id:'private-fixture',label:'API fixture',kind:'zdr' as const,enabled:true,error:false,checkedAt:1,models:['old-model'],visibleModels:['old-model']}]};
+ const unavailable=withInventoryChanges({version:1,checkedAt:2,apiConfigurationUnavailable:true,entries:[]},previous);
+ expect(unavailable.entries[0]).toMatchObject({error:true,visibleModels:[],lastSuccessful:{models:['old-model']}});
+ const restored=withInventoryChanges({...previous,checkedAt:3,entries:[{...previous.entries[0]!,models:['new-model']}]},unavailable);
+ expect(restored.entries[0]?.changes).toMatchObject({added:['new-model'],removed:['old-model']});
+});

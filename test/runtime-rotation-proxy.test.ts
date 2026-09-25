@@ -1,3 +1,6 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
+import WebSocket, { WebSocketServer } from "ws";
 import * as nativeStorageReader from "../lib/runtime/native-account-storage.js";
 import * as tokenRefreshRuntime from "../lib/runtime/rotation-token-refresh.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -5090,4 +5093,70 @@ describe('earned reset last-resort integration',()=>{
    expect(calls.find(c=>c.url.endsWith('/responses'))?.headers.get('chatgpt-account-id')).toBe(otherUsable?'acc_2':'acc_1');
   }finally{await service.setPolicy('manual');rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await fs.rm(testDir,{recursive:true,force:true,maxRetries:5});}
  });
+});
+
+describe("independent transport review",()=>{
+ it.each(["cancel-before", "close-before", "cancel-after"])("does not replay or penalize accounts after %s",async mode=>{
+  const upstream=createServer(),wss=new WebSocketServer({server:upstream});let count=0,received!:()=>void,closed!:()=>void;
+  const requestReceived=new Promise<void>(r=>received=r),upstreamClosed=new Promise<void>(r=>closed=r);
+  wss.on('connection',socket=>{socket.once('close',()=>closed());socket.on('message',()=>{count++;if(mode==='cancel-after')socket.send(JSON.stringify({type:'response.created',response:{id:'fixture-response'}}));received();});});
+  upstream.listen(0,'127.0.0.1');await once(upstream,'listening');const address=upstream.address();if(!address||typeof address==='string')throw Error('listen');
+  const manager=new AccountManager(undefined,createStorage(Date.now(),2));
+  const {fetchImpl}=createRecordingFetch(()=>Response.json({models:[{slug:'model-test'}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,upstreamBaseUrl:`http://127.0.0.1:${address.port}`,readApiRoutes:async()=>[]}});
+  const models=await getModels(proxy);await models.text();
+  const client=new WebSocket(proxy.baseUrl.replace('http:','ws:')+'/responses',{headers:{authorization:`Bearer ${DEFAULT_CLIENT_API_KEY}`}});
+  try {
+   await once(client,'open');const event=mode==='cancel-after'?once(client,'message'):Promise.resolve();
+   client.send(JSON.stringify({type:'response.create',model:'model-test',input:[]}));await requestReceived;await event;
+   if(mode==='close-before')client.terminate();else client.send(JSON.stringify({type:'response.cancel'}));
+   await upstreamClosed;await new Promise(r=>setTimeout(r,80));
+   expect(count).toBe(1);expect(proxy.getStatus().retries).toBe(0);
+   expect(manager.getAccountsSnapshot().map(a=>a.cooldownReason)).toEqual([undefined,undefined]);
+  } finally {client.terminate();for(const socket of wss.clients)socket.terminate();wss.close();await new Promise<void>(r=>upstream.close(()=>r()));}
+ });
+ it("keeps OAuth model discovery available when API configuration is invalid",async()=>{
+  const manager=new AccountManager(undefined,createStorage(Date.now(),1));const {fetchImpl}=createRecordingFetch(()=>Response.json({models:[{slug:'model-test'}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readApiRoutes:async()=>{throw Error('fixture invalid config');}}});
+  const response=await getModels(proxy);expect(response.status).toBe(200);expect((await response.json()).models.map((m:{slug:string})=>m.slug)).toEqual(['model-test']);
+ });
+});
+it("does not admit an unsupported workspace through a shared missing-binding key",async()=>{
+ const stored=createStorage(Date.now(),2);
+ stored.accounts.forEach((a,i)=>{delete a.accountId;a.workspaces=[{id:`workspace-${i}`,enabled:true}];a.currentWorkspaceIndex=0;});
+ const manager=new AccountManager(undefined,stored);
+ const {fetchImpl}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:call.headers.get('chatgpt-account-id')==='workspace-1'?'model-test':'other'}]}):textEventStream());
+ const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readApiRoutes:async()=>[]}});
+ const models=await getModels(proxy);await models.text();
+ const refresh=vi.spyOn(tokenRefreshRuntime,'ensureFreshAccessToken');
+ try {const response=await postResponses(proxy,{model:'model-test',input:[]});await response.text();expect(response.status).toBe(200);
+ expect(refresh.mock.calls.filter(([args])=>args.model==='model-test').map(([args])=>args.account.index)).toEqual([1]);}
+ finally{refresh.mockRestore();}
+});
+
+describe("independent review catalog regressions",()=>{
+ it.each([false,true])("retains catalog cache and backoff across client versions (limited=%s)",async limited=>{
+  const manager=new AccountManager(undefined,createStorage(Date.now(),1));
+  const {fetchImpl,calls}=createRecordingFetch(call=>limited?new Response("busy",{status:429,headers:{"retry-after":"120"}}):Response.json({models:[{slug:`model-${new URL(call.url).searchParams.get("client_version")}`}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  for(const version of ["1.0","2.0","1.0","2.0"]){const response=await getModels(proxy,`/models?client_version=${version}`);await response.text();}
+  expect(calls).toHaveLength(limited?1:2);
+ });
+ it("does not refresh an invalidated account for catalog discovery",async()=>{
+  const stored=createStorage(Date.now(),1);stored.accounts[0]!.authInvalidatedAt=Date.now();stored.accounts[0]!.expiresAt=0;
+  const manager=new AccountManager(undefined,stored);
+  const {fetchImpl}=createRecordingFetch(()=>Response.json({models:[]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await getModels(proxy);await response.text();
+  expect(refreshAccessTokenMock).not.toHaveBeenCalled();
+ });
+});
+it("requires fresh eligibility when stale recovery reorders the account inventory",async()=>{
+ const disk=createStorage(Date.now(),2),manager=new AccountManager(undefined,disk);
+ manager.markAccountCoolingDown(manager.getAccountByIndex(1)!,60000,'network-error');
+ const reordered=structuredClone(disk);reordered.accounts.reverse();
+ const reload=vi.spyOn(AccountManager,'loadFromDisk').mockResolvedValue(new AccountManager(undefined,reordered));
+ const {fetchImpl,calls}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:call.headers.get('authorization')==='Bearer access-2'?'model-test':'other'}]}):textEventStream());
+ const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readApiRoutes:async()=>[]}});
+ try{const response=await postResponses(proxy,{model:'model-test',input:[]});await response.text();expect(response.status).toBe(503);expect(calls.filter(c=>c.url.endsWith('/responses'))).toHaveLength(0);}finally{reload.mockRestore();}
 });

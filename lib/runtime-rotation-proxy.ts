@@ -1,3 +1,4 @@
+import { ClientCancellationError } from "./request/client-cancellation.js";
 import { createNativeAccountStorageReader } from "./runtime/native-account-storage.js";
 import { resetSnapshotQuota } from "./runtime/reset-credits.js";
 import { createResetCreditService, loadResetCreditState } from "./runtime/account-reset-credits.js";
@@ -1519,7 +1520,7 @@ async function handleRequestInner(
         let catalogEligibleKeys: Set<string> | undefined;
         const catalogExcludedIndexes = (): number[] => {
             const eligible = catalogEligibleKeys;
-            return eligible ? accountManager.getAccountsSnapshot().filter(account => !eligible.has(catalogAccountKey(account))).map(account => account.index) : [];
+            return eligible ? accountManager.getAccountsSnapshot().filter(account => !workspaceCandidates.has(account.index)).map(account => account.index) : [];
         };
 		let exhaustionReason: ExhaustionReason = "no-account";
 		let accountCount = accountManager.getAccountCount();
@@ -1615,21 +1616,21 @@ async function handleRequestInner(
 		const isPinned = typeof pinnedIndex === "number";
 		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
 			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
-			if (requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) && state.catalogClientVersion !== requestedVersion) {
-				state.catalogClientVersion = requestedVersion;
-			}
-			// A refresh owns its catalog for its entire lifetime. Another client can
-			// refresh, change versions, or reload credentials while this request awaits
-			// network I/O; it must not erase completed workspace snapshots.
-			const catalogClientVersion = state.catalogClientVersion;
+            const catalogClientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : state.catalogClientVersion;
+            state.catalogClientVersion = catalogClientVersion;
+            const backoff = state.catalogBackoff ??= new Map();
 			const forceCatalogRefresh = isModelsRequest && incomingUrl.searchParams.get("refresh_capabilities") === "1";
 			const catalogsByVersion = state.modelCatalogs ??= new Map();
 			const versionKey = catalogClientVersion ?? "";
 			state.modelCatalog = forceCatalogRefresh ? undefined : catalogsByVersion.get(versionKey);
 			state.modelCatalog ??= new AccountModelCatalog(async (key) => {
+                const retryAt = backoff.get(key) ?? 0;
+                if (retryAt > state.now()) throw new CatalogRetryError(retryAt - state.now());
+                backoff.delete(key);
 				const scope = state.activeAccountManager.getAccountsSnapshot().flatMap(workspaceModelScopes).find(s=>s.id===key && s.enabled);
     const account = scope ? state.activeAccountManager.getAccountByIndex(scope.accountIndex) : null;
-				if (!account || account.enabled === false) throw new Error("Account unavailable");
+				if (!account || account.enabled === false || account.authInvalidatedAt ||
+                    (account.cooldownReason === "auth-failure" && (account.coolingDownUntil ?? 0) > state.now())) throw new Error("Account unavailable");
 				const fresh = await ensureFreshAccessToken({					accountManager: state.activeAccountManager, account,
 					family: "codex", model: null, now: state.now(), tokenRefreshSkewMs: state.tokenRefreshSkewMs,
 					tokenInvalidationCooldownMs: state.tokenInvalidationCooldownMs				});
@@ -1645,7 +1646,12 @@ async function handleRequestInner(
 					signal: AbortSignal.timeout(Math.min(state.fetchTimeoutMs, 15_000))				});
 				if (!response.ok) {
                     await response.body?.cancel();
-                    if (response.status === 429) throw new CatalogRetryError(parseRetryAfterHeaderMs(response.headers, state.now()) ?? 60_000);
+                    if (response.status === 429) {
+                        const retryMs = Math.max(60_000, parseRetryAfterHeaderMs(response.headers, state.now()) ?? 60_000);
+                        if (backoff.size >= 100) backoff.delete(backoff.keys().next().value ?? "");
+                        backoff.set(key, state.now() + retryMs);
+                        throw new CatalogRetryError(retryMs);
+                    }
                     throw new Error("Catalog unavailable");
                 }
 				// Bound remote bytes, not just the advertised content length.
@@ -1690,8 +1696,14 @@ async function handleRequestInner(
 				// Explicit check waits for all workspaces; picker discovery runs API and OAuth in parallel.
 				if (forceCatalogRefresh) await oauthRefresh;
 				const apiRuntime = getApiModelRuntime(state);
-				const configuredRoutes = (await state.readApiRoutes?.()) ?? [];
-				state.catalogApiRoutes = configuredRoutes;
+				let apiConfigurationUnavailable = false;
+                const configuredRoutes = await state.readApiRoutes?.().catch(() => {
+                    apiConfigurationUnavailable = true;
+                    state.status.lastError = "api_configuration_unavailable";
+                    return [];
+                }) ?? [];
+				if (!apiConfigurationUnavailable && state.status.lastError === "api_configuration_unavailable") state.status.lastError = null;
+                state.catalogApiRoutes = configuredRoutes;
 				const apiRefresh = apiRuntime.catalogs(configuredRoutes, forceCatalogRefresh, forceCatalogRefresh, forceCatalogRefresh);
 				const pickerSnapshot = () => [
 					...modelCatalog.cachedList(routableKeys).filter(model => !/^(api|zdr)\//.test(model.slug)),
@@ -1711,6 +1723,7 @@ async function handleRequestInner(
 				}
 
 				await saveModelInventory(state.catalogInventory = {
+                    ...(apiConfigurationUnavailable ? {apiConfigurationUnavailable:true} : {}),
 					version: 1,
 					checkedAt: state.now(),
 					clientVersion: catalogClientVersion,
@@ -2054,8 +2067,16 @@ async function handleRequestInner(
 					)
 				) {
 					reloadedAfterNoAccount = true;
+                    const eligibilityIdentity = (manager: AccountManager) => JSON.stringify(manager.getAccountsSnapshot().map(account =>
+                        [account.recordId, account.enabled, account.authInvalidatedAt, workspaceModelScopes(account)]));
+                    const checkedInventory = state.nativeOpenai ? eligibilityIdentity(accountManager) : undefined;
 					const reloadedManager = await recoverStaleRuntimeState(state);
 					if (reloadedManager) {
+                        if (checkedInventory !== undefined && checkedInventory !== eligibilityIdentity(reloadedManager)) {
+                            res.setHeader("retry-after", "1");
+                            writeJson(res,503,{error:{code:"account_catalog_refresh_pending",message:"Account inventory changed; retry with refreshed eligibility."}});
+                            return;
+                        }
 						accountManager = reloadedManager;
 						accountCount = accountManager.getAccountCount();
 						transientAttemptLimit = Math.max(
@@ -2257,6 +2278,11 @@ async function handleRequestInner(
 					`upstream fetch timed out after ${fetchTimeoutMs}ms`,
 				);
 			} catch (error) {
+                if (clientGone() || (error instanceof ClientCancellationError)) {
+                    refundConsumedPoolToken(refreshed.account);
+                    if (!res.destroyed) res.destroy();
+                    return;
+                }
 				// errors-logging-08: a custom fetchImpl, a proxy agent, or an undici
 				// cause chain can embed the request URL or credential material in the
 				// raw message, so mask before it reaches any state.status consumer.

@@ -408,3 +408,42 @@ it("advertises only the configured credential's programs and refreshes metadata 
  expect(catalogs[0]?.models[0]).not.toHaveProperty("available_access_programs");
  expect(fetcher).toHaveBeenCalledTimes(2);
 });
+
+it("uses cached request capabilities without running probes or inspecting another pool",async()=>{
+ let now=1000,block=false;let release!:()=>void;const gate=new Promise<void>(r=>release=r);
+ const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>init?.method==='POST'?Response.json({ok:true}):Response.json({data:[{id:'exclusive'}]}));
+ const enrich=vi.fn(async(models:import('../lib/model-route-policy.js').RouteModel[])=>{if(block)await gate;return models.map(m=>({...m,supported_reasoning_levels:[{effort:'low'}]}));});
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch,()=>now,undefined,enrich);
+ const routes=[credential('private'),credential('ordinary','api')];await runtime.catalogs(routes);
+ block=true;now+=16*60000;enrich.mockClear();fetcher.mockClear();
+ try {
+  const response=await Promise.race([runtime.request('zdr/exclusive',{reasoning:{effort:'low'}},routes),new Promise<null>(r=>setTimeout(()=>r(null),100))]);
+  expect(response?.status).toBe(200);expect(enrich).not.toHaveBeenCalled();
+  expect(fetcher.mock.calls.some(([,init])=>new Headers(init?.headers).get('authorization')==='Bearer test-ordinary')).toBe(false);
+ }finally{release();}
+});
+it("preserves a bounded non-retryable upstream error code for client recovery",async()=>{
+ const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>init?.method==='POST'?Response.json({error:{code:'context_length_exceeded',type:'invalid_request_error',param:'input',message:'Input too long.'}},{status:400}):Response.json({data:[{id:'exclusive'}]}));
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch);
+ const response=await runtime.request('zdr/exclusive',{},[credential('private')]);
+ expect(response.status).toBe(400);expect((await response.json()).error.code).toBe('context_length_exceeded');
+});
+it("fails over a credential transport AbortError while preserving real client cancellation",async()=>{
+ const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>{
+  if(init?.method!=='POST')return Response.json({data:[{id:'exclusive'}]});
+  if(new Headers(init.headers).get('authorization')==='Bearer test-first')throw new DOMException('Operation timed out','AbortError');
+  return Response.json({ok:true});
+ });
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch);
+ const response=await runtime.request('zdr/exclusive',{},[credential('first'),credential('second','zdr',2)]);
+ expect(response.status).toBe(200);expect(fetcher.mock.calls.filter(([,init])=>init?.method==='POST')).toHaveLength(2);
+});
+it("enriches capability metadata when a failed cold catalog recovers",async()=>{
+ let now=1000,healthy=false;
+ const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>init?.method==='POST'?Response.json({ok:true}):healthy?Response.json({data:[{id:'exclusive'}]}):new Response('unavailable',{status:503}));
+ const enrich=vi.fn(async(models:import('../lib/model-route-policy.js').RouteModel[])=>models.map(m=>({...m,supported_reasoning_levels:[{effort:'high'}]})));
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch,()=>now,undefined,enrich);
+ await runtime.request('zdr/exclusive',{reasoning:{effort:'high'}},[credential('private')]);
+ now+=6000;healthy=true;
+ expect((await runtime.request('zdr/exclusive',{reasoning:{effort:'high'}},[credential('private')])).status).toBe(200);
+});

@@ -76,7 +76,7 @@ it("verifies API effort and equivalent fast tiers per credential and never treat
 		const body = JSON.parse(String(init.body));
 		if (body.service_tier === "ultrafast")
 			return Response.json({ service_tier: "default" });
-		if (body.service_tier === "fast")
+		if (body.service_tier === "priority")
 			return Response.json({ service_tier: "priority" });
 		if (!["low", "high"].includes(body.reasoning?.effort))
 			return new Response("unsupported", { status: 400 });
@@ -355,4 +355,26 @@ it("verifies a tool call with a tiny benign payload and reports it in check enti
 	expect(modelEntitlements(model!).probes).toMatchObject({
 		responses: "verified",
 	});
+});
+
+it("preserves established efforts across a documentation outage",async()=>{
+ let now=1000;
+ const fetcher=vi.fn(async()=>new Response("Model ID: `fixture`\nReasoning.effort supports: low, medium, high."));
+ const reader=new ApiModelCapabilities(fetcher as typeof fetch,()=>now);
+ expect(await reader.reasoning("fixture")).toContain("medium");
+ now+=61000;fetcher.mockResolvedValue(new Response("unavailable",{status:503}));
+ expect(await reader.reasoning("fixture")).toContain("medium");
+});
+it("probes the exact priority tier exposed by the native picker",async()=>{
+ const tiers:string[]=[];
+ const fetcher=vi.fn(async (_url:unknown,init?:RequestInit)=>{
+  if(init?.method!=="POST")return new Response("Model ID: `fixture`\nReasoning.effort supports: low.");
+  const body=JSON.parse(String(init.body));if(body.service_tier)tiers.push(body.service_tier);
+  if(body.service_tier==='fast')return Response.json({error:{code:'invalid_value',param:'service_tier'}},{status:400});
+  return Response.json({service_tier:body.service_tier??'default'});
+ });
+ const reader=new ApiModelCapabilities(fetcher as typeof fetch);
+ const [model]=await reader.enrich([{slug:'fixture'}],false,{id:'fixture',kind:'zdr',label:'Fixture',enabled:true,priority:9,apiKey:'fixture-key',visibleModels:['fixture'],probeCapabilities:true});
+ expect(tiers).toContain('priority');expect(tiers).not.toContain('fast');
+ expect(model?.service_tiers).toEqual(expect.arrayContaining([expect.objectContaining({id:'priority'})]));
 });

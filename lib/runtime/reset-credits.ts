@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { z } from 'zod';
@@ -9,7 +10,7 @@ export interface ResetTarget { key: string; accountId: string }
 const windowSchema=z.object({usedPercent:z.number().min(0).max(100).optional(),resetsAt:z.number().nonnegative().nullish(),windowDurationMins:z.number().nonnegative().nullish()});
 const snapshotSchema=z.object({updatedAt:z.number(),availableCount:z.number().int().nonnegative().nullable(),ordinaryUsageAllowed:z.boolean().nullable(),planType:z.string().nullable(),primary:windowSchema,secondary:windowSchema});
 export type ResetSnapshot=z.infer<typeof snapshotSchema>;
-const stateSchema=z.object({version:z.literal(1),policy:z.enum(['manual','last-resort']).default('manual'),snapshots:z.record(z.string(),snapshotSchema).default({}),pending:z.object({key:z.string(),idempotencyKey:z.string().uuid()}).optional(),lastRedemptionAt:z.number().optional(),lastRedemption:z.object({key:z.string(),at:z.number(),outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed']),automatic:z.boolean()}).optional()});
+const stateSchema=z.object({version:z.literal(1),policy:z.enum(['manual','last-resort']).default('manual'),snapshots:z.record(z.string(),snapshotSchema).default({}),pending:z.object({key:z.string(),idempotencyKey:z.string().uuid()}).optional(),lastAutomaticCheckAt:z.number().optional(),lastRedemptionAt:z.number().optional(),lastRedemption:z.object({key:z.string(),at:z.number(),outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed']),automatic:z.boolean()}).optional()});
 type State=z.infer<typeof stateSchema>;
 const readSchema=z.object({accountId:z.string(),ordinaryUsageAllowed:z.boolean().nullish(),rateLimitResetCredits:z.object({availableCount:z.number().int().nonnegative()}).nullish(),rateLimits:z.object({planType:z.string().nullish(),primary:windowSchema.nullish(),secondary:windowSchema.nullish()})});
 const outcomeSchema=z.object({outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed'])});
@@ -33,6 +34,7 @@ export interface ResetCreditIO {
 }
 /** No credentials or credit IDs are persisted. One global redemption lease covers
  * all accounts: concurrent exhausted requests cannot independently spend credits. */
+const automaticChecks = new Map<string, {targets:string; promise:Promise<{key:string;outcome:ResetOutcome}|null>}>();
 export class ResetCreditService {
  constructor(private readonly path:string,private readonly io:ResetCreditIO){}
  private now(){return this.io.now?.()??Date.now();}
@@ -73,11 +75,20 @@ export class ResetCreditService {
    return this.consumeLocked(state,target);
   });
  }
- async automatic(targets:ResetTarget[]):Promise<{key:string;outcome:ResetOutcome}|null>{
+ automatic(targets:ResetTarget[]):Promise<{key:string;outcome:ResetOutcome}|null>{
+  const key=resolve(this.path), signature=JSON.stringify(targets), pending=automaticChecks.get(key);
+  if(pending)return pending.targets===signature?pending.promise:pending.promise.then(()=>null);
+  if(automaticChecks.size>=1000)return Promise.resolve(null);
+  const promise=this.automaticLocked(targets).finally(()=>{automaticChecks.delete(key);});
+  automaticChecks.set(key,{targets:signature,promise});
+  return promise;
+ }
+ private async automaticLocked(targets:ResetTarget[]):Promise<{key:string;outcome:ResetOutcome}|null>{
   if(!targets.length||(await this.status()).policy!=='last-resort')return null;
   return withFileTransactionLock(this.path,async()=>{
    const state=await this.status();
-   if(state.policy!=='last-resort'||state.pending||(state.lastRedemptionAt!==undefined&&this.now()-state.lastRedemptionAt<300000))return null;
+   if(state.policy!=='last-resort'||state.pending||(state.lastAutomaticCheckAt!==undefined&&this.now()-state.lastAutomaticCheckAt<60000)||(state.lastRedemptionAt!==undefined&&this.now()-state.lastRedemptionAt<300000))return null;
+   state.lastAutomaticCheckAt=this.now();await this.save(state);
    // Missing/failed reads prevent spending. A scheduled reset that has arrived
    // is confirmed by ordinaryUsageAllowed, never inferred from a clock or %.
    const reads=await mapWithConcurrency(targets,3,async t=>{try{return await this.read(t)}catch{return null}});

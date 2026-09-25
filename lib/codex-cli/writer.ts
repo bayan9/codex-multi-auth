@@ -697,7 +697,14 @@ export async function setCodexCliActiveSelection(
 			});
 			return false;
 		}
-	}));
+	}).catch((error: unknown) => {
+        incrementCodexCliMetric("writeFailures");
+        log.warn("Failed to persist Codex CLI active selection", {
+            operation: "write-active-selection", outcome: "native-bind-lock-unavailable",
+            code: (error as NodeJS.ErrnoException)?.code ?? "unknown",
+        });
+        return false;
+    }));
 }
 
 export function getLastCodexCliSelectionWriteTimestamp(): number {

@@ -163,8 +163,11 @@ export function createUsageStreamScanner(options: {
 	let latest: UsageTokenCounts | null = null;
 	let eventData: string[] = [];
 	let eventSize = 0;
+    let droppingEvent = false;
+    let droppingLine = false;
 
 	const consumeEvent = (): void => {
+        if (droppingEvent) {droppingEvent=false;eventData=[];eventSize=0;return;}
 		const payload = eventData.join("\n");
 		eventData = [];
 		eventSize = 0;
@@ -190,11 +193,11 @@ export function createUsageStreamScanner(options: {
 	const consumeLine = (raw: string): void => {
 		const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
 		if (line.length === 0) { consumeEvent(); return; }
-		if (!line.startsWith("data:")) return;
+		if (droppingEvent || !line.startsWith("data:")) return;
 		const value = line.slice(5).replace(/^ /, "");
 		eventSize += value.length + 1;
 		if (eventSize > MAX_BUFFERED_BYTES) {
-			overflowed = true; eventData = []; return;
+			droppingEvent = true; eventData = []; eventSize = 0; return;
 		}
 		eventData.push(value);
 	};
@@ -213,17 +216,18 @@ export function createUsageStreamScanner(options: {
 					return;
 				}
 				let newlineAt = pending.indexOf("\n");
-				while (newlineAt !== -1 && !overflowed) {
-					consumeLine(pending.slice(0, newlineAt));
+				while (newlineAt !== -1) {
+                    if (droppingLine) droppingLine = false;
+                    else consumeLine(pending.slice(0, newlineAt));
 					pending = pending.slice(newlineAt + 1);
 					newlineAt = pending.indexOf("\n");
 				}
 				// A single unterminated line this long is not SSE any more; stop
 				// retaining it rather than growing the buffer for the whole body.
-				if (overflowed || pending.length + eventSize > MAX_BUFFERED_BYTES) {
-					overflowed = true;
-					pending = "";
-				}
+				if (pending.length > MAX_BUFFERED_BYTES || droppingLine) {
+                    droppingEvent = true; droppingLine = true;
+                    eventData = []; eventSize = 0; pending = "";
+                }
 			} catch {
 				// Usage accounting must never break the forwarded response.
 			}

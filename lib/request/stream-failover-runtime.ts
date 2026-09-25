@@ -1,3 +1,4 @@
+import { ClientCancellationError } from "./client-cancellation.js";
 import type { ServerResponse } from "node:http";
 import type { RuntimeRotationProxyStatus } from "../runtime/rotation-server-types.js";
 import type { StreamCompletion } from "./response-outcome.js";
@@ -212,6 +213,10 @@ export async function forwardStreamingResponse(
 		}
 		return finish();
 	} catch (error) {
+        if (clientDisconnected || res.destroyed || (error instanceof ClientCancellationError)) {
+            if (!res.destroyed) res.destroy();
+            return false;
+        }
 		status.lastError = error instanceof Error ? error.message : String(error);
 		onStreamError();
 		if (!res.destroyed) {

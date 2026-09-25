@@ -40,3 +40,15 @@ it("bounds the fallback grace and never labels cached credentials as verified", 
     expect((await read()).storage).toBeNull();
     expect(readFile).toHaveBeenCalledTimes(3);
 });
+
+it("refreshes the bounded fallback age after a verified settled cache hit", async () => {
+    const root=await mkdtemp(join(tmpdir(),"native-cache-age-")); roots.push(root);
+    const path=join(root,"accounts.json");
+    await writeFile(path,JSON.stringify({version:3,activeIndex:0,accounts:[]}));
+    let now=Date.now()+3000; vi.spyOn(Date,"now").mockImplementation(()=>now);
+    const parse=vi.spyOn(parser,"loadAccountsFromPath"), read=createNativeAccountStorageReader(undefined,path);
+    const initial=await read(); now+=10000;
+    expect((await read()).verified).toBe(true); expect(parse).toHaveBeenCalledTimes(1);
+    await writeFile(path,"changed"); parse.mockRejectedValueOnce(Object.assign(Error("locked"),{code:"EBUSY"}));
+    expect(await read()).toEqual({storage:initial.storage,verified:false});
+});

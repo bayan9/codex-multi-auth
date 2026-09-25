@@ -27,8 +27,9 @@ async function fixture() {
     await writeFile(join(dir, "package.json"), JSON.stringify({ type: "module" }));
     for (const [source, target] of [["lib/storage/file-lock.ts", "file-lock.js"], ["lib/fs-retry.ts", "fs-retry.js"], ["lib/storage/transactions.ts", "transactions.js"]]) {
         const text = await readFile(source!, "utf8");
-        await writeFile(join(dir, target!), ts.transpileModule(text.replace('"../fs-retry.js"', '"./fs-retry.js"'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText);
+        await writeFile(join(dir, target!), ts.transpileModule(text.replace('"../fs-retry.js"', '"./fs-retry.js"').replace('"../logger.js"', '"./logger.js"'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText);
     }
+    await writeFile(join(dir, "logger.js"), "export const logWarn = () => {};\n");
     const worker = join(dir, "worker.mjs");
     await writeFile(worker, `import {withAccountStorageTransaction} from ${JSON.stringify(pathToFileURL(join(dir, "transactions.js")).href)};
  import {readFile,writeFile,rename} from 'node:fs/promises';
@@ -113,4 +114,21 @@ it.each(["EBUSY", "EPERM"])("retries %s while publishing the storage lease", asy
     finally {
         spy.mockRestore();
     }
+});
+
+it.each([false,true])("does not mask the action outcome on release failure (throws=%s) and recovers its abandoned lease", async throws => {
+    const {path}=await fixture();
+    const unlink=vi.spyOn(fs,"unlink").mockRejectedValue(Object.assign(Error("locked"),{code:"EBUSY"}));
+    try {
+        const action=withFileTransactionLock(path,async()=>{if(throws)throw Error("action failure");return 42;});
+        if(throws) await expect(action).rejects.toThrow("action failure");
+        else await expect(action).resolves.toBe(42);
+    } finally {unlink.mockRestore();}
+    await expect(withFileTransactionLock(path,async()=>43,{waitMs:100})).resolves.toBe(43);
+});
+it("retries its own deferred release even when this process makes no later write",async()=>{
+ const {path}=await fixture();
+ const unlink=vi.spyOn(fs,"unlink").mockRejectedValue(Object.assign(Error("locked"),{code:"EBUSY"}));
+ try {await expect(withFileTransactionLock(path,async()=>42)).resolves.toBe(42);}finally{unlink.mockRestore();}
+ await vi.waitFor(async()=>{await expect(fs.stat(`${path}.write-lock`)).rejects.toMatchObject({code:"ENOENT"});},{timeout:1500});
 });

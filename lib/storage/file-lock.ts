@@ -3,10 +3,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { logWarn } from "../logger.js";
 import { withRetry } from "../fs-retry.js";
 type Lease = {
     active: boolean;
 };
+const abandonedOwners = new Set<string>();
 const leases = new AsyncLocalStorage<Map<string, Lease>>();
 const host = createHash("sha256").update(hostname()).digest("hex").slice(0, 16);
 const ownerPattern = /^([a-f0-9]{16})\.([1-9][0-9]*)\.([a-f0-9-]{36})$/;
@@ -30,6 +32,22 @@ async function removeEmpty(path: string): Promise<void> {
         if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(code(error) ?? ""))
             throw error;
     }
+}
+function retryAbandonedRelease(path: string, owner: string, remaining = 30): void {
+    const timer = setTimeout(() => {
+        void (async () => {
+            try {
+                try { await fs.unlink(join(path, owner)); }
+                catch (error) { if (code(error) !== "ENOENT") throw error; }
+                // Owner filenames are unique; never delete another owner's contents.
+                await removeEmpty(path);
+                abandonedOwners.delete(owner);
+            } catch {
+                if (remaining > 1) retryAbandonedRelease(path, owner, remaining - 1);
+            }
+        })();
+    }, 250);
+    timer.unref();
 }
 async function recoverDeadOwner(path: string): Promise<void> {
     let entries: string[];
@@ -57,7 +75,7 @@ async function recoverDeadOwner(path: string): Promise<void> {
     const owner = ownerPattern.exec(name);
     if (!owner || owner[1] !== host || !Number.isSafeInteger(Number(owner[2])))
         return;
-    if (!dead(Number(owner[2])))
+    if (!abandonedOwners.has(name) && !dead(Number(owner[2])))
         return;
     try {
         await fs.unlink(join(path, name));
@@ -68,6 +86,7 @@ async function recoverDeadOwner(path: string): Promise<void> {
         throw error;
     }
     // Never recursively remove: another writer may already have published a new nonempty lock.
+    abandonedOwners.delete(name);
     await removeEmpty(path);
 }
 /** Local-disk transaction lock. Live processes are never evicted by age.
@@ -124,7 +143,7 @@ export async function withFileTransactionLock<T>(path: string, action: () => Pro
     }
     finally {
         const directory = published ? lock : candidate;
-        await withRetry(async () => {
+        try { await withRetry(async () => {
             try {
                 await fs.unlink(join(directory, owner));
             }
@@ -134,5 +153,9 @@ export async function withFileTransactionLock<T>(path: string, action: () => Pro
             }
             await removeEmpty(directory);
         }, { maxAttempts: 6, backoffMs: 25 });
+        } catch (error) {
+            if (published) {abandonedOwners.add(owner);retryAbandonedRelease(directory, owner);}
+            logWarn("Storage lock cleanup deferred", { code: code(error) ?? "unknown" });
+        }
     }
 }

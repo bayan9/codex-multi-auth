@@ -21,8 +21,10 @@ export function createNativeAccountStorageReader(read?: () => Promise<AccountSto
                 if (!read) {
                     const info = await stat(path);
                     nextSignature = `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
-                    if (cached && nextSignature === signature && Date.now() - Math.max(info.mtimeMs, info.ctimeMs) > 2000)
+                    if (cached && nextSignature === signature && Date.now() - Math.max(info.mtimeMs, info.ctimeMs) > 2000) {
+                        lastSuccess = Date.now();
                         return { storage: structuredClone(cached), verified: true };
+                    }
                 }
                 const storage = read ? await read() : (await loadAccountsFromPath(path, { normalizeAccountStorage, isRecord })).normalized;
                 cached = structuredClone(storage);

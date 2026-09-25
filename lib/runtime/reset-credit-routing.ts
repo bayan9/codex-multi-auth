@@ -14,7 +14,7 @@ export async function recoverResetQuota(options:{
 }):Promise<boolean>{
  if(!options.native||options.pinned||parseModelRoute(options.model).kind!=='oauth')return false;
  const family=options.family??'codex';
- const candidates=[...options.scopes].flatMap(([index,scopes])=>{const account=options.manager.getAccountByIndex(index);return account?scopes.filter(scope=>!scope.accountId.startsWith("org-")).map(scope=>({account,scope})):[];});
+ const candidates=[...options.scopes].flatMap(([index,scopes])=>{const account=options.manager.getAccountByIndex(index);return account?scopes.map(scope=>({account,scope})):[];});
  if(!candidates.length)return false;
  // Any usable capacity (including the reserve), unknown quota, or non-quota
  // failure prevents an automatic credit from being spent.
@@ -26,7 +26,7 @@ export async function recoverResetQuota(options:{
   return !quota.exhausted&&!['rate-limited','cooling-down:rate-limit'].includes(skip??'');
  }))return false;
  candidates.sort((a,b)=>Number(b.account.index===options.preferredIndex)-Number(a.account.index===options.preferredIndex)||(options.priorityByAccount?.[a.account.index]??1)-(options.priorityByAccount?.[b.account.index]??1));
- const targets=candidates.map(({scope})=>({key:scope.id,accountId:scope.accountId}));
+ const targets=candidates.filter(({scope})=>!scope.accountId.startsWith("org-")).map(({scope})=>({key:scope.id,accountId:scope.accountId}));
  await options.service.automatic(targets);
  const state=await options.service.status();let recovered=false;
  for(const {account,scope} of candidates){

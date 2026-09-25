@@ -116,7 +116,8 @@ export class ApiModelCapabilities {
 				Buffer.concat(chunks).toString("utf8"),
 			);
 		} catch {
-			/* Missing evidence stays unknown, without preventing model discovery. */
+			// An outage is not a capability revocation. Keep last successful evidence.
+            levels = cached?.levels ?? [];
 		}
 		if (this.cache.size >= 1000)
 			this.cache.delete(this.cache.keys().next().value ?? "");
@@ -306,7 +307,7 @@ export class ApiModelCapabilities {
 		const checkedTiers = await Promise.all(
 			["fast", "ultrafast"].map(async (tier) => ({
 				tier,
-				status: await attempt({ tier, effort }),
+				status: await attempt({ tier: tier === "fast" ? "priority" : tier, effort }),
 			})),
 		);
 		for (const { tier, status } of checkedTiers) {

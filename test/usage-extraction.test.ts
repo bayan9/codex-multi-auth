@@ -179,3 +179,18 @@ describe("createUsageStreamScanner", () => {
 		expect(() => scanner.result()).not.toThrow();
 	});
 });
+
+it.each([false,true])("observes terminal events after an oversized SSE event (split=%s)",split=>{
+ const events:unknown[]=[];const scanner=createUsageStreamScanner({contentType:"text/event-stream",onEvent:event=>events.push(event)});
+ const encoder=new TextEncoder();const large='data: '+JSON.stringify({type:'response.output_item.done',data:'x'.repeat(2*1024*1024)})+'\n\n';
+ if(split){for(let i=0;i<large.length;i+=8192)scanner.push(encoder.encode(large.slice(i,i+8192)));}else scanner.push(encoder.encode(large));
+ const completed={type:'response.completed',response:{usage:{input_tokens:7,output_tokens:2}}};
+ scanner.push(encoder.encode('data: '+JSON.stringify(completed)+'\n\n'));
+ expect(scanner.result()?.inputTokens).toBe(7);expect(events).toEqual([completed]);
+});
+it.each(['\n','\r\n'])("keeps the terminal event when an oversized line ends at a %j chunk boundary",newline=>{
+ const events:unknown[]=[];const scanner=createUsageStreamScanner({contentType:'text/event-stream',onEvent:e=>events.push(e)});const encoder=new TextEncoder();
+ scanner.push(encoder.encode('data: '+JSON.stringify({type:'response.output_item.done',data:'x'.repeat(2*1024*1024)})+newline));
+ scanner.push(encoder.encode(newline+'data: '+JSON.stringify({type:'response.completed'})+newline+newline));
+ scanner.result();expect(events).toEqual([{type:'response.completed'}]);
+});

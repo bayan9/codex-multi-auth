@@ -81,6 +81,7 @@ export interface RotationProxyState extends RotationProxyStateInit {
 	readonly status: RuntimeRotationProxyStatus;
 	modelCatalog?: AccountModelCatalog;
 	modelCatalogs?: Map<string, AccountModelCatalog>;
+    catalogBackoff?: Map<string, number>;
  capabilityFailures?: RuntimeCapabilityFailures;
 	apiModelRuntime?: ApiModelRuntime;
  apiModelCapabilities?:ApiModelCapabilities;

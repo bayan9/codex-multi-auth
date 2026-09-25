@@ -10,6 +10,7 @@ function mergeValue(base: unknown, disk: unknown, local: unknown): unknown {
         return structuredClone(disk);
     if (equal(base, disk))
         return structuredClone(local);
+    if (base === undefined && isRecord(disk) && isRecord(local)) base = {};
     if (isRecord(base) && isRecord(disk) && isRecord(local)) {
         const result: Record<string, unknown> = Object.create(null);
         for (const key of new Set([...Object.keys(base), ...Object.keys(disk), ...Object.keys(local)])) {
@@ -21,10 +22,37 @@ function mergeValue(base: unknown, disk: unknown, local: unknown): unknown {
     }
     return conflict();
 }
+/** Runtime observations commute; user-owned edits retain conflict detection. */
+function mergeRuntimeAccount(base: AccountMetadataV3, disk: AccountMetadataV3, local: AccountMetadataV3): AccountMetadataV3 {
+    const limits: Record<string, number> = {};
+    for (const key of new Set([...Object.keys(disk.rateLimitResetTimes ?? {}), ...Object.keys(local.rateLimitResetTimes ?? {})])) {
+        const before = base.rateLimitResetTimes?.[key], a = disk.rateLimitResetTimes?.[key], b = local.rateLimitResetTimes?.[key];
+        // An explicit clear is an operation, not a new observation.
+        const clear = before !== undefined && ((a === undefined && b === before) || (b === undefined && a === before) || (a === undefined && b === undefined));
+        const value = clear ? undefined : Math.max(a ?? 0, b ?? 0);
+        if (value !== undefined) limits[key] = value;
+    }
+    const cleared = base.coolingDownUntil !== undefined && (
+        (disk.coolingDownUntil === undefined && (local.coolingDownUntil === undefined || local.coolingDownUntil === base.coolingDownUntil)) ||
+        (local.coolingDownUntil === undefined && disk.coolingDownUntil === base.coolingDownUntil));
+    const cooldown = (disk.coolingDownUntil ?? 0) >= (local.coolingDownUntil ?? 0) ? disk : local;
+    const runtime = {
+        rateLimitResetTimes: Object.keys(limits).length ? limits : undefined,
+        coolingDownUntil: cleared ? undefined : cooldown.coolingDownUntil,
+        cooldownReason: cleared ? undefined : cooldown.cooldownReason,
+        lastSwitchReason: local.lastSwitchReason ?? disk.lastSwitchReason,
+    };
+    // Omitted and true both mean enabled; serialization does not express a user edit.
+    const normalized = (row: AccountMetadataV3) => ({...row, enabled:row.enabled === false ? false : undefined});
+    return mergeValue(normalized(base), {...normalized(disk), ...runtime}, {...normalized(local), ...runtime}) as AccountMetadataV3;
+}
 /** Three-way persistence under the file transaction lock. Disk deletions win over stale runtime state. */
 export function mergeAccountSnapshot(base: AccountStorageV3 | null, current: AccountStorageV3 | null, local: AccountStorageV3): AccountStorageV3 {
-    if (!base)
-        return structuredClone(local);
+    if (!base) {
+        if (!current) return structuredClone(local);
+        // An unavailable initial read is not authority to replace the inventory.
+        base = {version:3, accounts:[], activeIndex:0};
+    }
     if (!current)
         return conflict();
     const aliases = new Map<string, Set<string>>();
@@ -67,7 +95,7 @@ export function mergeAccountSnapshot(base: AccountStorageV3 | null, current: Acc
         if (!next)
             continue;
         const lastUsed = Math.max(row.lastUsed, next.lastUsed);
-        const merged = mergeValue(prior, { ...row, lastUsed }, { ...next, lastUsed }) as AccountMetadataV3;
+        const merged = mergeRuntimeAccount(prior, { ...row, lastUsed }, { ...next, lastUsed });
         accounts.push(merged);
     }
     for (const [key, row] of proposed)
@@ -80,7 +108,7 @@ export function mergeAccountSnapshot(base: AccountStorageV3 | null, current: Acc
         return position(localId !== oldId ? localId : diskId);
     };
     // Pointer metadata must be compared by identity, never by mutable list positions.
-    const fields = (storage: AccountStorageV3) => Object.fromEntries(Object.entries(storage).filter(([key]) => !["accounts", "activeIndex", "activeIndexByFamily", "pinnedAccountIndex"].includes(key)));
+    const fields = (storage: AccountStorageV3) => Object.fromEntries(Object.entries(storage).filter(([key]) => !["accounts", "activeIndex", "activeIndexByFamily", "pinnedAccountIndex", "restoreEligible", "restoreReason"].includes(key)));
     const result = { ...mergeValue(fields(base), fields(current), fields(local)) as Omit<AccountStorageV3, "accounts" | "activeIndex">, accounts, activeIndex: Math.max(0, pick(base.activeIndex, current.activeIndex, local.activeIndex) ?? 0) };
     result.activeIndexByFamily = {};
     for (const family of new Set([...Object.keys(base.activeIndexByFamily ?? {}), ...Object.keys(current.activeIndexByFamily ?? {}), ...Object.keys(local.activeIndexByFamily ?? {})])) {

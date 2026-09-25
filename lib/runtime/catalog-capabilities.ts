@@ -2,20 +2,39 @@ import { isRecord } from "../utils.js";
 import type { CatalogModel } from "./account-model-catalog.js";
 const contextLimits = ["context_window", "max_context_window", "auto_compact_token_limit"] as const;
 const canonicalTier = (value: string) => value === "priority" ? "fast" : value;
-/** Combine selectable settings; routing must check the complete requested pair. */
-export function mergeCatalogModel(a: CatalogModel, b: CatalogModel): CatalogModel {
-    const result = { ...a };
+/** Aggregate complete source records so advertised controls never invent a pair. */
+export function mergeCatalogModels(models: readonly CatalogModel[]): CatalogModel | undefined {
+    const first = models[0];
+    if (!first) return undefined;
+    let result = { ...first };
     for (const [field, key] of [["supported_reasoning_levels", "effort"], ["service_tiers", "id"]] as const) {
         const options = new Map<string, unknown>();
-        for (const model of [a, b])
+        for (const model of models)
             for (const option of Array.isArray(model[field]) ? model[field] : []) {
                 if (isRecord(option) && typeof option[key] === "string")
-                    options.set(option[key], option);
+                    options.set(field === "service_tiers" ? canonicalTier(option[key]) : option[key], option);
             }
-        if (options.size)
-            result[field] = [...options.values()];
+        if (options.size) result[field] = [...options.values()];
     }
-    return clampCatalogContext(result, b);
+    const efforts = Array.isArray(result.supported_reasoning_levels)
+        ? result.supported_reasoning_levels.flatMap(level => isRecord(level) && typeof level.effort === "string" ? [level.effort] : []) : [];
+    if (Array.isArray(result.service_tiers)) {
+        // Native clients expose independent effort/speed controls, not a pair matrix.
+        // Every selectable pair therefore needs a witness in an original catalog.
+        result.service_tiers = result.service_tiers.filter(tier => {
+            if (!isRecord(tier) || typeof tier.id !== "string") return false;
+            const id = tier.id;
+            return (efforts.length ? efforts : [undefined]).every(effort => models.some(model => supportsCatalogSettings(model, effort, id)));
+        });
+    }
+    if (typeof result.default_service_tier === "string" && !["default", "auto"].includes(result.default_service_tier) &&
+        !supportsCatalogSettings(result, undefined, result.default_service_tier)) result.default_service_tier = "default";
+    for (const model of models.slice(1)) result = clampCatalogContext(result, model);
+    return result;
+}
+/** Two-source convenience; multi-account callers must retain all original records. */
+export function mergeCatalogModel(a: CatalogModel, b: CatalogModel): CatalogModel {
+    return mergeCatalogModels([a, b]) ?? a;
 }
 export function clampCatalogContext(a: CatalogModel, b: CatalogModel): CatalogModel {
     const result = { ...a };

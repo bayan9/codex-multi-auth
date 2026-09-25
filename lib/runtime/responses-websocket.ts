@@ -1,3 +1,4 @@
+import { ClientCancellationError } from "../request/client-cancellation.js";
 import type { Duplex } from "node:stream";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -16,7 +17,7 @@ const terminal = new Set([
 ]);
 type Json = Record<string, unknown>;
 type Chain = { body: Json; output: unknown[]; pool: string; bytes: number };
-type Context = { session: SocketSession; previousId?: string; delta?: unknown };
+type Context = { signal: AbortSignal; session: SocketSession; previousId?: string; delta?: unknown };
 function wireError(code: string, status = 400): Json {
 	return {
 		type: "error",
@@ -88,6 +89,7 @@ class SocketSession {
 		init: RequestInit,
 		context: Context,
 	): Promise<Response> {
+        if (context.signal.aborted || this.closed) throw new ClientCancellationError();
 		const url = new URL(String(input));
 		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 		const headers = new Headers(init.headers);
@@ -121,7 +123,7 @@ class SocketSession {
 			return Response.json(wireError("previous_response_not_found"), {status: 400});
 		}
 		if (!socket) {
-			if (this.closed) throw Error("WebSocket client closed");
+			if (context.signal.aborted || this.closed) throw new ClientCancellationError();
 			if (this.channels.size >= 16) {
 				const first = this.channels.keys().next().value;
 				if (first) {
@@ -151,10 +153,14 @@ class SocketSession {
 				(resolve, reject) => {
 					const abort = () => {
 						opening.terminate();
-						reject(Error("WebSocket request cancelled"));
+						cleanup();
+                        reject(context.signal.aborted ? new ClientCancellationError() : Error("WebSocket request cancelled"));
 					};
-					const cleanup = () =>
-						init.signal?.removeEventListener("abort", abort);
+					const cleanup = () => {
+                        init.signal?.removeEventListener("abort", abort);
+                        context.signal.removeEventListener("abort", abort);
+                    };
+                    context.signal.addEventListener("abort", abort, {once:true});
 					init.signal?.addEventListener("abort", abort, { once: true });
 					opening.once("open", () => {
 						cleanup();
@@ -162,7 +168,7 @@ class SocketSession {
 					});
 					opening.once("error", () => {
 						cleanup();
-						reject(Error("Upstream WebSocket connection failed"));
+						reject(context.signal.aborted ? new ClientCancellationError() : Error("Upstream WebSocket connection failed"));
 					});
 					opening.once("unexpected-response", (_request, response) => {
 						cleanup();
@@ -207,15 +213,18 @@ class SocketSession {
 				active.off("close", onClose);
 				active.off("error", onClose);
 				init.signal?.removeEventListener("abort", abort);
+                context.signal.removeEventListener("abort", abort);
 			};
 			const onClose = () => {
 				if (finished) return;
 				finished = true;
 				cleanup();
 				this.channels.delete(key);
-				if (accepted)
-					streamController.error(Error("Upstream WebSocket disconnected"));
-				else reject(Error("Upstream WebSocket disconnected before response"));
+                const error = context.signal.aborted || this.closed
+                    ? new ClientCancellationError()
+                    : Error("Upstream WebSocket disconnected");
+                if (accepted) streamController.error(error);
+                else reject(error);
 			};
 			const abort = () => active.terminate();
 			const onMessage = (raw: WebSocket.RawData, isBinary: boolean) => {
@@ -272,7 +281,8 @@ class SocketSession {
 			active.once("close", onClose);
 			active.once("error", onClose);
 			init.signal?.addEventListener("abort", abort, { once: true });
-			if (init.signal?.aborted) {
+			context.signal.addEventListener("abort", abort, {once:true});
+            if (init.signal?.aborted || context.signal.aborted) {
 				abort();
 				return;
 			}
@@ -338,7 +348,10 @@ export class ResponsesWebSocketGateway {
 	}
 	attach(server: Server, baseUrl: string): void {
 		server.on("upgrade", (req, socket, head) => {
+            // Node relinquishes its socket error handler before emitting upgrade.
+            socket.on("error", () => socket.destroy());
 			const reject = (status: number) => {
+                if (socket.destroyed) return;
 				socket.end(
 					`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
 				);
@@ -375,6 +388,7 @@ export class ResponsesWebSocketGateway {
 					reject(403);
 					return;
 				}
+                if (socket.destroyed) return;
 				this.wss.handleUpgrade(req, socket, head, (ws) =>
 					this.serve(ws, req, baseUrl),
 				);
@@ -480,7 +494,9 @@ export class ResponsesWebSocketGateway {
 							return;
 						}
 						const id = randomUUID();
-						this.contexts.set(id, { session, previousId, delta: event.input });
+						const controller = new AbortController();
+                        session.controller = controller;
+                        this.contexts.set(id, { session, previousId, delta: event.input, signal: controller.signal });
 						const headers = new Headers();
 						for (const [key, value] of Object.entries(req.headers)) {
 							if (
@@ -493,8 +509,6 @@ export class ResponsesWebSocketGateway {
 						}
 						headers.set(CONTEXT_HEADER, id);
 						headers.set("content-type", "application/json");
-						const controller = new AbortController();
-						session.controller = controller;
 						try {
 							const response = await fetch(`${baseUrl}/responses`, {
 								method: "POST",

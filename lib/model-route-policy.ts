@@ -1,4 +1,4 @@
-import { mergeCatalogModel } from "./runtime/catalog-capabilities.js";
+import { mergeCatalogModel, mergeCatalogModels } from "./runtime/catalog-capabilities.js";
 import { isRecord } from "./utils.js";
 /** Model selection is the explicit routing signal; never infer a privacy route from prompt text. */
 export type ModelRouteKind = "oauth" | "api" | "zdr";
@@ -128,12 +128,16 @@ export function resolveModelRoute(
 }
 export function buildVisibleModelUnion(catalogs: RouteCatalog[]): RouteModel[] {
 	const models = new Map<string, RouteModel>();
+    const sources = new Map<string, RouteModel[]>();
 	for (const catalog of [...catalogs].sort((a, b) => a.priority - b.priority)) {
 		for (const model of catalog.models) {
 			if (!visible(catalog, model)) continue;
 			const prefix = catalog.kind === "oauth" ? "" : `${catalog.kind}/`;
 			const name = `${catalog.kind === "oauth" ? "" : `${catalog.kind.toUpperCase()} · `}${typeof model.display_name === "string" ? model.display_name : model.slug}`;
 			const slug = prefix + model.slug;
+            const group = sources.get(slug) ?? [];
+            group.push({...model, ...(Array.isArray(model.service_tiers) ? {service_tiers: modelServiceTiers(model)} : {})});
+            sources.set(slug, group);
 			const existing = models.get(slug);
 			const entry =
 				(existing ? mergeCatalogModel(existing, model) : undefined) ??
@@ -187,7 +191,14 @@ export function buildVisibleModelUnion(catalogs: RouteCatalog[]): RouteModel[] {
 			}
 		}
 	}
-	return [...models.values()];
+	for (const [slug, group] of sources) {
+        const entry = models.get(slug), merged = mergeCatalogModels(group);
+        if (!entry || !merged) continue;
+        entry.supported_reasoning_levels = merged.supported_reasoning_levels;
+        if (merged.default_service_tier !== undefined) entry.default_service_tier = merged.default_service_tier === "fast" ? "priority" : merged.default_service_tier;
+        if (Array.isArray(merged.service_tiers)) entry.service_tiers = modelServiceTiers(merged).map(tier => ({...tier, id: canonicalServiceTier(tier.id) === "fast" ? "priority" : tier.id}));
+    }
+    return [...models.values()];
 }
 
 /** Whitelist capability metadata; never persist model instructions or arbitrary fields. */

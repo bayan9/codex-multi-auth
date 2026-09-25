@@ -54,3 +54,87 @@ it("preserves independent edits when a health-check clone moves an account to fl
     await withAccountAndFlaggedStorageTransaction(async (_current, persist) => persist(check, { version: 1, accounts: [] }));
     expect((await loadAccounts())?.accounts.map(row => row.recordId)).toEqual(["new"]);
 });
+
+it.each([false, true])("retains a newly signed-in fallback when the stored inventory is empty=%s", async empty => {
+    await setup();
+    if (empty) await saveAccounts({ version: 3, activeIndex: 0, accounts: [] });
+    const manager = new AccountManager({ type: "oauth", access: "fixture-new-access", refresh: "fixture-new-refresh", expires: Date.now() + 3600000 }, await loadAccounts());
+    await manager.saveToDisk();
+    await manager.saveToDisk();
+    expect((await loadAccounts())?.accounts.map(a => a.refreshToken)).toContain("fixture-new-refresh");
+});
+it("persists newer fallback tokens for an existing account", async () => {
+    await setup();
+    const access = `fixture.${Buffer.from(JSON.stringify({"https://api.openai.com/auth": {chatgpt_account_id: "first"}})).toString("base64url")}.signature`;
+    const manager = new AccountManager({ type: "oauth", access, refresh: "fixture-rotated", expires: Date.now() + 3600000 }, await loadAccounts());
+    expect(manager.getAccountCount()).toBe(1);
+    await manager.saveToDisk();
+    expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated");
+});
+it("persists rotated credentials despite concurrent runtime limits on another account", async () => {
+    await setup();
+    const stored = (await loadAccounts())!;
+    stored.accounts.push({ recordId: "second", accountId: "second", refreshToken: "fixture-second", addedAt: 2, lastUsed: 2 });
+    await saveAccounts(stored);
+    const manager = new AccountManager(undefined, await loadAccounts());
+    const disk = (await loadAccounts())!;
+    disk.accounts[0]!.rateLimitResetTimes = { codex: Date.now() + 100000 };
+    await saveAccounts(disk);
+    manager.getAccountByIndex(0)!.rateLimitResetTimes = { codex: Date.now() + 200000 };
+    await manager.commitRefreshedAuth(manager.getAccountByIndex(1)!, {type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated-second", expires: Date.now() + 3600000});
+    await manager.saveToDisk(); await manager.saveToDisk();
+    expect((await loadAccounts())?.accounts[1]?.refreshToken).toBe("fixture-rotated-second");
+});
+it("does not lose a rotated credential to an unrelated concurrent label edit", async () => {
+ const manager=await setup();
+ const disk=(await loadAccounts())!;disk.accounts[0]!.accountLabel="External";await saveAccounts(disk);
+ manager.getAccountByIndex(0)!.accountLabel="Local";
+ await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:"oauth",access:"fixture-fresh",refresh:"fixture-rotated",expires:Date.now()+3600000});
+ // The conflicting user edit remains visible rather than being marked saved.
+ await expect(manager.saveToDisk()).rejects.toMatchObject({code:"ESTALE"});
+ manager.getAccountByIndex(0)!.accountLabel="External";
+ await manager.saveToDisk();await manager.saveToDisk();
+ const result=(await loadAccounts())!.accounts[0]!;
+ expect(result.refreshToken).toBe("fixture-rotated");expect(result.accountLabel).toBe("External");
+});
+it("does not replace a readable inventory after initially loading no snapshot",async()=>{
+ await setup();const manager=new AccountManager(undefined,null);await manager.saveToDisk();
+ expect((await loadAccounts())?.accounts.map(a=>a.accountId)).toEqual(["first"]);
+});
+it("treats explicit enabled defaults as unchanged during an external disable",async()=>{
+ await setup();const initial=(await loadAccounts())!;initial.accounts[0]!.enabled=true;await saveAccounts(initial);
+ const manager=new AccountManager(undefined,await loadAccounts());const disk=(await loadAccounts())!;disk.accounts[0]!.enabled=false;await saveAccounts(disk);
+ await manager.saveToDisk();expect((await loadAccounts())?.accounts[0]?.enabled).toBe(false);
+});
+it("retains pending removals and new fallback accounts after rescuing a refresh",async()=>{
+ await setup();const initial=(await loadAccounts())!;initial.accounts.push({recordId:"remove",accountId:"remove",refreshToken:"fixture-remove",addedAt:2,lastUsed:2});await saveAccounts(initial);
+ const manager=new AccountManager({type:"oauth",access:"fixture-new",refresh:"fixture-new",expires:Date.now()+3600000},await loadAccounts());
+ manager.removeAccountByIndex(1);manager.getAccountByIndex(0)!.accountLabel="Local";
+ const disk=(await loadAccounts())!;disk.accounts[0]!.accountLabel="External";await saveAccounts(disk);
+ await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:"oauth",access:"fixture-fresh",refresh:"fixture-rotated",expires:Date.now()+3600000});
+ manager.getAccountByIndex(0)!.accountLabel="External";
+ await manager.saveToDisk();
+ const result=(await loadAccounts())!;
+ expect(result.accounts.map(a=>a.refreshToken)).toEqual(["fixture-rotated","fixture-new"]);
+});
+it("rescues a refreshed legacy record after matched fallback token replacement",async()=>{
+ await setup();const initial=(await loadAccounts())!;delete initial.accounts[0]!.recordId;await saveAccounts(initial);
+ const access=`fixture.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:"first"}})).toString("base64url")}.signature`;
+ const manager=new AccountManager({type:"oauth",access,refresh:"fixture-fallback",expires:Date.now()+3600000},await loadAccounts());
+ manager.getAccountByIndex(0)!.accountLabel="Local";
+ const disk=(await loadAccounts())!;disk.accounts[0]!.accountLabel="External";await saveAccounts(disk);
+ await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:"oauth",access,refresh:"fixture-rotated",expires:Date.now()+3600000});
+ expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated");
+});
+it.each(['removed','disabled','invalidated','replaced'])("never rescues credentials over a %s disk record",async kind=>{
+ await setup();const initial=(await loadAccounts())!;initial.accounts.push({recordId:'other',accountId:'other',refreshToken:'fixture-other',addedAt:2,lastUsed:2,accountLabel:'Before'});await saveAccounts(initial);
+ const manager=new AccountManager(undefined,await loadAccounts());manager.getAccountByIndex(1)!.accountLabel='Local';
+ const disk=(await loadAccounts())!;disk.accounts[1]!.accountLabel='External';
+ if(kind==='removed')disk.accounts.splice(0,1);
+ if(kind==='disabled')disk.accounts[0]!.enabled=false;
+ if(kind==='invalidated')disk.accounts[0]!.authInvalidatedAt=Date.now();
+ if(kind==='replaced')disk.accounts[0]!.refreshToken='fixture-external';
+ await saveAccounts(disk);
+ await expect(manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:'oauth',access:'fixture-new',refresh:'fixture-new',expires:Date.now()+3600000})).rejects.toThrow();
+ expect((await loadAccounts())?.accounts.some(a=>a.refreshToken==='fixture-new')).toBe(false);
+});

@@ -59,3 +59,18 @@ it('records which workspace and outcome an automatic redemption confirmed',async
 it('waits for an imminent scheduled reset instead of spending a credit',async()=>{
  const f=fixture();await f.service.setPolicy('last-resort');f.read.mockResolvedValue({...payload('a'),rateLimits:{planType:'pro',primary:{usedPercent:100,resetsAt:Math.floor(Date.now()/1000)+30,windowDurationMins:300},secondary:{usedPercent:0}}});await f.service.automatic([target('a')]);expect(f.consume).not.toHaveBeenCalled();
 });
+
+it('backs off negative automatic checks across service instances',async()=>{
+ const f=fixture();await f.service.setPolicy('last-resort');f.read.mockImplementation(async t=>payload(t.accountId,false,0));
+ await f.service.automatic([target('a')]);
+ const second=new ResetCreditService(join(dir,'state.json'),{read:f.read,consume:f.consume});
+ await second.automatic([target('a')]);expect(f.read).toHaveBeenCalledTimes(1);expect(f.consume).not.toHaveBeenCalled();
+});
+
+it('shares a concurrent automatic check across service instances instead of repeating native reads',async()=>{
+ const f=fixture();await f.service.setPolicy('last-resort');let release!:()=>void,entered!:()=>void;
+ const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+ f.read.mockImplementation(async t=>{entered();await gate;return payload(t.accountId,false,0);});
+ const first=f.service.automatic([target('a')]);await started;const other=new ResetCreditService(join(dir,'state.json'),{read:f.read,consume:f.consume});const second=other.automatic([target('a')]);
+ const results=Promise.allSettled([first,second]);await new Promise(r=>setTimeout(r,1300));release();expect((await results).map(r=>r.status)).toEqual(['fulfilled','fulfilled']);expect(f.read).toHaveBeenCalledTimes(1);
+});

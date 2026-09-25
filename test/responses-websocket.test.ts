@@ -1,4 +1,6 @@
-import { afterEach, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import type { IncomingMessage } from "node:http";
+import { afterEach, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
@@ -349,4 +351,16 @@ it("does not reuse a previous response ID on a replacement socket with the same 
  expect(f.connections()).toBe(2);
  expect(f.calls[2]).not.toHaveProperty("previous_response_id");
  expect(f.calls[2]?.input).toEqual([{role:"user",content:"first"},expect.objectContaining({type:"message"}),{role:"user",content:"old branch"}]);
+});
+
+it("handles upgraded socket errors while authentication is pending", async()=>{
+ const server=createServer(),gateway=new ResponsesWebSocketGateway(fetch,{}),socket=new PassThrough();
+ let resolve!: (value:Response)=>void;const pending=new Promise<Response>(r=>resolve=r);
+ const probe=vi.spyOn(globalThis,"fetch").mockReturnValue(pending);
+ try {
+  gateway.attach(server,"http://127.0.0.1:43210");
+  const req={headers:{},url:"/responses"} as IncomingMessage;
+  server.emit("upgrade",req,socket,Buffer.alloc(0));
+  expect(()=>socket.emit("error",Object.assign(Error("reset"),{code:"ECONNRESET"}))).not.toThrow();
+ } finally {resolve(new Response(null,{status:401}));await new Promise(r=>setImmediate(r));probe.mockRestore();socket.destroy();}
 });

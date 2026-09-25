@@ -149,12 +149,15 @@ export async function runStatusCommand(
 	deps: StatusCommandDeps,
 ): Promise<number> {
 	deps.setStoragePath(null);
-	const apiRoutes = await deps.loadApiRoutes?.() ?? [];
+	let apiConfigurationUnavailable = false;
+    const apiRoutes = await deps.loadApiRoutes?.().catch(() => {apiConfigurationUnavailable=true;return [];}) ?? [];
  const loadedStorage = await deps.loadAccounts();
  const storage: LoadedStorage = loadedStorage ?? (apiRoutes.length ? {version:3,activeIndex:0,accounts:[]} : null);
 	const path = deps.getStoragePath();
 	const storageHealth = await deps.inspectStorageHealth?.();
 	const logInfo = deps.logInfo ?? console.log;
+    if (apiConfigurationUnavailable && !deps.json) logInfo("API configuration unavailable; subscription status remains available.");
+
 	const modelInventory = await deps.loadModelInventory?.();
  const resetCredits = await deps.loadResetCreditState?.().catch(()=>null);
  const resetSnapshot = (account: AccountStorageV3["accounts"][number]) => {const target=resetTargetForStoredAccount(account);return target?resetCredits?.snapshots[target.key]:undefined;};
@@ -175,6 +178,7 @@ export async function runStatusCommand(
 				JSON.stringify(
 					{
 						storagePath: path,
+                        ...(apiConfigurationUnavailable ? {warnings:["api_configuration_unavailable"]} : {}),
 						storageHealth: effectiveState ?? null,
 						accountCount: 0,
 						totalAccountCount: 0,
@@ -335,6 +339,7 @@ export async function runStatusCommand(
 			JSON.stringify(
 				{
 					storagePath: path,
+                        ...(apiConfigurationUnavailable ? {warnings:["api_configuration_unavailable"]} : {}),
 					storageHealth: storageHealth?.state ?? null,
 					accountCount: storage.accounts.length,
 					apiAccounts,

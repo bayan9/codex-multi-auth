@@ -1140,6 +1140,15 @@ describe("codex-multi-auth rotation command", () => {
 });
 
 describe("native bind CLI", () => {
+    it("preserves an explicitly recorded custom provider through reset", async () => {
+        const {deps,bindCodexAppMock}=createDeps({storage:createStorage(Date.now())});
+        const status=(await bindCodexAppMock()).status;
+        if(!status.state)throw Error("Missing fixture state");
+        status.state.nativeOpenai=false; deps.getCodexAppBindStatus=async()=>status; bindCodexAppMock.mockClear();
+        expect(await runRotationCommand(["reset-runtime"],deps)).toBe(0);
+        expect(bindCodexAppMock).toHaveBeenCalledWith({nativeOpenai:false});
+    });
+
 	it("preserves native mode and reference account through runtime reset", async () => {
 		const { deps, bindCodexAppMock } = createDeps({ storage: createStorage(Date.now()) });
 		const status = (await bindCodexAppMock()).status;

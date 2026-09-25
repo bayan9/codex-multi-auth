@@ -623,3 +623,9 @@ it("shows cached reset counts for the saved workspace and distinguishes unknown"
  const deps=createStatusDeps({loadAccounts:async()=>storage,json:true,loadResetCreditState:async()=>({version:1,policy:"manual",snapshots:{[target.key]:{updatedAt:1000,availableCount:3,ordinaryUsageAllowed:false,planType:"pro",primary:{},secondary:{}}}})});
  await runStatusCommand(deps);const output=JSON.parse(vi.mocked(deps.logInfo!).mock.calls[0]![0]);expect(output.accounts[0].resetCreditsAvailable).toBe(3);expect(output.accounts[0].resetCreditsCheckedAt).toBe(1000);expect(output.accounts[1].resetCreditsAvailable).toBeNull();
 });
+
+it("continues subscription status with a visible warning if API configuration cannot be read",async()=>{
+ const deps=createStatusDeps({loadApiRoutes:async()=>{throw Error('fixture invalid config');}});
+ expect(await runStatusCommand(deps)).toBe(0);
+ expect(JSON.stringify(vi.mocked(deps.logInfo).mock.calls)).toMatch(/API.*unavailable/);
+});

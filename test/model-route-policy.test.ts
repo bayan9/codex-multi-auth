@@ -147,7 +147,8 @@ it("exposes native speed controls without duplicate models and routes the reques
 	};
 	const list = buildVisibleModelUnion([slow, fast]);
 	expect(list.map((m) => m.slug)).toEqual(["shared"]);
-	expect(list[0]?.service_tiers).toEqual(fast.models[0]!.service_tiers);
+	// Independent controls must not offer low + accelerated without a serving account.
+	expect(list[0]?.service_tiers).toEqual([]);
 	expect(list[0]?.default_service_tier).toBeUndefined();
 	expect(
 		resolveModelRoute("shared", [slow, fast], {
@@ -197,6 +198,14 @@ it("treats Fast and Priority as the same tier without treating Standard as equiv
 	).toHaveLength(0);
 });
 
+it("normalizes a Fast default to the advertised Priority control", () => {
+	const input = [{ ...catalogs[3]!, models: [{ slug: "shared", service_tiers: [{ id: "fast", name: "Fast", description: "Fixture" }], default_service_tier: "fast" }] }];
+	expect(buildVisibleModelUnion(input)[0]).toMatchObject({
+		service_tiers: [{ id: "priority" }], default_service_tier: "priority",
+	});
+	expect(input[0]?.models[0]?.default_service_tier).toBe("fast");
+});
+
 it("deduplicates native Fast/Priority controls within each pool without changing defaults or mutating catalogs", () => {
 	const model = (id: string) => ({
 		slug: "shared",
@@ -228,4 +237,20 @@ it("unions access programs within each model pool without changing credential el
  expect(list.find(m=>m.slug==="zdr/shared")?.available_access_programs).toEqual({research:["extended","standard"]});
  expect(list.find(m=>m.slug==="shared")?.available_access_programs).toEqual({research:["private"]});
  expect(JSON.stringify([a,b,oauth])).toBe(before);
+});
+
+
+it.each(["oauth", "api", "zdr"] as const)("only exposes settings pairs with a witness inside the %s pool", kind => {
+ const fast = {id:"priority",name:"Fast",description:"Faster processing"};
+ const make = (id:string,effort:string,speed:boolean,pool:RouteCatalog["kind"]=kind):RouteCatalog => ({
+  id,kind:pool,priority:1,enabled:true,visibleModels:["model-test"],
+  models:[{slug:"model-test",supported_reasoning_levels:[{effort}],service_tiers:speed?[fast]:[]}],
+ });
+ const split = [make("high","high",false),make("fast","low",true),make("other-pool","high",true,kind === "oauth" ? "api" : "oauth")];
+ const slug = kind === "oauth" ? "model-test" : `${kind}/model-test`;
+ const model = buildVisibleModelUnion(split).find(m=>m.slug === slug);
+ expect(model?.service_tiers).toEqual([]);
+ expect(model?.supported_reasoning_levels).toEqual([{effort:"high"},{effort:"low"}]);
+ const covered = buildVisibleModelUnion([...split,make("high-fast","high",true)]).find(m=>m.slug===slug);
+ expect(covered?.service_tiers).toEqual([fast]);
 });

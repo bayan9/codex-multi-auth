@@ -24,3 +24,9 @@ it('applies a manual redemption once, without erasing a later failure',async()=>
  expect(apply()).toBe(true);expect(f.account.rateLimitResetTimes).toEqual({});
  f.account.rateLimitResetTimes={codex:now+90000};expect(apply()).toBe(false);expect(f.account.rateLimitResetTimes.codex).toBe(now+90000);
 });
+
+it('checks capacity in every eligible scope before excluding unsupported redemption targets',async()=>{
+ const f=fixture();const second={...f.scope,id:'other-scope',accountId:'org-fixture',bound:false};
+ await recoverResetQuota({...f.args,scopes:new Map([[0,[f.scope,second]]]),quotaForScope:(_account,scope)=>({...f.args.quotaForScope(),primary:{usedPercent:scope.id===second.id?50:100}})});
+ expect(f.service.automatic).not.toHaveBeenCalled();
+});

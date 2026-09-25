@@ -150,7 +150,7 @@ async function runResetRuntime(
 					nativeOpenai: true,
 					catalogAccount: previous.state.catalogAccount,
 				})
-				: await deps.bindCodexApp();
+				: await deps.bindCodexApp(...(previous?.state ? [{ nativeOpenai: false }] : []));
 			appBindRestarted = true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
