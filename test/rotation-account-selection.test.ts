@@ -430,6 +430,13 @@ describe("app-bind pin first with fallback", () => {
  });
 });
 
+it("picks the earliest reset regardless of where an unmeasured account sits in storage",()=>{
+ const m=manager();const policy={...policyWith(),priorityByAccount:{0:1,1:1,2:1}};
+ const q=(hours:number)=>({plan:"subscription" as const,remainingPercent:20,resetAtMs:NOW+hours*3600000,urgency:null,exhausted:false,observedAt:NOW});
+ // [B reset 24h, U unmeasured, A reset 1h]
+ expect(chooseAccount({...baseParams(m),policy,subscriptionQuotaByAccount:{0:q(24),2:q(1)}})?.index).toBe(2);
+});
+
 it("uses subscription quota order inside a tier before active-account preference",()=>{
  const m=manager();const policy={...policyWith(),priorityByAccount:{0:1,1:1,2:1}};
  const q=(urgency:number)=>({plan:"subscription" as const,remainingPercent:20,resetAtMs:NOW+3600000/urgency,urgency,exhausted:false,observedAt:NOW});

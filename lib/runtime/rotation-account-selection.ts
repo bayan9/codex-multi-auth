@@ -121,10 +121,12 @@ export function chooseAccount(params: {
 		const tierIndexes = new Set(candidates.filter(a => (priorities[a.index] ?? 1) === tier).map(a => a.index));
 		let preferred = params.preferredIndex;
   if (quotaByAccount) {
-   const ranked = candidates.filter(a=>tierIndexes.has(a.index)).sort((a,b)=> {
-    const qa=quotaByAccount[a.index],qb=quotaByAccount[b.index];
-    return qa && qb ? compareSubscriptionQuota(qa,qb) : 0;
-   });
+   // Rank only measured accounts: "no data" compares equal to everything, which
+   // is not transitive and would make the winner depend on storage order.
+   const ranked = candidates.flatMap(a=>{
+    const quota=quotaByAccount[a.index];
+    return tierIndexes.has(a.index) && quota ? [{account:a,quota}] : [];
+   }).sort((a,b)=>compareSubscriptionQuota(a.quota,b.quota)).map(entry=>entry.account);
    const best=ranked[0];
    const bestQuota=best && quotaByAccount[best.index];
    if (best && bestQuota && (bestQuota.resetAtMs !== null || bestQuota.remainingPercent !== null)) {
