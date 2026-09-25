@@ -4358,3 +4358,73 @@ describe("native account storage availability", () => {
   expect(calls).toHaveLength(0);
  });
 });
+
+describe("native mode authenticates before touching account storage", () => {
+	it("never reads storage for a request without credentials", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const readNativeAccountStorage = vi.fn(async () => createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ models: [] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage } });
+		const response = await fetch(`${proxy.baseUrl}/models`);
+		expect(response.status).toBe(401); await response.text();
+		expect(readNativeAccountStorage).not.toHaveBeenCalled();
+		expect(calls).toHaveLength(0);
+	});
+	it("does not adopt stored credentials on behalf of an unauthenticated caller", async () => {
+		const storage = createStorage(Date.now()); const accountManager = new AccountManager(undefined, storage);
+		const account = accountManager.getAccountByIndex(0)!;
+		const disk = structuredClone(storage);
+		Object.assign(disk.accounts[0]!, { accessToken: "relogin-token", refreshToken: "relogin-refresh", expiresAt: Date.now() + 7200000 });
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ models: [] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage: async () => disk } });
+		const response = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: "Bearer not-a-known-token" } });
+		expect(response.status).toBe(401); await response.text();
+		expect(account.access).toBe("access-1");
+		expect(account.refreshToken).toBe("refresh-1");
+		expect(calls).toHaveLength(0);
+	});
+	it("answers an authenticated client with 503, not 401, when the account store is missing", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ models: [{ slug: "model-a" }] }));
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage: async () => null } });
+		const response = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: `Bearer ${DEFAULT_CLIENT_API_KEY}` } });
+		expect(response.status).toBe(503);
+		expect((await response.json()).error.code).toBe("native_account_storage_unavailable");
+		expect(calls).toHaveLength(0);
+	});
+});
+
+describe("native catalog outages", () => {
+	it("routes to an account whose catalog is unknown instead of refusing the model", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(call => {
+			if (call.url.includes("/models")) {
+				return call.headers.get("chatgpt-account-id") === "acc_1"
+					? new Response("slow down", { status: 429 })
+					: Response.json({ models: [{ slug: "other-model" }] });
+			}
+			return textEventStream('data: {"type":"response.completed","response":{}}\n\n');
+		});
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await postResponses(proxy, { model: "model-a", input: "hello", stream: true });
+		expect(response.status).toBe(200); await response.text();
+		const inference = calls.filter(c => c.url.includes("/responses"));
+		expect(inference.length).toBeGreaterThan(0);
+		expect(inference.every(c => c.headers.get("chatgpt-account-id") === "acc_1")).toBe(true);
+	});
+	it("checks every eligible account catalog concurrently", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now(), 3));
+		let inFlight = 0; let maxInFlight = 0;
+		const { fetchImpl } = createRecordingFetch(async call => {
+			if (!call.url.includes("/models")) return textEventStream('data: {"type":"response.completed","response":{}}\n\n');
+			inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+			await new Promise(resolve => setTimeout(resolve, 50));
+			inFlight--;
+			return Response.json({ models: [{ slug: "model-a" }] });
+		});
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await postResponses(proxy, { model: "model-a", input: "hello", stream: true });
+		expect(response.status).toBe(200); await response.text();
+		expect(maxInFlight).toBe(3);
+	});
+});

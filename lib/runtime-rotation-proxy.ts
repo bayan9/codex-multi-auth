@@ -1102,30 +1102,62 @@ async function handleRequestInner(
 		// unauthorized). Authorized callers still fall through to the 404 below
 		// when they hit an unsupported path/method.
 		const incomingHeaders = headersFromIncoming(req);
+		const bearer = incomingHeaders.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+		const apiKeyClient = isAuthorizedClient(incomingHeaders, state.clientApiKey);
+		const isLiveManagedToken = (access: string | undefined, expires: number | undefined, enabled: boolean | undefined, invalidatedAt: number | undefined): boolean =>
+			!!bearer && enabled !== false && !invalidatedAt && !!access && (expires ?? 0) > state.now() && safeEqual(bearer, access);
+		const managedOAuthFor = (manager: AccountManager): boolean => state.nativeOpenai === true && manager.getAccountsSnapshot().some(account =>
+			isLiveManagedToken(account.access, account.expires, account.enabled, account.authInvalidatedAt));
+		let nativeOAuthResult: boolean | undefined;
+		const nativeOAuth = async (): Promise<boolean> =>
+			(nativeOAuthResult ??= !!(state.nativeOpenai && bearer && await isNativeClientToken(bearer, state.now())));
 		if (state.nativeOpenai && state.readNativeAccountStorage) {
-			const disk = await state.readNativeAccountStorage();
-			if (!disk) {
+			// Screen the caller before account storage can reshape the manager: a
+			// request with no credential never reads disk, and a bearer that matches
+			// nothing we hold (in memory or on disk) is refused before any credential
+			// sync or manager swap.
+			if (!apiKeyClient && !bearer) {
 				writeUnauthorized(res);
 				return;
 			}
-			if (disk) {
-				const accounts = accountManager.getAccountsSnapshot();
-				const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
-				if (!sameInventory) {
-					accountManager = new AccountManager(undefined, disk);
-					state.activeAccountManager = accountManager;
-					state.knownAccountManagers.add(accountManager);
-					state.modelCatalog = undefined;
-				} else if (syncNativeAccountCredentials(accountManager, disk)) {
-					state.modelCatalog = undefined;
+			const disk = await state.readNativeAccountStorage();
+			const presentsKnownCredential = apiKeyClient || managedOAuthFor(accountManager) ||
+				!!disk?.accounts.some(a => isLiveManagedToken(a.accessToken, a.expiresAt, a.enabled, a.authInvalidatedAt)) ||
+				await nativeOAuth();
+			if (!presentsKnownCredential) {
+				writeUnauthorized(res);
+				return;
+			}
+			if (!disk) {
+				// Managed tokens died with the store, but the API key and the desktop's
+				// own login still identify the client. A 401 would tell the native
+				// client its login is bad when the store is what is missing.
+				if (apiKeyClient || await nativeOAuth()) {
+					writeJson(res, HTTP_STATUS.SERVICE_UNAVAILABLE, {
+						error: {
+							message: "Account storage is unavailable. Run codex-multi-auth login or check the account store.",
+							code: "native_account_storage_unavailable",
+						},
+					});
+				} else {
+					writeUnauthorized(res);
 				}
+				return;
+			}
+			const accounts = accountManager.getAccountsSnapshot();
+			const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
+			if (!sameInventory) {
+				accountManager = new AccountManager(undefined, disk);
+				state.activeAccountManager = accountManager;
+				state.knownAccountManagers.add(accountManager);
+				state.modelCatalog = undefined;
+			} else if (syncNativeAccountCredentials(accountManager, disk)) {
+				state.modelCatalog = undefined;
 			}
 		}
-		const bearer = incomingHeaders.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
-		const managedOAuth = state.nativeOpenai && bearer && accountManager.getAccountsSnapshot().some(account =>
-			account.enabled !== false && !account.authInvalidatedAt && account.access && (account.expires ?? 0) > state.now() && safeEqual(bearer, account.access));
-		const nativeOAuth = state.nativeOpenai && bearer && !managedOAuth && await isNativeClientToken(bearer, state.now());
-		if (!isAuthorizedClient(incomingHeaders, state.clientApiKey) && !managedOAuth && !nativeOAuth) {
+		// Decide against the synced manager, so a credential revoked or disabled on
+		// disk is refused even though it passed the screen above.
+		if (!apiKeyClient && !managedOAuthFor(accountManager) && !(await nativeOAuth())) {
 			writeUnauthorized(res);
 			return;
 		}
@@ -1415,12 +1447,11 @@ async function handleRequestInner(
 			}
 			const requestedModel = context.model;
 			if (!requestedModel) throw new Error("Missing requested model");
-			let supported = 0;
-			for (const account of eligible) {
-				if (await state.modelCatalog.supports(catalogAccountKey(account), requestedModel)) supported++;
-				else policyDecision?.blockedAccountIndexes.add(account.index);
-			}
-			if (!supported) {
+			// Concurrent: each cold catalog fetch may take up to 15s.
+			const catalog = state.modelCatalog;
+			const support = await Promise.all(eligible.map(account => catalog.supports(catalogAccountKey(account), requestedModel)));
+			eligible.forEach((account, i) => { if (!support[i]) policyDecision?.blockedAccountIndexes.add(account.index); });
+			if (!support.some(Boolean)) {
 				writeJson(res, 403, { error: { code: "model_not_available_in_account_catalog", message: "Selected model is not advertised by an eligible account. Refresh account access or change the pin." } }); return;
 			}
 		}

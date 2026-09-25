@@ -54,7 +54,22 @@ describe("live account model catalogs", () => {
 		const catalog = new AccountModelCatalog(fetchCatalog, () => now, 100);
 		expect(await catalog.supports("a", "old")).toBe(true);
 		now = 101;
-		expect(await catalog.supports("a", "old")).toBe(false);
+		expect(await catalog.list(["a"])).toEqual([]);
+		// A failed refresh is unknown, not proof the model was revoked.
+		expect(await catalog.supports("a", "old")).toBe(true);
+	});
+	it("treats a failed catalog fetch as unknown so a transient outage cannot exclude a model", async () => {
+		const fetchCatalog = vi.fn().mockRejectedValue(new Error("429"));
+		const catalog = new AccountModelCatalog(fetchCatalog);
+		expect(await catalog.supports("a", "any-model")).toBe(true);
+		expect(await catalog.list(["a"])).toEqual([]);
+		expect(fetchCatalog).toHaveBeenCalledTimes(1);
+	});
+	it("still excludes a model that a successful fetch does not advertise", async () => {
+		const catalog = new AccountModelCatalog(async () => ({
+			models: [{ slug: "present" }],
+		}));
+		expect(await catalog.supports("a", "absent")).toBe(false);
 	});
 	it("isolates failed accounts and coalesces simultaneous discovery", async () => {
 		const fetchCatalog = vi.fn(async (key: string) => {

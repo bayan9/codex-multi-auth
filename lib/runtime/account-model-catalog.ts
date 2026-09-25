@@ -2,25 +2,28 @@ import { isRecord } from "../utils.js";
 
 export type CatalogModel = Record<string, unknown> & { slug: string };
 
-/** Per-proxy discovery cache. Failed refreshes never advertise stale access. */
+/**
+ * Per-proxy discovery cache. Failed refreshes never advertise stale access, but
+ * they are "unknown", not "empty": only a successful fetch can exclude a model.
+ */
 export class AccountModelCatalog {
 	private readonly cache = new Map<
 		string,
-		{ expires: number; models: CatalogModel[] }
+		{ expires: number; models: CatalogModel[] | null }
 	>();
-	private readonly pending = new Map<string, Promise<CatalogModel[]>>();
+	private readonly pending = new Map<string, Promise<CatalogModel[] | null>>();
 	constructor(
 		private readonly fetchCatalog: (accountKey: string) => Promise<unknown>,
 		private readonly now: () => number = Date.now,
 		private readonly ttlMs = 60_000,
 	) {}
-	private async read(key: string): Promise<CatalogModel[]> {
+	private async read(key: string): Promise<CatalogModel[] | null> {
 		const cached = this.cache.get(key);
 		if (cached && cached.expires > this.now()) return cached.models;
 		const existing = this.pending.get(key);
 		if (existing) return existing;
 		const task = (async () => {
-			let models: CatalogModel[] = [];
+			let models: CatalogModel[] | null = null;
 			try {
 				const value = await this.fetchCatalog(key);
 				if (
@@ -39,14 +42,14 @@ export class AccountModelCatalog {
 				}
 				models = value.models as CatalogModel[];
 			} catch {
-				/* Fail closed; another account may still have a usable catalog. */
+				/* Unknown; list() advertises nothing from it and supports() fails open. */
 			}
 			if (this.cache.size >= 100)
 				this.cache.delete(this.cache.keys().next().value ?? "");
 			this.cache.set(key, {
 				expires:
 					this.now() +
-					(models.length ? this.ttlMs : Math.min(this.ttlMs, 5000)),
+					(models?.length ? this.ttlMs : Math.min(this.ttlMs, 5000)),
 				models,
 			});
 			return models;
@@ -65,13 +68,15 @@ export class AccountModelCatalog {
 			for (const catalog of await Promise.all(
 				accountKeys.slice(i, i + 3).map((key) => this.read(key)),
 			)) {
-				for (const model of catalog)
+				for (const model of catalog ?? [])
 					if (!models.has(model.slug)) models.set(model.slug, model);
 			}
 		}
 		return [...models.values()];
 	}
+	/** True unless a successfully fetched catalog omits the model. */
 	async supports(accountKey: string, model: string): Promise<boolean> {
-		return (await this.read(accountKey)).some((entry) => entry.slug === model);
+		const models = await this.read(accountKey);
+		return models === null || models.some((entry) => entry.slug === model);
 	}
 }
