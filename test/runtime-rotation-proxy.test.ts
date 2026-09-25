@@ -4593,3 +4593,41 @@ it("clamps a reference catalog's context to the serving pool",async()=>{
  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,catalogAccount:{email:storage.accounts[0]!.email!,accountId:'acc_1'}}});
  const response=await getModels(proxy);expect((await response.json()).models[0].context_window).toBe(100000);
 });
+
+
+describe("effort-bearing requests during catalog outages", () => {
+ it("forwards unchanged reasoning settings while discovery is throttled", async () => {
+  let now = Date.now();
+  const manager = new AccountManager(undefined, createStorage(now,1));
+  const {fetchImpl,calls} = createRecordingFetch(call => call.url.includes("/models")
+   ? new Response("busy",{status:429,headers:{"retry-after":"120"}})
+   : textEventStream());
+  const proxy = await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  for (const advance of [0,6000,6000]) {
+   now += advance;
+   const response = await postResponses(proxy,{model:"model-test",reasoning:{effort:"high"},service_tier:"priority",input:"test"});
+   await response.text();expect(response.status).toBe(200);
+  }
+  expect(calls.filter(call=>call.url.includes("/models"))).toHaveLength(1);
+  expect(calls.filter(call=>call.url.endsWith("/responses"))).toHaveLength(3);
+  for (const call of calls.filter(call=>call.url.endsWith("/responses"))) expect(JSON.parse(call.bodyText)).toMatchObject({reasoning:{effort:"high"},service_tier:"priority"});
+ });
+});
+
+describe("independent review catalog regressions",()=>{
+ it.each([false,true])("retains catalog cache and backoff across client versions (limited=%s)",async limited=>{
+  const manager=new AccountManager(undefined,createStorage(Date.now(),1));
+  const {fetchImpl,calls}=createRecordingFetch(call=>limited?new Response("busy",{status:429,headers:{"retry-after":"120"}}):Response.json({models:[{slug:`model-${new URL(call.url).searchParams.get("client_version")}`}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  for(const version of ["1.0","2.0","1.0","2.0"]){const response=await getModels(proxy,`/models?client_version=${version}`);await response.text();}
+  expect(calls).toHaveLength(limited?1:2);
+ });
+ it("does not refresh an invalidated account for catalog discovery",async()=>{
+  const stored=createStorage(Date.now(),1);stored.accounts[0]!.authInvalidatedAt=Date.now();stored.accounts[0]!.expiresAt=0;
+  const manager=new AccountManager(undefined,stored);
+  const {fetchImpl}=createRecordingFetch(()=>Response.json({models:[]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await getModels(proxy);await response.text();
+  expect(refreshAccessTokenMock).not.toHaveBeenCalled();
+ });
+});

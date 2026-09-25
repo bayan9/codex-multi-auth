@@ -70,6 +70,8 @@ export interface RotationProxyState extends RotationProxyStateInit {
 	readonly knownAccountManagers: Set<AccountManager>;
 	readonly status: RuntimeRotationProxyStatus;
 	modelCatalog?: AccountModelCatalog;
+    catalogsByVersion?: Map<string, AccountModelCatalog>;
+    catalogBackoff?: Map<string, number>;
 	catalogClientVersion?: string;
 	readonly threadGoalFallbacks: Map<string, string | null>;
 	lastGlobalAccountIndex: number | null;

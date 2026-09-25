@@ -1174,8 +1174,10 @@ async function handleRequestInner(
                 state.activeAccountManager = accountManager;
 				state.knownAccountManagers.add(accountManager);
 				state.modelCatalog = undefined;
+                state.catalogsByVersion?.clear();
 			} else if (syncNativeAccountCredentials(accountManager, disk)) {
 				state.modelCatalog = undefined;
+                state.catalogsByVersion?.clear();
 			}
             }
 		}
@@ -1433,14 +1435,20 @@ async function handleRequestInner(
 		const isPinned = typeof pinnedIndex === "number";
 		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
 			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
-			if (requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) && state.catalogClientVersion !== requestedVersion) {
-				state.catalogClientVersion = requestedVersion;
-				state.modelCatalog = undefined;
-			}
-			const clientVersion = state.catalogClientVersion;
+            const clientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : state.catalogClientVersion;
+            state.catalogClientVersion = clientVersion;
+            const versionKey = clientVersion ?? "";
+            const versions = state.catalogsByVersion ??= new Map();
+            const backoff = state.catalogBackoff ??= new Map();
+            state.modelCatalog = versions.get(versionKey);
 			state.modelCatalog ??= new AccountModelCatalog(async (key) => {
-				const account = state.activeAccountManager.getAccountsSnapshot().find(a => catalogAccountKey(a) === key);
-				if (!account || account.enabled === false) throw new Error("Account unavailable");
+				const retryAt = backoff.get(key) ?? 0;
+                if (retryAt > state.now()) throw new CatalogRetryError(retryAt - state.now());
+                backoff.delete(key);
+                const snapshot = state.activeAccountManager.getAccountsSnapshot().find(a => catalogAccountKey(a) === key);
+                const account = snapshot && state.activeAccountManager.getAccountByIndex(snapshot.index);
+                if (!account || account.enabled === false || account.authInvalidatedAt ||
+                    (account.cooldownReason === "auth-failure" && (account.coolingDownUntil ?? 0) > state.now())) throw new Error("Account unavailable");
 				const fresh = await ensureFreshAccessToken({					accountManager: state.activeAccountManager, account,
 					family: "codex", model: null, now: state.now(), tokenRefreshSkewMs: state.tokenRefreshSkewMs,
 					tokenInvalidationCooldownMs: state.tokenInvalidationCooldownMs				});
@@ -1455,7 +1463,12 @@ async function handleRequestInner(
 					signal: AbortSignal.timeout(Math.min(state.fetchTimeoutMs, 15_000))				});
 				if (!response.ok) {
                     await response.body?.cancel();
-                    if (response.status === 429) throw new CatalogRetryError(parseRetryAfterHeaderMs(response.headers, state.now()) ?? 60_000);
+                    if (response.status === 429) {
+                        const retryMs = Math.max(60_000, parseRetryAfterHeaderMs(response.headers, state.now()) ?? 60_000);
+                        if (backoff.size >= 100) backoff.delete(backoff.keys().next().value ?? "");
+                        backoff.set(key, state.now() + retryMs);
+                        throw new CatalogRetryError(retryMs);
+                    }
                     throw new Error("Catalog unavailable");
                 }
 				// Bound remote bytes, not just the advertised content length.
@@ -1466,6 +1479,10 @@ async function handleRequestInner(
 				finally { await reader.cancel(); }
 				return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 			}, state.now);
+            if (!versions.has(versionKey)) {
+                if (versions.size >= 4) versions.delete(versions.keys().next().value ?? "");
+                versions.set(versionKey, state.modelCatalog);
+            }
 			const eligible = accountManager.getAccountsSnapshot().filter(a => a.enabled !== false &&
 				(!isPinned || a.index === pinnedIndex) && !policyDecision?.blockedAccountIndexes.has(a.index));
 			if (isModelsRequest) {

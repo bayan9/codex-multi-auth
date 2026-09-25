@@ -1,5 +1,5 @@
 import { mapWithConcurrency } from "../concurrency.js";
-import { clampCatalogContext, mergeCatalogModel, supportsCatalogSettings } from "./catalog-capabilities.js";
+import { clampCatalogContext, mergeCatalogModels, supportsCatalogSettings } from "./catalog-capabilities.js";
 import { isRecord } from "../utils.js";
 
 export class CatalogRetryError extends Error {
@@ -73,9 +73,14 @@ export class AccountModelCatalog {
 		const models = new Map<string, CatalogModel>();
 
         const catalogs = await mapWithConcurrency([...new Set([...accountKeys, ...(referenceKey ? [referenceKey] : [])])], 3, key => this.read(key));
+        const sources = new Map<string, CatalogModel[]>();
         for (const catalog of catalogs) for (const model of catalog ?? []) {
-            const previous = models.get(model.slug);
-            models.set(model.slug, previous ? mergeCatalogModel(previous, model) : model);
+            const group = sources.get(model.slug) ?? [];
+            group.push(model); sources.set(model.slug, group);
+        }
+        for (const [slug, group] of sources) {
+            const model = mergeCatalogModels(group);
+            if (model) models.set(slug, model);
         }
 		if (referenceKey) {
             const reference = await this.read(referenceKey);
@@ -86,6 +91,6 @@ export class AccountModelCatalog {
 	/** True unless a successfully fetched catalog omits the model. */
 	async supports(accountKey: string, model: string, effort?: string, tier?: string): Promise<boolean> {
 		const models = await this.read(accountKey);
-		return models === null ? !effort && (!tier || tier === "default" || tier === "auto") : models.some((entry) => entry.slug === model && supportsCatalogSettings(entry, effort, tier));
+		return models === null ? true : models.some((entry) => entry.slug === model && supportsCatalogSettings(entry, effort, tier));
 	}
 }

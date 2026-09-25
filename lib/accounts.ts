@@ -569,7 +569,7 @@ export class AccountManager {
 					return {
 						index,
 						recordId: resolveAccountRecordId(
-							{ ...account, refreshToken },
+							account,
 						),
 						accountId: matchesFallback
 							? (fallbackAccountId ?? account.accountId)
@@ -644,7 +644,7 @@ export class AccountManager {
 					this.cursorByFamily[family] = nextIndex;
 				}
 			}
-			this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
+			this.persistenceBaseline = stored ? structuredClone(stored) : null;
 			return;
 		}
 
@@ -679,7 +679,7 @@ export class AccountManager {
 				this.cursorByFamily[family] = 0;
 			}
 		}
-		this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
+		this.persistenceBaseline = stored ? structuredClone(stored) : null;
 	}
 
 	getAccountCount(): number {
@@ -1740,7 +1740,7 @@ export class AccountManager {
 				// pair here would clobber a `switch` that landed since the last save.
 				this.reconcileSelectionFromDisk();
 				const nextStorage = structuredClone(
-					this.buildStorageSnapshot(),
+                    this.reconcileTokensFromDisk(this.buildStorageSnapshot(), _current),
 				) as AccountStorageV3;
 				const storageIndex = findAccountIndexByIdentity(
 					nextStorage.accounts,
@@ -1805,7 +1805,7 @@ export class AccountManager {
 					this.clearAuthFailures(liveAccount);
 
 					try {
-						await this.persistSnapshot(_current, nextStorage, persist);
+						await this.persistSnapshot(_current, nextStorage, persist, storedAccount);
 					} catch (error) {
 						liveAccount.access = previousLiveAccountState.access;
 						liveAccount.refreshToken = previousLiveAccountState.refreshToken;
@@ -1849,7 +1849,7 @@ export class AccountManager {
 					return liveAccount;
 				}
 
-				await this.persistSnapshot(_current, nextStorage, persist);
+				await this.persistSnapshot(_current, nextStorage, persist, storedAccount);
 				log.warn("Unable to resolve refreshed live account after persistence", {
 					sourceIndex: source.index,
 				});
@@ -2149,15 +2149,41 @@ export class AccountManager {
 		return account;
 	}
 
- private async persistSnapshot(current: AccountStorageV3 | null, proposed: AccountStorageV3, persist: (storage: AccountStorageV3) => Promise<void>): Promise<void> {
+ private async persistSnapshot(current: AccountStorageV3 | null, proposed: AccountStorageV3, persist: (storage: AccountStorageV3) => Promise<void>, refreshed?: AccountStorageV3["accounts"][number]): Promise<void> {
   const missingStore = current && "restoreReason" in current && current.restoreReason === "missing-storage" && current.accounts.length === 0;
   // Preserve initial/missing-store creation. An intentionally cleared store has
   // distinct metadata and must still win over this manager's stale inventory.
-  const merged = current && !missingStore ? mergeAccountSnapshot(this.persistenceBaseline, current, proposed) : proposed;
+  let merged: AccountStorageV3;
+  let rescuedBaseline: AccountStorageV3 | undefined;
+  try {
+   merged = current && !missingStore ? mergeAccountSnapshot(this.persistenceBaseline, current, proposed) : proposed;
+  } catch (error) {
+   if ((error as NodeJS.ErrnoException).code !== "ESTALE" || !refreshed?.recordId || !current) throw error;
+   // A rotated credential must not be discarded because an unrelated user edit
+   // conflicts. Persist only its auth delta under this same transaction lock.
+   const matches = (row: AccountStorageV3["accounts"][number]) => resolveAccountRecordId(row) === refreshed.recordId;
+   const prior = this.persistenceBaseline?.accounts.find(matches);
+   const index = current.accounts.findIndex(matches);
+   const disk = current.accounts[index];
+   if (!prior || !disk || disk.refreshToken !== prior.refreshToken || disk.enabled === false || disk.authInvalidatedAt) throw error;
+   merged = structuredClone(current);
+   const row = merged.accounts[index];
+   if (!row || !this.persistenceBaseline) throw error;
+   rescuedBaseline = structuredClone(this.persistenceBaseline);
+   const baselineRow = rescuedBaseline.accounts.find(matches);
+   if (!baselineRow) throw error;
+   // Only authentication was committed. Pending additions, removals and user
+   // edits must still differ from their old baseline on the next save.
+   for (const field of ["accessToken", "refreshToken", "expiresAt"] as const) {
+    const value = refreshed[field];
+    if (value === undefined) {delete row[field];delete baselineRow[field];}
+    else {Object.assign(row, { [field]: value });Object.assign(baselineRow, { [field]: value });}
+   }
+  }
   await persist(merged);
   // Keep the baseline in this manager's inventory/intent space. Adopting added
   // disk records here would misread their absence in the next save as deletion.
-  this.persistenceBaseline = structuredClone(proposed);
+  this.persistenceBaseline = rescuedBaseline ?? structuredClone(proposed);
  }
 
 	async saveToDisk(): Promise<void> {

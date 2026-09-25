@@ -98,3 +98,26 @@ it("limits advertised context to what every serving account supports",async()=>{
  expect(model?.context_window).toBe(20000);expect(model?.max_context_window).toBe(30000);
  expect(model?.supported_reasoning_levels).toEqual([{effort:'high'},{effort:'low'}]);
 });
+
+
+describe("catalog combination regressions", () => {
+ const high = {slug:"model-test",supported_reasoning_levels:[{effort:"high"}],service_tiers:[]};
+ const fast = {slug:"model-test",supported_reasoning_levels:[{effort:"low"}],service_tiers:[{id:"priority"}]};
+ it("does not advertise a speed that cannot serve every visible effort", async () => {
+  const catalog = new AccountModelCatalog(async key => ({models:[key === "high" ? high : fast]}));
+  const [model] = await catalog.list(["high", "fast"]);
+  expect(model?.supported_reasoning_levels).toEqual([{effort:"high"},{effort:"low"}]);
+  expect(model?.service_tiers).toEqual([]);
+ });
+ it.each([["high","fast","both"],["both","fast","high"],["fast","high","both"]])("retains a tier once real accounts cover all combinations: %j", async (...keys) => {
+  const both = {...high,service_tiers:[{id:"priority"}]};
+  const catalog = new AccountModelCatalog(async key => ({models:[key === "high" ? high : key === "fast" ? fast : both]}));
+  const [model] = await catalog.list(keys);
+  expect(model?.service_tiers).toEqual([{id:"priority"}]);
+ });
+});
+it("does not keep a default speed after its selectable combinations are removed",async()=>{
+ const catalog=new AccountModelCatalog(async key=>({models:[key==='fast'?{slug:'model-test',default_service_tier:'priority',service_tiers:[{id:'priority',name:'Fast',description:'Fixture'}],supported_reasoning_levels:[{effort:'high'}]}:{slug:'model-test',supported_reasoning_levels:[{effort:'low'}]}]}));
+ const [model]=await catalog.list(['fast','slow']);
+ expect(model?.service_tiers).toEqual([]);expect(model?.default_service_tier).toBe('default');
+});

@@ -644,8 +644,8 @@ WebSocket attempts receive an authenticated HTTP 426 response so compatible
 native clients fall back to HTTP streaming.
 
 **Upgrade notes:** Existing binds keep their recorded provider mode on upgrade and
-on `reset-runtime`. Binds without a recorded mode use the custom provider by
-default (unless `CODEX_MULTI_AUTH_NATIVE_OPENAI=1` opts into native mode).
+on `reset-runtime`. Legacy binds without a recorded mode remain on the custom provider.
+New binds default to custom unless `CODEX_MULTI_AUTH_NATIVE_OPENAI=1` opts into native mode.
 To explicitly opt in, run `codex-multi-auth rotation bind-app --native`.
 `reset-runtime` preserves native mode and its reference account. Use
 `bind-app --custom-provider` to return to the custom provider, or `unbind-app` to

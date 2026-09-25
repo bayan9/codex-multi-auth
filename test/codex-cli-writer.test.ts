@@ -1,3 +1,4 @@
+import * as bindingLock from "../lib/runtime/native-binding-lock.js";
 import { withFileTransactionLock } from "../lib/storage/file-lock.js";
 import { promises as fsPromises } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -97,6 +98,30 @@ describe("codex-cli writer", () => {
     }finally{release();await held;}
     try{expect(await writing).toBe(false);expect(await readFile(authPath,"utf8")).toBe(original);}
     finally{reader.mockRestore();renamer.mockRestore();}
+  });
+
+
+  it("resolves false after real native binding contention times out", async()=>{
+    const original=JSON.stringify({tokens:{access_token:"desktop",refresh_token:"desktop-refresh"}});
+    await writeFile(authPath,original);
+    let entered!:()=>void,release!:()=>void;
+    const started=new Promise<void>(r=>entered=r), gate=new Promise<void>(r=>release=r);
+    const held=withFileTransactionLock(`${configPath}.native-bind`,async()=>{entered();await gate;});
+    await started;
+    try {
+      await expect(setCodexCliActiveSelection({accountId:"inference",accessToken:"fixture",refreshToken:"fixture-refresh"})).resolves.toBe(false);
+      expect(await readFile(authPath,"utf8")).toBe(original);
+    } finally {release();await held;}
+  },20000);
+  it.each(["ELOCKED", "EPERM"])("resolves false when binding lock acquisition fails with %s",async code=>{
+    const original=JSON.stringify({tokens:{access_token:"desktop",refresh_token:"desktop-refresh"}});
+    await writeFile(authPath,original);
+    const lock=vi.spyOn(bindingLock,"withNativeBindingLock").mockRejectedValueOnce(Object.assign(Error("fixture failure"),{code}));
+    try {
+      await expect(setCodexCliActiveSelection({accountId:"inference",accessToken:"fixture",refreshToken:"fixture-refresh"})).resolves.toBe(false);
+      expect(await readFile(authPath,"utf8")).toBe(original);
+      expect(getCodexCliMetricsSnapshot().writeFailures).toBe(1);
+    } finally {lock.mockRestore();}
   });
   it("returns false when neither accounts.json nor auth.json exists", async () => {
     const updated = await setCodexCliActiveSelection({ accountId: "missing" });

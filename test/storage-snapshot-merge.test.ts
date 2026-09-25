@@ -34,3 +34,36 @@ it("maps selection by identity when another process changes account ordering", (
     const result = mergeAccountSnapshot(base, disk, local);
     expect(result.accounts[result.activeIndex]?.recordId).toBe("b");
 });
+
+it("merges disjoint reset windows when the baseline has no map", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    disk.accounts[0]!.rateLimitResetTimes = { codex: 100 };
+    local.accounts[0]!.rateLimitResetTimes = { "codex:model": 200 };
+    expect(mergeAccountSnapshot(base, disk, local).accounts[0]!.rateLimitResetTimes).toEqual({codex:100, "codex:model":200});
+});
+it("keeps the later concurrent reset and its cooldown reason", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    Object.assign(disk.accounts[0]!, {rateLimitResetTimes:{codex:300}, coolingDownUntil:300, cooldownReason:"rate-limit"});
+    Object.assign(local.accounts[0]!, {rateLimitResetTimes:{codex:200}, coolingDownUntil:200, cooldownReason:"auth-failure"});
+    const row = mergeAccountSnapshot(base, disk, local).accounts[0]!;
+    expect(row.rateLimitResetTimes).toEqual({codex:300}); expect(row.coolingDownUntil).toBe(300); expect(row.cooldownReason).toBe("rate-limit");
+});
+it("preserves an explicit cooldown clear after a successful refresh", () => {
+    const base = fixture(); Object.assign(base.accounts[0]!, {coolingDownUntil:100, cooldownReason:"auth-failure"});
+    const disk = structuredClone(base), local = structuredClone(base);
+    delete local.accounts[0]!.coolingDownUntil; delete local.accounts[0]!.cooldownReason;
+    expect(mergeAccountSnapshot(base,disk,local).accounts[0]!.coolingDownUntil).toBeUndefined();
+});
+it("does not erase newer runtime observations when another writer prunes old state",()=>{
+ const base=fixture();Object.assign(base.accounts[0]!,{rateLimitResetTimes:{codex:100},coolingDownUntil:100,cooldownReason:"rate-limit"});
+ const disk=structuredClone(base),local=structuredClone(base);
+ Object.assign(disk.accounts[0]!,{rateLimitResetTimes:{codex:300},coolingDownUntil:300,cooldownReason:"auth-failure"});
+ delete local.accounts[0]!.rateLimitResetTimes;delete local.accounts[0]!.coolingDownUntil;delete local.accounts[0]!.cooldownReason;
+ expect(mergeAccountSnapshot(base,disk,local).accounts[0]).toMatchObject({rateLimitResetTimes:{codex:300},coolingDownUntil:300,cooldownReason:"auth-failure"});
+});
+it("ignores ephemeral restore metadata when empty storage state changes",()=>{
+ const base=Object.assign({version:3 as const,activeIndex:0,accounts:[]},{restoreEligible:true,restoreReason:'missing-storage'});
+ const disk=Object.assign(structuredClone(base),{restoreEligible:false,restoreReason:'intentional-reset'});
+ const local=fixture();const merged=mergeAccountSnapshot(base,disk,local);
+ expect(merged.accounts).toHaveLength(1);expect(merged).not.toHaveProperty('restoreReason');
+});
