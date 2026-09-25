@@ -31,17 +31,15 @@ export function syncNativeAccountCredentials(
 			changed = true;
 		}
 		if (
-			!disk.accessToken ||
-			!disk.refreshToken ||
-			(disk.expiresAt ?? 0) < (account.expires ?? 0) ||
-			(disk.accessToken === account.access &&
-				disk.refreshToken === account.refreshToken)
+			disk.accessToken === account.access &&
+			disk.refreshToken === account.refreshToken &&
+			disk.expiresAt === account.expires
 		)
 			continue;
 		account.access = disk.accessToken;
 		account.refreshToken = disk.refreshToken;
 		account.expires = disk.expiresAt;
-		if (!disk.authInvalidatedAt) {
+		if (disk.accessToken && disk.refreshToken && !disk.authInvalidatedAt) {
 			delete account.authInvalidatedAt;
 			delete account.authInvalidationErrorCode;
 			if (account.cooldownReason === "auth-failure")

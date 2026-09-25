@@ -1,3 +1,5 @@
+import * as nativeStorageReader from "../lib/runtime/native-account-storage.js";
+import * as tokenRefreshRuntime from "../lib/runtime/rotation-token-refresh.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { request } from "node:http";
 import { AccountManager, getRuntimeTrackerKey } from "../lib/accounts.js";
@@ -4427,4 +4429,167 @@ describe("native catalog outages", () => {
 		expect(response.status).toBe(200); await response.text();
 		expect(maxInFlight).toBe(3);
 	});
+});
+
+describe("PR review regressions", () => {
+ it.each(["removed", "shorter", "expired"])("revokes a persisted managed bearer when %s", async (change) => {
+  const now=Date.now(), storage=createStorage(now), manager=new AccountManager(undefined,storage), disk=structuredClone(storage);
+  if(change==="removed") delete disk.accounts[0]!.accessToken;
+  if(change==="shorter") Object.assign(disk.accounts[0]!,{accessToken:"replacement",expiresAt:now+600_000});
+  if(change==="expired") disk.accounts[0]!.expiresAt=now-1;
+  const {fetchImpl,calls}=createRecordingFetch(()=>Response.json({models:[]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>disk}});
+  const response=await getModels(proxy,undefined,{authorization:"Bearer access-1"});
+  expect(response.status).toBe(401);await response.text();expect(calls).toHaveLength(0);
+ });
+ it("retains routing mutex mode after inventory replacement",async()=>{
+  const previous=process.env.CODEX_AUTH_ROUTING_MUTEX;process.env.CODEX_AUTH_ROUTING_MUTEX="enabled";
+  try {
+  const storage=createStorage(Date.now(),1),manager=new AccountManager(undefined,storage);
+  const mode=vi.spyOn(AccountManager.prototype,"setRoutingMutexMode");
+  const {fetchImpl}=createRecordingFetch(()=>Response.json({models:[{slug:"model-test"}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>createStorage(Date.now(),2)}});
+  mode.mockClear();const response=await getModels(proxy);await response.text();
+  expect(mode).toHaveBeenCalledWith("enabled");mode.mockRestore();
+  } finally {if(previous===undefined) delete process.env.CODEX_AUTH_ROUTING_MUTEX;else process.env.CODEX_AUTH_ROUTING_MUTEX=previous;}
+ });
+ it.each(["add","remove","reorder"])("preserves a concurrent inventory %s when an old request completes",async(change)=>{
+  const storage=createStorage(Date.now(),2);let disk=structuredClone(storage);
+  withAccountStorageTransactionMock.mockImplementation(async(handler)=>handler(structuredClone(disk),async(next:AccountStorageV3)=>{disk=structuredClone(next);}));
+  const manager=new AccountManager(undefined,storage);
+  let release!:()=>void,started!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});const entered=new Promise<void>(resolve=>{started=resolve;});
+  const {fetchImpl}=createRecordingFetch(async(call)=>{
+   if(call.url.includes('/models'))return Response.json({models:[{slug:'model-test'}]});
+   started();await gate;return textEventStream();
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(disk)}});
+  const pending=postResponses(proxy,{model:'model-test',input:'test'});await entered;
+  if(change==='add')disk.accounts.push({...createStorage(Date.now(),3).accounts[2]!});
+  if(change==='remove')disk.accounts.splice(0,1);
+  if(change==='reorder')disk.accounts.reverse();
+  disk.activeIndex=0;disk.activeIndexByFamily={codex:0};
+  const expected=disk.accounts.map(a=>a.accountId);
+  const discovery=await getModels(proxy);await discovery.text();
+  release();const response=await pending;await response.text();await manager.flushPendingSave();
+  expect(disk.accounts.map(a=>a.accountId)).toEqual(expected);
+ });
+ it("keeps concurrent client catalogs isolated across a delayed credential refresh",async()=>{
+  const now=Date.now(),storage=createStorage(now,1);storage.accounts[0]!.expiresAt=now-1;
+  let refreshStarted!:()=>void,release!:()=>void;
+  const started=new Promise<void>(resolve=>{refreshStarted=resolve;});
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  refreshAccessTokenMock.mockImplementation(async()=>{refreshStarted();await gate;return {type:'success',access:'renewed',refresh:'renewed-refresh',expires:now+3600_000};});
+  const manager=new AccountManager(undefined,storage);
+  const {fetchImpl,calls}=createRecordingFetch(call=>Response.json({models:[{slug:`model-${new URL(call.url).searchParams.get('client_version')}`}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const refreshCalls=vi.spyOn(tokenRefreshRuntime,"ensureFreshAccessToken");
+  const first=getModels(proxy,'/models?client_version=1.0');await started;
+  const second=getModels(proxy,'/models?client_version=2.0');
+  // Wait until the second request reaches token refresh, without timing a network delay.
+  await vi.waitFor(()=>expect(refreshCalls).toHaveBeenCalledTimes(2));release();refreshCalls.mockRestore();
+  const [a,b]=await Promise.all([first,second]);
+  expect((await a.json()).models.map((m:{slug:string})=>m.slug)).toEqual(['model-1.0']);
+  expect((await b.json()).models.map((m:{slug:string})=>m.slug)).toEqual(['model-2.0']);
+  expect(calls.map(c=>new URL(c.url).searchParams.get('client_version')).sort()).toEqual(['1.0','2.0']);
+ });
+ it("routes reasoning and speed only to an account advertising both",async()=>{
+  const manager=new AccountManager(undefined,createStorage(Date.now(),2));
+  const {fetchImpl,calls}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:'model-test',supported_reasoning_levels:[{effort:call.headers.get('authorization')==='Bearer access-1'?'low':'high'}],service_tiers:call.headers.get('authorization')==='Bearer access-1'?[]:[{id:'priority',name:'Fast',description:''}]}]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await postResponses(proxy,{model:'model-test',reasoning:{effort:'high'},service_tier:'priority',input:'test'});await response.text();
+  expect(response.status).toBe(200);
+  expect(calls.filter(c=>c.url.endsWith('/responses')).map(c=>c.headers.get('authorization'))).toEqual(['Bearer access-2']);
+ });
+});
+
+describe("catalog review concurrency and backoff",()=>{
+ it("bounds inference discovery to three in-flight calls for six accounts",async()=>{
+  const manager=new AccountManager(undefined,createStorage(Date.now(),6));let active=0,peak=0;
+  const {fetchImpl}=createRecordingFetch(async call=>{
+   if(!call.url.includes('/models'))return textEventStream();
+   peak=Math.max(peak,++active);await new Promise<void>(r=>setImmediate(r));active--;
+   return Response.json({models:[{slug:'model-test'}]});
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();
+  expect(response.status).toBe(200);expect(peak).toBeLessThanOrEqual(3);
+ });
+ it("honors catalog Retry-After instead of polling every five seconds",async()=>{
+  let now=Date.now(),reads=0;
+  const manager=new AccountManager(undefined,createStorage(now,1));
+  const {fetchImpl}=createRecordingFetch(call=>{
+   if(call.url.includes('/models')){reads++;return new Response('busy',{status:429,headers:{'retry-after':'120'}});}
+   return textEventStream();
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  for(const advance of [0,6000,6000]){now+=advance;const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();expect(response.status).toBe(200);}
+  expect(reads).toBe(1);
+  now+=120000;const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();expect(reads).toBe(2);
+ });
+ it("still recovers stale state when another account lacks the model",async()=>{
+  const storage=createStorage(Date.now(),2),manager=new AccountManager(undefined,storage);
+  manager.markAccountCoolingDown(manager.getAccountByIndex(1)!,60000,'network-error');
+  const reload=vi.spyOn(AccountManager,'loadFromDisk').mockResolvedValue(new AccountManager(undefined,storage));
+  const {fetchImpl,calls}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:call.headers.get('authorization')==='Bearer access-1'?'other':'model-test'}]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();
+  expect(response.status).toBe(200);expect(reload).toHaveBeenCalled();
+  expect(calls.filter(c=>c.url.endsWith('/responses')).map(c=>c.headers.get('authorization'))).toEqual(['Bearer access-2']);
+ });
+});
+
+describe("native inventory read resilience",()=>{
+ it.each(['EBUSY','EPERM'])("keeps independently authenticated inference available through one %s read",async code=>{
+  const storage=createStorage(Date.now(),1),manager=new AccountManager(undefined,storage);
+  const read=vi.fn().mockResolvedValueOnce(storage).mockRejectedValueOnce(Object.assign(Error('busy'),{code})).mockResolvedValue(storage);
+  const {fetchImpl,calls}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:'model-test'}]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:read}});
+  for(let i=0;i<3;i++){const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();expect(response.status).toBe(200);}
+  expect(read).toHaveBeenCalledTimes(3);expect(calls.filter(c=>c.url.endsWith('/responses'))).toHaveLength(3);
+ });
+ it("never authenticates a managed bearer with a stale snapshot",async()=>{
+  const storage=createStorage(Date.now(),1),manager=new AccountManager(undefined,storage);
+  const read=vi.fn().mockResolvedValueOnce(storage).mockRejectedValueOnce(Object.assign(Error('busy'),{code:'EBUSY'})).mockResolvedValue({...storage,accounts:[{...storage.accounts[0]!,accessToken:undefined}]});
+  const {fetchImpl,calls}=createRecordingFetch(()=>Response.json({models:[{slug:'model-test'}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:read}});
+  expect((await getModels(proxy)).status).toBe(200);
+  for(let i=0;i<2;i++){const response=await getModels(proxy,undefined,{authorization:'Bearer access-1'});await response.text();expect(response.status).toBe(401);}
+  expect(calls).toHaveLength(1);
+ });
+ it("coalesces concurrent inventory reads and replaces the manager only once",async()=>{
+  const storage=createStorage(Date.now(),1),manager=new AccountManager(undefined,storage);
+  let release!:()=>void,started!:()=>void;
+  const gate=new Promise<void>(r=>release=r),entered=new Promise<void>(r=>started=r);
+  const read=vi.fn(async()=>{started();await gate;return createStorage(Date.now(),2);});
+  const original=nativeStorageReader.createNativeAccountStorageReader;
+  const readerCalls=vi.fn();
+  vi.spyOn(nativeStorageReader,'createNativeAccountStorageReader').mockImplementation((...args)=>{
+   const reader=original(...args);return ()=>{readerCalls();return reader();};
+  });
+  const mode=vi.spyOn(AccountManager.prototype,'setRoutingMutexMode');
+  const {fetchImpl}=createRecordingFetch(()=>Response.json({models:[{slug:'model-test'}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:read}});mode.mockClear();
+  const first=getModels(proxy);await entered;const second=getModels(proxy);
+  await vi.waitFor(()=>expect(readerCalls).toHaveBeenCalledTimes(2));
+  release();await Promise.all([first.then(r=>r.text()),second.then(r=>r.text())]);
+  expect(read).toHaveBeenCalledTimes(1);expect(mode).toHaveBeenCalledTimes(1);
+ });
+ it("preserves unexpired 429 state across inventory changes",async()=>{
+  const now=Date.now(),manager=new AccountManager(undefined,createStorage(now,1));
+  manager.getAccountByIndex(0)!.rateLimitResetTimes={codex:now+60000};
+  const mode=vi.spyOn(AccountManager.prototype,'setRoutingMutexMode');
+  const {fetchImpl}=createRecordingFetch(()=>Response.json({models:[{slug:'model-test'}]}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>createStorage(now,2)}});mode.mockClear();
+  const response=await getModels(proxy);await response.text();
+  const replacement=mode.mock.contexts[0] as AccountManager;
+  expect(replacement.getAccountByIndex(0)?.rateLimitResetTimes.codex).toBe(now+60000);
+ });
+});
+
+it("clamps a reference catalog's context to the serving pool",async()=>{
+ const storage=createStorage(Date.now(),2),manager=new AccountManager(undefined,storage);
+ const {fetchImpl}=createRecordingFetch(call=>Response.json({models:[{slug:'model-test',context_window:call.headers.get('authorization')==='Bearer access-1'?200000:100000}]}));
+ const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,catalogAccount:{email:storage.accounts[0]!.email!,accountId:'acc_1'}}});
+ const response=await getModels(proxy);expect((await response.json()).models[0].context_window).toBe(100000);
 });

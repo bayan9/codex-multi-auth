@@ -1,3 +1,4 @@
+import { mergeAccountSnapshot } from "./storage/snapshot-merge.js";
 import type { Auth } from "@codex-ai/sdk";
 import { createHash } from "node:crypto";
 import { saveAccountsWithRetry } from "./storage/save-retry.js";
@@ -330,6 +331,7 @@ export interface ManagedAccount {
 }
 
 export class AccountManager {
+	private persistenceBaseline: AccountStorageV3 | null = null;
 	private accounts: ManagedAccount[] = [];
 	private cursorByFamily: Record<ModelFamily, number> = initFamilyState(0);
 	private currentAccountIndexByFamily: Record<ModelFamily, number> =
@@ -642,6 +644,7 @@ export class AccountManager {
 					this.cursorByFamily[family] = nextIndex;
 				}
 			}
+			this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
 			return;
 		}
 
@@ -676,6 +679,7 @@ export class AccountManager {
 				this.cursorByFamily[family] = 0;
 			}
 		}
+		this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
 	}
 
 	getAccountCount(): number {
@@ -1801,7 +1805,7 @@ export class AccountManager {
 					this.clearAuthFailures(liveAccount);
 
 					try {
-						await persist(nextStorage);
+						await this.persistSnapshot(_current, nextStorage, persist);
 					} catch (error) {
 						liveAccount.access = previousLiveAccountState.access;
 						liveAccount.refreshToken = previousLiveAccountState.refreshToken;
@@ -1845,7 +1849,7 @@ export class AccountManager {
 					return liveAccount;
 				}
 
-				await persist(nextStorage);
+				await this.persistSnapshot(_current, nextStorage, persist);
 				log.warn("Unable to resolve refreshed live account after persistence", {
 					sourceIndex: source.index,
 				});
@@ -2145,6 +2149,17 @@ export class AccountManager {
 		return account;
 	}
 
+ private async persistSnapshot(current: AccountStorageV3 | null, proposed: AccountStorageV3, persist: (storage: AccountStorageV3) => Promise<void>): Promise<void> {
+  const missingStore = current && "restoreReason" in current && current.restoreReason === "missing-storage" && current.accounts.length === 0;
+  // Preserve initial/missing-store creation. An intentionally cleared store has
+  // distinct metadata and must still win over this manager's stale inventory.
+  const merged = current && !missingStore ? mergeAccountSnapshot(this.persistenceBaseline, current, proposed) : proposed;
+  await persist(merged);
+  // Keep the baseline in this manager's inventory/intent space. Adopting added
+  // disk records here would misread their absence in the next save as deletion.
+  this.persistenceBaseline = structuredClone(proposed);
+ }
+
 	async saveToDisk(): Promise<void> {
 		await runWithStoragePathState(this.storagePathState, async () => {
 			await withAccountStorageTransaction(async (current, persist) => {
@@ -2152,9 +2167,7 @@ export class AccountManager {
 				// routine save does not clobber a token another process just rotated
 				// (stress audit H3) or a pin the CLI just wrote (#474).
 				this.reconcileSelectionFromDisk();
-				await persist(
-					this.reconcileTokensFromDisk(this.buildStorageSnapshot(), current),
-				);
+				await this.persistSnapshot(current, this.reconcileTokensFromDisk(this.buildStorageSnapshot(), current), persist);
 			});
 		});
 	}

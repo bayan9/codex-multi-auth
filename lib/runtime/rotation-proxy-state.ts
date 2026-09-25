@@ -1,4 +1,4 @@
-import type { AccountStorageV3 } from "../storage.js";
+import type { NativeAccountSnapshot } from "./native-account-storage.js";
 import type { AccountModelCatalog } from "./account-model-catalog.js";
 import { AccountManager } from "../accounts.js";
 import type { ContextBudgetGuard } from "../context-budget-guard.js";
@@ -19,7 +19,7 @@ import type { SessionAffinityStore } from "../session-affinity.js";
  */
 export interface RotationProxyStateInit {
 	nativeOpenai?: boolean;
-	readNativeAccountStorage?: () => Promise<AccountStorageV3 | null>;
+	readNativeAccountStorage?: () => Promise<NativeAccountSnapshot>;
 	catalogAccount?: { email: string; accountId: string; };
 	activeAccountManager: AccountManager;
 	routingMutexMode: "enabled" | "legacy";

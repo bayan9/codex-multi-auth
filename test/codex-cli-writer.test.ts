@@ -1,3 +1,4 @@
+import { withFileTransactionLock } from "../lib/storage/file-lock.js";
 import { promises as fsPromises } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -74,6 +75,29 @@ describe("codex-cli writer", () => {
 		expect(await readFile(authPath, "utf8")).toBe(auth);
 	});
 
+
+  it("serializes the native config check and auth write with binding", async()=>{
+    const original=JSON.stringify({tokens:{access_token:"desktop",refresh_token:"desktop-refresh"}});
+    await writeFile(authPath,original);await writeFile(configPath,'model_provider="openai"\n');
+    let entered!:()=>void, release!:()=>void, attempted!:()=>void;
+    const inside=new Promise<void>(r=>entered=r), gate=new Promise<void>(r=>release=r), attempt=new Promise<void>(r=>attempted=r);
+    const held=withFileTransactionLock(`${configPath}.native-bind`,async()=>{entered();await gate;});
+    await inside;
+    const read=fsPromises.readFile.bind(fsPromises), rename=fsPromises.rename.bind(fsPromises);
+    const reader=vi.spyOn(fsPromises,"readFile").mockImplementation(async(...args)=>{
+      const value=await read(...args);if(String(args[0])===configPath)attempted();return value;
+    });
+    const renamer=vi.spyOn(fsPromises,"rename").mockImplementation(async(...args)=>{
+      if(String(args[1]).endsWith(".native-bind.write-lock"))attempted();return rename(...args);
+    });
+    const writing=setCodexCliActiveSelection({accountId:"inference",accessToken:"inference",refreshToken:"inference-refresh"});
+    try{
+      await attempt;
+      await writeFile(configPath,'# codex-multi-auth native provider begin\nmodel_provider="openai"\nopenai_base_url="http://127.0.0.1:43210"\n# codex-multi-auth native provider end\n');
+    }finally{release();await held;}
+    try{expect(await writing).toBe(false);expect(await readFile(authPath,"utf8")).toBe(original);}
+    finally{reader.mockRestore();renamer.mockRestore();}
+  });
   it("returns false when neither accounts.json nor auth.json exists", async () => {
     const updated = await setCodexCliActiveSelection({ accountId: "missing" });
     expect(updated).toBe(false);
@@ -251,6 +275,7 @@ describe("codex-cli writer", () => {
     let attempts = 0;
     const renameSpy = vi.spyOn(fsPromises, "rename");
     renameSpy.mockImplementation(async (...args) => {
+      if (String(args[1]).includes(".write-lock")) return realRename(...args);
       attempts += 1;
       if (attempts === 1) {
         const error = new Error("busy") as NodeJS.ErrnoException;
@@ -293,8 +318,10 @@ describe("codex-cli writer", () => {
       "utf-8",
     );
 
+    const realRename = fsPromises.rename.bind(fsPromises);
     const renameSpy = vi.spyOn(fsPromises, "rename");
-    renameSpy.mockImplementation(async () => {
+    renameSpy.mockImplementation(async (...args) => {
+      if (String(args[1]).includes(".write-lock")) return realRename(...args);
       const error = new Error("still busy") as NodeJS.ErrnoException;
       error.code = "EBUSY";
       throw error;

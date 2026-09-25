@@ -1164,3 +1164,21 @@ describe("native bind CLI", () => {
 		const { deps, bindCodexAppMock } = createDeps({ storage: createStorage(Date.now()) }); expect(await runRotationCommand(["bind-app", "--custom-provider"], deps)).toBe(0); expect(bindCodexAppMock).toHaveBeenCalledWith({ nativeOpenai: false });
 	});
 });
+
+describe("catalog reference shared storage",()=>{
+ it.each(["/projects/example", "C:\\projects\\example"])("restores project scope %s",async initial=>{
+  const {deps,bindCodexAppMock}=createDeps({storage:createStorage(Date.now())});
+  let scope:string|null=initial;
+  deps.getStoragePath=()=>scope; deps.setStoragePath=value=>{scope=value;};
+  deps.loadAccounts=async()=>{expect(scope).toBeNull(); await Promise.resolve(); expect(scope).toBeNull(); return createStorage(Date.now());};
+  expect(await runRotationCommand(["bind-app","--native","--catalog-account","2"],deps)).toBe(0);
+  expect(scope).toBe(initial); expect(bindCodexAppMock).toHaveBeenCalled();
+ });
+ it("restores project scope on a failed catalog account read",async()=>{
+  const {deps}=createDeps({storage:createStorage(Date.now())}); let scope:string|null="/projects/example";
+  deps.getStoragePath=()=>scope;deps.setStoragePath=value=>{scope=value;};
+  deps.loadAccounts=async()=>{throw Error("read failed");};
+  await expect(runRotationCommand(["bind-app","--native","--catalog-account","2"],deps)).rejects.toThrow("read failed");
+  expect(scope).toBe("/projects/example");
+ });
+});

@@ -36,15 +36,15 @@ describe("native account credential reload", () => {
 		expect(account.cooldownReason).toBeUndefined();
 		expect(account.rateLimitResetTimes.codex).toBe(99999);
 	});
-	it("keeps cooldown for unchanged credentials and never downgrades a newer token", () => {
+	it("keeps cooldown for unchanged credentials but adopts an explicit shorter-lived replacement", () => {
 		const storage = fixture(),
 			manager = new AccountManager(undefined, storage);
 		expect(syncNativeAccountCredentials(manager, storage)).toBe(false);
 		expect(manager.getAccountByIndex(0)!.cooldownReason).toBe("auth-failure");
 		const disk = structuredClone(storage);
 		Object.assign(disk.accounts[0]!, { accessToken: "older", expiresAt: 1000 });
-		expect(syncNativeAccountCredentials(manager, disk)).toBe(false);
-		expect(manager.getAccountByIndex(0)!.access).toBe("old-access");
+		expect(syncNativeAccountCredentials(manager, disk)).toBe(true);
+		expect(manager.getAccountByIndex(0)!.access).toBe("older");
 	});
 	it("applies disablement without clearing quota cooldowns on token changes", () => {
 		const storage = fixture();
@@ -60,6 +60,20 @@ describe("native account credential reload", () => {
 		expect(manager.getAccountByIndex(0)!.enabled).toBe(false);
 		expect(manager.getAccountByIndex(0)!.cooldownReason).toBe("network-error");
 	});
+});
+
+it("removes a deleted access token even when a refresh token remains", () => {
+	const disk = fixture(), manager = new AccountManager(undefined, disk);
+	delete disk.accounts[0]!.accessToken;
+	expect(syncNativeAccountCredentials(manager, disk)).toBe(true);
+	expect(manager.getAccountByIndex(0)!.access).toBeUndefined();
+});
+
+it("adopts shortened expiry without requiring a token string change", () => {
+	const disk = fixture(), manager = new AccountManager(undefined, disk);
+	disk.accounts[0]!.expiresAt = 1;
+	expect(syncNativeAccountCredentials(manager, disk)).toBe(true);
+	expect(manager.getAccountByIndex(0)!.expires).toBe(1);
 });
 
 it("adopts explicit invalidation even when credentials have not changed", () => {

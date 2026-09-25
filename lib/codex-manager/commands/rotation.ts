@@ -824,7 +824,12 @@ export async function runRotationCommand(
 				logError("--catalog-account requires --native.");
 				return 1;
 			}
-			const account = (await deps.loadAccounts())?.accounts[catalogIndex];
+			const previousStoragePath = deps.getStoragePath();
+            deps.setStoragePath(null);
+            let catalogStorage;
+            try { catalogStorage = await deps.loadAccounts(); }
+            finally { deps.setStoragePath(previousStoragePath); }
+            const account = catalogStorage?.accounts[catalogIndex];
 			if (!account?.email || !account.accountId || account.enabled === false) {
 				logError("Catalog account must be an enabled account with an email and account ID.");
 				return 1;

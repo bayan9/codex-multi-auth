@@ -1,3 +1,4 @@
+import { withNativeBindingLock } from "../runtime/native-binding-lock.js";
 import { hasNativeProviderConfig } from "../runtime-constants.js";
 import { existsSync, promises as fs } from "node:fs";
 import { dirname } from "node:path";
@@ -495,7 +496,7 @@ async function enqueueActiveSelectionWrite<T>(task: () => Promise<T>): Promise<T
 export async function setCodexCliActiveSelection(
 	selection: ActiveSelection,
 ): Promise<boolean> {
-	return enqueueActiveSelectionWrite(async () => {
+	return enqueueActiveSelectionWrite(() => withNativeBindingLock(getCodexCliConfigPath(), async () => {
 		if (!isCodexCliSyncEnabled()) return false;
 		// Native app binding deliberately separates desktop identity from inference selection.
 		try {
@@ -696,7 +697,7 @@ export async function setCodexCliActiveSelection(
 			});
 			return false;
 		}
-	});
+	}));
 }
 
 export function getLastCodexCliSelectionWriteTimestamp(): number {

@@ -22,6 +22,7 @@ export async function isNativeClientToken(
 	now: number,
 	read: () => Promise<string> = readDesktopAuth,
 ): Promise<boolean> {
+	for (let attempt = 0; attempt < 3; attempt += 1) {
 	try {
 		const auth: unknown = JSON.parse(await read());
 		if (!isRecord(auth) || !isRecord(auth.tokens)) return false;
@@ -34,7 +35,11 @@ export async function isNativeClientToken(
 			createHash("sha256").update(bearer).digest(),
 			createHash("sha256").update(token).digest(),
 		);
-	} catch {
-		return false;
-	}
+	} catch (error) {
+        const retryable = error instanceof SyntaxError || ["EBUSY", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "");
+        if (!retryable || attempt === 2) return false;
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    }
+    return false;
 }

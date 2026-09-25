@@ -1,4 +1,10 @@
+import { mapWithConcurrency } from "../concurrency.js";
+import { clampCatalogContext, mergeCatalogModel, supportsCatalogSettings } from "./catalog-capabilities.js";
 import { isRecord } from "../utils.js";
+
+export class CatalogRetryError extends Error {
+ constructor(readonly retryAfterMs: number) { super("Catalog temporarily rate limited"); }
+}
 
 export type CatalogModel = Record<string, unknown> & { slug: string };
 
@@ -24,6 +30,7 @@ export class AccountModelCatalog {
 		if (existing) return existing;
 		const task = (async () => {
 			let models: CatalogModel[] | null = null;
+            let retryMs = Math.min(this.ttlMs, 5000);
 			try {
 				const value = await this.fetchCatalog(key);
 				if (
@@ -41,7 +48,8 @@ export class AccountModelCatalog {
 					throw new Error("Invalid account model catalog");
 				}
 				models = value.models as CatalogModel[];
-			} catch {
+			} catch (error) {
+                if (error instanceof CatalogRetryError) retryMs = Math.max(60_000, error.retryAfterMs);
 				/* Unknown; list() advertises nothing from it and supports() fails open. */
 			}
 			if (this.cache.size >= 100)
@@ -49,7 +57,7 @@ export class AccountModelCatalog {
 			this.cache.set(key, {
 				expires:
 					this.now() +
-					(models?.length ? this.ttlMs : Math.min(this.ttlMs, 5000)),
+					(models !== null ? this.ttlMs : retryMs),
 				models,
 			});
 			return models;
@@ -61,22 +69,23 @@ export class AccountModelCatalog {
 			this.pending.delete(key);
 		}
 	}
-	async list(accountKeys: string[]): Promise<CatalogModel[]> {
+	async list(accountKeys: string[], referenceKey?: string): Promise<CatalogModel[]> {
 		const models = new Map<string, CatalogModel>();
-		// Bounded fan-out; retain whole model records rather than inventing combinations of capabilities.
-		for (let i = 0; i < accountKeys.length; i += 3) {
-			for (const catalog of await Promise.all(
-				accountKeys.slice(i, i + 3).map((key) => this.read(key)),
-			)) {
-				for (const model of catalog ?? [])
-					if (!models.has(model.slug)) models.set(model.slug, model);
-			}
-		}
-		return [...models.values()];
+
+        const catalogs = await mapWithConcurrency([...new Set([...accountKeys, ...(referenceKey ? [referenceKey] : [])])], 3, key => this.read(key));
+        for (const catalog of catalogs) for (const model of catalog ?? []) {
+            const previous = models.get(model.slug);
+            models.set(model.slug, previous ? mergeCatalogModel(previous, model) : model);
+        }
+		if (referenceKey) {
+            const reference = await this.read(referenceKey);
+            return (reference ?? []).map(model => clampCatalogContext(model, models.get(model.slug) ?? model));
+        }
+        return [...models.values()];
 	}
 	/** True unless a successfully fetched catalog omits the model. */
-	async supports(accountKey: string, model: string): Promise<boolean> {
+	async supports(accountKey: string, model: string, effort?: string, tier?: string): Promise<boolean> {
 		const models = await this.read(accountKey);
-		return models === null || models.some((entry) => entry.slug === model);
+		return models === null ? !effort && (!tier || tier === "default" || tier === "auto") : models.some((entry) => entry.slug === model && supportsCatalogSettings(entry, effort, tier));
 	}
 }

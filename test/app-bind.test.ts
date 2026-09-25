@@ -2115,3 +2115,30 @@ describe("native app binding", () => {
 		expect(restored).not.toContain('43210'); expect(restored).not.toContain('native provider'); expect(restored).toContain('model = "kept"');
 	});
 });
+
+describe("reviewed provider transitions",()=>{
+ async function fixture(){
+  const root=await createTempRoot("bind-transition-");const codexHome=join(root,"codex-home");
+  const env={CODEX_MULTI_AUTH_DIR:join(root,"multi-auth"),CODEX_MULTI_AUTH_APP_BIND_CODEX_HOME:codexHome};
+  await mkdir(codexHome,{recursive:true});await writeFile(join(codexHome,"config.toml"),'model="example"\n');
+  const options={platform:"linux" as const,home:root,env,spawnDetached:false};
+  await seedExistingAppBindState({...options,port:43210,baseUrl:"http://127.0.0.1:43210",nodePath:process.execPath,routerScriptPath:join(thisDir,"../scripts/codex-app-router.js")});
+  return options;
+ }
+ it("clears the reference through native/custom/native",async()=>{
+  const options=await fixture();
+  await bindCodexAppRuntimeRotation({...options,nativeOpenai:true,catalogAccount:{email:"reference@example.test",accountId:"ref"}});
+  await bindCodexAppRuntimeRotation({...options,nativeOpenai:false});
+  expect((await getAppBindStatus(options)).state?.catalogAccount).toBeUndefined();
+  await bindCodexAppRuntimeRotation({...options,nativeOpenai:true});
+  expect((await getAppBindStatus(options)).state?.catalogAccount).toBeUndefined();
+ });
+ it("allows a mode change with a dead recorded router",async()=>{
+  const options=await fixture();
+  await withDeadPid(async pid=>{
+   await writeFile(resolveAppBindPaths(options).statusPath,JSON.stringify({pid,baseUrl:"http://127.0.0.1:43210",port:43210,startedAt:1,updatedAt:1}));
+   await bindCodexAppRuntimeRotation({...options,nativeOpenai:true});
+   expect((await getAppBindStatus(options)).state?.nativeOpenai).toBe(true);
+  });
+ });
+});

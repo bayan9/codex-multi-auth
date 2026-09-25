@@ -1,3 +1,4 @@
+import { withNativeBindingLock } from "./native-binding-lock.js";
 import { isRecord } from "../utils.js";
 import { hasNativeProviderConfig, rewriteNativeProviderConfig, restoreNativeProviderConfig } from "./native-provider-config.js";
 import { spawn } from "node:child_process";
@@ -1410,7 +1411,7 @@ export async function bindCodexAppRuntimeRotation(
 ): Promise<AppBindResult> {
 	const paths = resolveAppBindPaths(options);
 	return withAppBindLock(paths.bindDir, () =>
-		bindCodexAppRuntimeRotationLocked(options, paths),
+		withNativeBindingLock(paths.configPath, () => bindCodexAppRuntimeRotationLocked(options, paths)),
 	);
 }
 
@@ -1423,12 +1424,12 @@ async function bindCodexAppRuntimeRotationLocked(
 	const existingState = await readAppBindState(paths.statePath);
 	const nativeOpenai = options.nativeOpenai ?? existingState?.nativeOpenai ??
 		((options.env ?? process.env).CODEX_MULTI_AUTH_NATIVE_OPENAI === "1");
-	const catalogAccount = options.catalogAccount ?? existingState?.catalogAccount;
+	const catalogAccount = options.nativeOpenai === false ? undefined : options.catalogAccount ?? existingState?.catalogAccount;
 	if (existingState && (!!existingState.nativeOpenai !== nativeOpenai || JSON.stringify(catalogAccount) !== JSON.stringify(existingState.catalogAccount))) {
 		const router = await readRouterStatus(paths.statusPath);
-		const stopped = await stopRouter(router, platform, existingState.routerScriptPath, {
+		await stopRouter(router, platform, existingState.routerScriptPath, {
 			log: options.log, identityToken: existingState.identityToken, verifyProcessIdentity: options.verifyProcessIdentity		});
-		if (router?.pid && (!stopped || isProcessAlive(router.pid))) throw new Error("Stop the existing app router before changing provider mode");
+		if (router?.pid && isProcessAlive(router.pid)) throw new Error("Stop the existing app router before changing provider mode");
 	}
 
 	const host = existingState?.host ?? "127.0.0.1";
@@ -1550,7 +1551,7 @@ export async function unbindCodexAppRuntimeRotation(
 ): Promise<AppBindResult> {
 	const paths = resolveAppBindPaths(options);
 	return withAppBindLock(paths.bindDir, () =>
-		unbindCodexAppRuntimeRotationLocked(options, paths),
+		withNativeBindingLock(paths.configPath, () => unbindCodexAppRuntimeRotationLocked(options, paths)),
 	);
 }
 

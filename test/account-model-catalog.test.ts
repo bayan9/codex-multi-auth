@@ -36,7 +36,7 @@ describe("live account model catalogs", () => {
 			context_window: 123456,
 			visibility: "list",
 		});
-		expect(models[0].supported_reasoning_levels).toEqual([{ effort: "high" }]);
+		expect(models[0].supported_reasoning_levels).toEqual([{ effort: "high" }, { effort: "low" }]);
 		expect((await catalog.list(["b"])).map((m) => m.slug)).toEqual([
 			"shared",
 			"hidden-model",
@@ -90,4 +90,11 @@ describe("live account model catalogs", () => {
 		}));
 		expect(await catalog.list(["a"])).toEqual([]);
 	});
+});
+
+it("limits advertised context to what every serving account supports",async()=>{
+ const catalog=new AccountModelCatalog(async key=>({models:[{slug:'shared',context_window:key==='a'?100000:20000,max_context_window:key==='a'?120000:30000,supported_reasoning_levels:[{effort:key==='a'?'high':'low'}]}]}));
+ const [model]=await catalog.list(['a','b']);
+ expect(model?.context_window).toBe(20000);expect(model?.max_context_window).toBe(30000);
+ expect(model?.supported_reasoning_levels).toEqual([{effort:'high'},{effort:'low'}]);
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { isNativeClientToken } from "../lib/runtime/native-client-auth.js";
 const token = (exp: number) =>
 	`header.${Buffer.from(JSON.stringify({ exp })).toString("base64url")}.signature`;
@@ -29,4 +29,16 @@ describe("native client authentication", () => {
 			}),
 		).toBe(false);
 	});
+});
+
+it.each(["EBUSY", "EPERM", "EACCES", "partial"])("retries transient desktop auth %s", async code => {
+ const current = token(200);
+ const read = vi.fn().mockRejectedValueOnce(code === "partial" ? new SyntaxError("partial JSON") : Object.assign(Error("locked"), {code})).mockResolvedValue(JSON.stringify({tokens:{access_token:current}}));
+ expect(await isNativeClientToken(current,100000,read)).toBe(true);
+ expect(read).toHaveBeenCalledTimes(2);
+});
+it("bounds desktop auth retries", async()=>{
+ const read=vi.fn().mockRejectedValue(Object.assign(Error("locked"),{code:"EBUSY"}));
+ expect(await isNativeClientToken(token(200),100000,read)).toBe(false);
+ expect(read).toHaveBeenCalledTimes(3);
 });
