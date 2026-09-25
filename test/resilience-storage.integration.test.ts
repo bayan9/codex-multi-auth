@@ -138,3 +138,20 @@ it.each(['removed','disabled','invalidated','replaced'])("never rescues credenti
  await expect(manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:'oauth',access:'fixture-new',refresh:'fixture-new',expires:Date.now()+3600000})).rejects.toThrow();
  expect((await loadAccounts())?.accounts.some(a=>a.refreshToken==='fixture-new')).toBe(false);
 });
+
+
+const reviewFallbackJwt = (accountId: string) => `e30.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } })).toString("base64url")}.sig`;
+it("persists an unmatched auth fallback account on the first save", async () => {
+    await setup();
+    const manager = new AccountManager({ type: "oauth", access: reviewFallbackJwt("fallback"), refresh: "fixture-fallback", expires: Date.now() + 3_600_000 }, await loadAccounts());
+    expect(manager.getAccountCount()).toBe(2);
+    await manager.saveToDisk();
+    expect((await loadAccounts())?.accounts.map(row => row.refreshToken).sort()).toEqual(["fixture-fallback", "fixture-first"]);
+});
+it("persists a matched auth fallback's newer refresh token on the first save", async () => {
+    await setup();
+    const manager = new AccountManager({ type: "oauth", access: reviewFallbackJwt("first"), refresh: "fixture-rotated", expires: Date.now() + 3_600_000 }, await loadAccounts());
+    expect(manager.getAccountCount()).toBe(1);
+    await manager.saveToDisk();
+    expect((await loadAccounts())?.accounts.map(row => row.refreshToken)).toEqual(["fixture-rotated"]);
+});

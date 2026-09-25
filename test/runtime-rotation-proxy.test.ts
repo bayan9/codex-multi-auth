@@ -5160,3 +5160,18 @@ it("requires fresh eligibility when stale recovery reorders the account inventor
  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readApiRoutes:async()=>[]}});
  try{const response=await postResponses(proxy,{model:'model-test',input:[]});await response.text();expect(response.status).toBe(503);expect(calls.filter(c=>c.url.endsWith('/responses'))).toHaveLength(0);}finally{reload.mockRestore();}
 });
+
+
+describe("native catalog outage with reasoning settings", () => {
+	it("returns a retryable availability error when no workspace catalog is known", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+		const { fetchImpl, calls } = createRecordingFetch(call => call.url.includes("/models")
+			? new Response("busy", { status: 429, headers: { "retry-after": "120" } })
+			: textEventStream());
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await postResponses(proxy, { model: "model-test", reasoning: { effort: "high" }, service_tier: "priority", input: "test" });
+		await response.text();
+		expect(response.status).toBe(503);
+		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(false);
+	});
+});
