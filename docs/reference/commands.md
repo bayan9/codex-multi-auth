@@ -52,7 +52,19 @@ refresh behavior.
 
 ## `codex-multi-auth check`
 
-Live-probes every stored account and prints one line per account. Unlike
+Run `check` for the full check, or select one portion:
+
+| Command | Work performed |
+| --- | --- |
+| `check accounts` | Account authentication and live quota checks, including a tiny first-use request for genuinely unused subscriptions; skips reset-credit and model discovery checks |
+| `check resets` | Refresh available subscription reset credits, showing the account number and email; does not redeem credits or run inference/model probes |
+| `check capabilities` | Refresh model and capability discovery for enabled subscription workspaces and API credentials, including configured capability probes; updates the running router catalog |
+
+Existing scheduled checks keep their full-check behavior. Use
+`codex-multi-auth resets redeem <account-number>` for an explicit redemption. Unknown check arguments return a usage error;
+`check --help` prints usage without making network requests.
+
+Plain `check` and `check accounts` live-probe every stored account and print one line per account. Unlike
 `fix`, `check` does not skip disabled accounts: an account whose token is
 still usable is re-enabled as part of the run. When `showQuotaDetails` is on
 (the default, see [settings.md](settings.md)) the healthy lines carry a

@@ -279,3 +279,11 @@ it("retains the API comparison baseline through an invalid configuration without
  const restored=withInventoryChanges({...previous,checkedAt:3,entries:[{...previous.entries[0]!,models:['new-model']}]},unavailable);
  expect(restored.entries[0]?.changes).toMatchObject({added:['new-model'],removed:['old-model']});
 });
+
+it("reports a failed capability refresh to the focused CLI caller", async () => {
+ const {refreshAndPrintModelInventory} = await import('../lib/runtime/model-discovery-status.js');
+ expect(await refreshAndPrintModelInventory(vi.fn(), {
+  getBinding:async()=>({running:true,state:{nativeOpenai:true,baseUrl:'http://127.0.0.1:12345',clientApiKey:'fixture-token'}}),
+  fetchImpl:vi.fn(async()=>new Response(null,{status:503})),loadInventory:async()=>null,
+ })).toBe(false);
+});

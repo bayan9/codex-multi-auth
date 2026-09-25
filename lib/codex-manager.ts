@@ -2,7 +2,7 @@ import { runResetsCommand } from "./codex-manager/commands/resets.js";
 import { loadResetCreditState } from "./runtime/account-reset-credits.js";
 import { loadApiRoutes } from "./api-route-store.js";
 import { loadInferenceRequestTimes } from "./runtime/inference-activity.js";
-import { loadModelInventory } from "./runtime/model-discovery-status.js";
+import { loadModelInventory, refreshAndPrintModelInventory } from "./runtime/model-discovery-status.js";
 import {
 	AUTH_INVALIDATION_MARKER,
 	AccountManager,
@@ -568,7 +568,13 @@ const CLI_COMMAND_HANDLERS: ReadonlyMap<string, CliCommandHandler> = new Map<
 				saveAccounts,
 			}),
 	],
-	["check", () => runCheckCommand({ runHealthCheck: options => runHealthCheck({ ...options, discoverModels: true }) })],
+	["check", (rest) => runCheckCommand({
+  runHealthCheck,
+  runResetCheck: () => runResetsCommand(["list", "--refresh"]),
+  runCapabilityCheck: () => refreshAndPrintModelInventory(console.log),
+  getStoragePath,
+  setStoragePath,
+ }, rest)],
 	[
 		"features",
 		() => runFeaturesCommand({ implementedFeatures: IMPLEMENTED_FEATURES }),

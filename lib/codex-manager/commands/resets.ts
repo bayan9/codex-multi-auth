@@ -1,6 +1,6 @@
 import { AccountManager } from '../../accounts.js';
 import { loadAccounts, setStoragePath } from '../../storage.js';
-import { createResetCreditService, resetTargetForStoredAccount } from '../../runtime/account-reset-credits.js';
+import { createResetCreditService, resetTargetForStoredAccount, resetAccountLabel } from '../../runtime/account-reset-credits.js';
 import { withCheckProgress } from '../../ui/check-progress.js';
 const usage='Usage: codex-multi-auth resets list [--refresh] | redeem <account-number> | auto manual|last-resort';
 export async function runResetsCommand(args:string[]):Promise<number>{
@@ -19,7 +19,7 @@ export async function runResetsCommand(args:string[]):Promise<number>{
   const refreshed=value==='--refresh'?await withCheckProgress('Refreshing reset-credit availability',()=>service.refresh(targets)):null;
   const state=await service.status();console.log(`Automatic redemption: ${state.policy}`);
   if(state.lastRedemption){const index=(storage?.accounts??[]).findIndex(a=>resetTargetForStoredAccount(a)?.key===state.lastRedemption?.key);console.log(`Last confirmed reset: ${index>=0?`account ${index+1}`:"removed account"}; ${state.lastRedemption.outcome}; ${state.lastRedemption.automatic?"automatic":"explicit"}`);}
-  (storage?.accounts??[]).forEach((a,i)=>{const target=resetTargetForStoredAccount(a);const snapshot=target?(refreshed??state.snapshots)[target.key]:undefined;console.log(`Account ${i+1}: ${snapshot?.availableCount??'unknown'} reset credits${snapshot?` (checked ${Math.max(0,Math.floor((Date.now()-snapshot.updatedAt)/1000))}s ago)`:''}${target?.key===state.pending?.key?' [redemption pending; retry this account]':''}`);});return 0;
- }catch{console.error('Reset operation could not be confirmed. No new automatic redemption will be attempted while a result is pending; use resets list and retry the same account.');return 1;}
+  (storage?.accounts??[]).forEach((a,i)=>{const target=resetTargetForStoredAccount(a);const snapshot=target?(refreshed??state.snapshots)[target.key]:undefined;console.log(`${resetAccountLabel(a,i)}: ${snapshot?.availableCount??'unknown'} reset credits${snapshot?` (checked ${Math.max(0,Math.floor((Date.now()-snapshot.updatedAt)/1000))}s ago)`:''}${target?.key===state.pending?.key?' [redemption pending; retry this account]':''}`);});return 0;
+ }catch{console.error(command==='list'?'Reset-credit availability could not be refreshed. No credits were redeemed.':command==='auto'?'Reset-credit settings could not be updated.':'Reset operation could not be confirmed. No new automatic redemption will be attempted while a result is pending; use resets list and retry the same account.');return 1;}
  finally{await manager.flushPendingSave();}
 }

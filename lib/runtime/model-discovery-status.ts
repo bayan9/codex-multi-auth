@@ -252,7 +252,7 @@ export async function refreshAndPrintModelInventory(
 		loadInventory?: typeof loadModelInventory;
 		now?: () => number;
 	} = {},
-): Promise<void> {
+): Promise<boolean> {
 	try {
 		const load = deps.loadInventory ?? loadModelInventory;
 		const previous = await load();
@@ -297,7 +297,7 @@ export async function refreshAndPrintModelInventory(
 				"Running proxy model catalog refreshed. Desktop picks it up on its next response or scheduled catalog refresh.",
 			);
 			for (const line of formatModelInventory(withInventoryChanges(current,previous))) log(line);
-			return;
+			return true;
 		}
   const value = await withCheckProgress("Discovering workspace models and API/ZDR capabilities", async () => {
         let apiConfigurationUnavailable = false;
@@ -314,10 +314,12 @@ export async function refreshAndPrintModelInventory(
    return value;
   }, log);
 		for (const line of formatModelInventory(withInventoryChanges(value,previous))) log(line);
+  return true;
 	} catch {
 		log(
 			"Model discovery failed; previous status may be stale. Check credentials and configuration.",
 		);
+  return false;
 	}
 }
 

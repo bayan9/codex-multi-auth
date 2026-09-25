@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { AccountManager, extractAccountId, resolveAccountRecordId } from '../accounts.js';
+import { AccountManager, extractAccountId, resolveAccountRecordId, sanitizeEmail } from '../accounts.js';
 import { loadAccounts, type AccountMetadataV3 } from '../storage.js';
 import { getCodexMultiAuthDir } from '../runtime-paths.js';
 import { ensureFreshAccessToken } from './rotation-token-refresh.js';
@@ -43,12 +43,18 @@ export function createResetCreditService(manager?:AccountManager):ResetCreditSer
  });
 }
 export async function loadResetCreditState(){return createResetCreditService().status();}
+/** Local terminal labels only; never used in provider requests or public artifacts. */
+export function resetAccountLabel(account: Pick<AccountMetadataV3, "email">, index: number): string {
+ const email = sanitizeEmail(account.email);
+ const printable = email && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(email);
+ return `Account ${index + 1}${printable ? ` (${email})` : ""}`;
+}
 export async function refreshAndPrintResetCredits(log:(message:string)=>void){
  const storage=await loadAccounts();if(!storage?.accounts.length)return;
  const manager=new AccountManager(undefined,storage);
  const targets=storage.accounts.map(resetTargetForStoredAccount).filter((t):t is ResetTarget=>Boolean(t));
  try{
   const snapshots=await withCheckProgress(`Checking reset credits for ${targets.length} accounts`,()=>createResetCreditService(manager).refresh(targets),log);
-  storage.accounts.forEach((a,i)=>{const target=resetTargetForStoredAccount(a);const count=target?snapshots[target.key]?.availableCount:undefined;log(`Account ${i+1}: available subscription resets: ${count??'unknown (not verified)'}`);});
+  storage.accounts.forEach((a,i)=>{const target=resetTargetForStoredAccount(a);const count=target?snapshots[target.key]?.availableCount:undefined;log(`${resetAccountLabel(a,i)}: available subscription resets: ${count??'unknown (not verified)'}`);});
  }finally{await manager.flushPendingSave();}
 }
