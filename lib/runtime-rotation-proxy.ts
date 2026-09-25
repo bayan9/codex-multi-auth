@@ -1561,6 +1561,15 @@ async function handleRequestInner(
 			context.upstreamPath,
 		);
 		const attemptedIndexes = new Set<number>();
+		// The upstream's own capability 400/403/404, forwarded instead of a
+		// synthetic 503 when no other account can take the request.
+		let lastCapabilityRejection: { status: number; body: string; headers: Record<string, string>; account: ManagedAccount } | undefined;
+		let settingRejections = 0;
+		const forwardCapabilityRejection = async (rejection: NonNullable<typeof lastCapabilityRejection>): Promise<void> => {
+			res.writeHead(rejection.status, rejection.headers);
+			res.end(rejection.body);
+			await usageRecorder?.record({ outcome: "failure", statusCode: rejection.status, errorCode: "upstream_capability_rejected", account: rejection.account });
+		};
         let catalogEligibleKeys: Set<string> | undefined;
         const catalogExcludedIndexes = (): number[] => {
             const eligible = catalogEligibleKeys;
@@ -2415,13 +2424,19 @@ async function handleRequestInner(
 			if (isResponsesRequest && context.model && [400,403,404].includes(upstream.status)) {
     const errorBody = await readErrorBody(upstream,state.streamStallTimeoutMs,65536);
     let data:unknown;try {data=JSON.parse(errorBody);}catch {data=null;}
-    const failure=classifyCapabilityFailure(upstream.status,data);
+    // Learning and rotating on capability rejections is native-only; other
+    // proxies forward the upstream 4xx as they always have.
+    const failure=state.nativeOpenai ? classifyCapabilityFailure(upstream.status,data) : null;
     upstream=new Response(errorBody,{status:upstream.status,headers:upstream.headers});
     if(failure){
+     lastCapabilityRejection={status:upstream.status,body:errorBody,headers:responseHeadersForClient(upstream.headers),account:refreshed.account};
      const body=parseRequestBody(context.body);
      const effort=isRecord(body?.reasoning)&&typeof body.reasoning.effort==="string"?body.reasoning.effort:undefined;
      const tier=typeof body?.service_tier==="string"?body.service_tier:undefined;
      (state.capabilityFailures??=new RuntimeCapabilityFailures(state.now)).record(requestScope?.id ?? catalogAccountKey(refreshed.account),context.model,failure,effort,tier);
+     // A reasoning/speed value rejected twice is a request problem, not an
+     // entitlement difference: forward the upstream 400 instead of trying every account.
+     if(failure!=="model" && ++settingRejections>=2){await forwardCapabilityRejection(lastCapabilityRejection);return;}
      if(pendingScopes && pendingScopes.length>1){
       pendingScopes.shift();attemptedIndexes.delete(refreshed.account.index);refundConsumedPoolToken(refreshed.account);state.status.retries++;continue;
      }
@@ -3007,6 +3022,10 @@ async function handleRequestInner(
 			return;
 		}
 
+		if (lastCapabilityRejection && !isThreadGoalRequest) {
+			await forwardCapabilityRejection(lastCapabilityRejection);
+			return;
+		}
 		await usageRecorder?.record({
 			outcome: "failure",
 			statusCode: normalizeExhaustionStatus(exhaustionReason),

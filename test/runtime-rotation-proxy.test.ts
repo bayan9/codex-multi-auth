@@ -5189,6 +5189,28 @@ it("reads the subscription quota cache at most once per second across native req
  expect(readSubscriptionQuota).toHaveBeenCalledTimes(1);
 });
 
+describe("request-level capability rejections",()=>{
+ const reject=()=>Response.json({error:{code:"invalid_value",param:"reasoning.effort",message:"Unsupported effort fixture"}},{status:400});
+ it.each([2,3])("forwards the upstream 400 after two accounts reject the effort (%i accounts)",async count=>{
+  const manager=new AccountManager(undefined,createStorage(Date.now(),count));
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common",supported_reasoning_levels:[{effort:"ultra"}]}]}):reject());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await postResponses(proxy,{model:"common",reasoning:{effort:"ultra"},input:"fixture"});
+  expect(response.status).toBe(400);
+  expect((await response.json()).error).toMatchObject({code:"invalid_value",param:"reasoning.effort"});
+  expect(calls.filter(c=>c.url.endsWith("/responses"))).toHaveLength(2);
+ });
+ it("forwards a capability 400 unchanged on a non-native proxy without rotating",async()=>{
+  const manager=new AccountManager(undefined,createStorage(Date.now(),3));
+  const {calls,fetchImpl}=createRecordingFetch(()=>reject());
+  const proxy=await startProxy({accountManager:manager,fetchImpl});
+  const response=await postResponses(proxy,{model:"gpt-5-codex",reasoning:{effort:"ultra"},input:"fixture"});
+  expect(response.status).toBe(400);
+  expect((await response.json()).error.code).toBe("invalid_value");
+  expect(calls.filter(c=>c.url.endsWith("/responses"))).toHaveLength(1);
+ });
+});
+
 describe('earned reset last-resort integration',()=>{
  it('never redeems or moves traffic off a stored native pin',async()=>{
   vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
