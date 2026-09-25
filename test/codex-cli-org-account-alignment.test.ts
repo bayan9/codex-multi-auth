@@ -182,4 +182,62 @@ describe("org-sourced account alignment with Codex auth.json (#700)", () => {
 		);
 		expect(await readFile(authPath, "utf-8")).toBe(rewritten);
 	});
+
+	it("rewrites an org auth.json account_id even when a valid accounts.json exists, once", async () => {
+		const accountsPath = process.env.CODEX_CLI_ACCOUNTS_PATH!;
+		const accountsJson = JSON.stringify({
+			activeAccountId: "org-AbC123",
+			activeEmail: "org@example.com",
+			accounts: [
+				{
+					accountId: "org-AbC123",
+					email: "org@example.com",
+					active: true,
+					auth: {
+						tokens: { access_token: ACCESS_TOKEN, refresh_token: "refresh-org" },
+					},
+				},
+			],
+		});
+		const writeAuth = (accountId: string) =>
+			writeFile(
+				authPath,
+				JSON.stringify({
+					auth_mode: "chatgpt",
+					tokens: {
+						access_token: ACCESS_TOKEN,
+						refresh_token: "refresh-org",
+						id_token: ID_TOKEN,
+						account_id: accountId,
+					},
+				}),
+				"utf-8",
+			);
+		await writeFile(accountsPath, accountsJson, "utf-8");
+
+		// aligned pair: nothing to do
+		await writeAuth("ws-uuid-1");
+		const alignedAuth = await readFile(authPath, "utf-8");
+		await expect(syncCodexCliActiveSelectionIfDrifted(storage())).resolves.toBe(
+			false,
+		);
+		expect(await readFile(authPath, "utf-8")).toBe(alignedAuth);
+		expect(await readFile(accountsPath, "utf-8")).toBe(accountsJson);
+
+		// auth.json left with an org id by an older release: rewritten once
+		await writeAuth("org-AbC123");
+		await expect(syncCodexCliActiveSelectionIfDrifted(storage())).resolves.toBe(true);
+		const rewrittenAuth = await readFile(authPath, "utf-8");
+		expect(
+			(JSON.parse(rewrittenAuth) as { tokens?: { account_id?: string } }).tokens
+				?.account_id,
+		).toBe("ws-uuid-1");
+		const rewrittenAccounts = await readFile(accountsPath, "utf-8");
+
+		await expect(syncCodexCliActiveSelectionIfDrifted(storage())).resolves.toBe(
+			false,
+		);
+		expect(await readFile(authPath, "utf-8")).toBe(rewrittenAuth);
+		expect(await readFile(accountsPath, "utf-8")).toBe(rewrittenAccounts);
+	});
 });

@@ -434,6 +434,31 @@ describe("syncCodexCliActiveSelectionIfDrifted", () => {
 		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
 	});
 
+	it("reports drift for equal org ids whose tokens name different workspaces (#700)", async () => {
+		const tokenFor = (workspace: string) =>
+			`h.${Buffer.from(
+				JSON.stringify({
+					"https://api.openai.com/auth": { chatgpt_account_id: workspace },
+				}),
+			).toString("base64url")}.s`;
+		loadCodexCliStateMock.mockResolvedValue({
+			activeAccountId: "org-AbC123",
+			accounts: [
+				{ accountId: "org-AbC123", accessToken: tokenFor("ws-team"), isActive: true },
+			],
+		});
+		setCodexCliActiveSelectionMock.mockResolvedValue(true);
+
+		const result = await syncCodexCliActiveSelectionIfDrifted(
+			storageWith([
+				account("a", { accountId: "org-AbC123", accessToken: tokenFor("ws-personal") }),
+			]),
+		);
+
+		expect(result).toBe(true);
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("matches a raw org id kept by the legacy accounts.json (#700)", async () => {
 		const accessToken = `h.${Buffer.from(
 			JSON.stringify({

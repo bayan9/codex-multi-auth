@@ -336,6 +336,7 @@ export function codexCliActiveIdentity(state: {
  * otherwise each side goes through resolveCodexAuthAccountId with its own
  * token, so a stored "org-..." id matches the workspace id the writer put in
  * auth.json. Unresolvable ids (org id, no claim) never match a different id.
+ * Equal org ids still differ when both tokens name different workspaces.
  */
 export function codexAuthAccountIdsMatch(
 	left: CodexAccountIdentity,
@@ -344,12 +345,12 @@ export function codexAuthAccountIdsMatch(
 	const leftId = left.accountId?.trim();
 	const rightId = right.accountId?.trim();
 	if (!leftId || !rightId) return false;
-	if (leftId === rightId) return true;
 	const leftResolved = resolveCodexAuthAccountId(leftId, left.accessToken);
-	return (
-		!!leftResolved &&
-		leftResolved === resolveCodexAuthAccountId(rightId, right.accessToken)
-	);
+	const rightResolved = resolveCodexAuthAccountId(rightId, right.accessToken);
+	if (leftId === rightId) {
+		return !leftResolved || !rightResolved || leftResolved === rightResolved;
+	}
+	return !!leftResolved && leftResolved === rightResolved;
 }
 
 /**

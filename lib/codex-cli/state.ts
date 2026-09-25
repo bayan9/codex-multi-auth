@@ -32,9 +32,10 @@ export interface CodexCliState {
 	activeAccountId?: string;
 	activeEmail?: string;
 	/**
-	 * The raw tokens.account_id of auth.json, set only when the state was read
-	 * from auth.json. Codex CLI 0.156+ rejects an "org-..." value there (#700),
-	 * unlike the legacy accounts.json, which keeps raw org ids.
+	 * The raw tokens.account_id of auth.json whenever auth.json exists, also
+	 * when the state itself came from the legacy accounts.json. Codex CLI
+	 * 0.156+ rejects an "org-..." value there (#700), unlike accounts.json,
+	 * which keeps raw org ids.
 	 */
 	authFileAccountId?: string;
 	syncVersion?: number;
@@ -448,6 +449,25 @@ export async function loadCodexCliState(
 					}
 					const state = parseCodexCliState(accountsPath, parsed, sourceUpdatedAtMs);
 					if (state) {
+						if (hasAuthPath) {
+							// Codex CLI itself reads auth.json, so a stale org account_id
+							// there must stay visible behind a valid accounts.json.
+							try {
+								const authParsed = JSON.parse(
+									await retryFsOperation(() => fs.readFile(authPath, "utf-8")),
+								) as unknown;
+								const authTokens =
+									isRecord(authParsed) && isRecord(authParsed.tokens)
+										? authParsed.tokens
+										: undefined;
+								state.authFileAccountId = authTokens
+									? (readTrimmedString(authTokens.account_id) ??
+										readTrimmedString(authTokens.accountId))
+									: undefined;
+							} catch {
+								// Unreadable auth.json: nothing to flag here.
+							}
+						}
 						incrementCodexCliMetric("readSuccesses");
 						log.debug("Loaded Codex CLI state", {
 							operation: "read-state",
