@@ -1930,7 +1930,9 @@ export class AccountManager {
 			// A locked or unreadable accounts file must not discard the only valid
 			// credential, so keep it live and let the retrying debounced save
 			// persist it once the file can be read.
-			const live = (error as NodeJS.ErrnoException).code === ACCOUNT_STORAGE_UNREADABLE
+			// A write that still fails after the storage retries (e.g. a Windows lock)
+			// spends the old token just the same, so it is rescued like an unreadable file.
+			const live = (error as NodeJS.ErrnoException).code === ACCOUNT_STORAGE_UNREADABLE || isRetryableAuthPersistenceError(error)
 				? this.getAccountByIdentity(source, auth)
 				: null;
 			if (live) {
@@ -1952,11 +1954,15 @@ export class AccountManager {
 							at: nowMs(),
 						}),
 					);
-					log.warn("Account storage unreadable; rotated credential journaled until it can be saved", {
+					// Loads now see the journaled token, so it is the persisted state
+					// that later merges (and a further rotation) compare against.
+					const baselineRow = this.persistenceBaseline?.accounts.find(row => row.refreshToken === priorRefreshToken);
+					if (baselineRow) Object.assign(baselineRow, { refreshToken: auth.refresh, accessToken: auth.access, expiresAt: auth.expires });
+					log.warn("Account storage could not be read or written; rotated credential journaled until it can be saved", {
 						sourceIndex: source.index,
 					});
 				} catch (journalError) {
-					log.error("Account storage unreadable and the rotated credential could not be journaled; it is only in memory. Keep this process running until the accounts file is readable, or the account will need a re-login.", {
+					log.error("Account storage could not be read or written and the rotated credential could not be journaled; it is only in memory. Keep this process running until the accounts file is readable, or the account will need a re-login.", {
 						sourceIndex: source.index,
 						error: String(journalError),
 					});

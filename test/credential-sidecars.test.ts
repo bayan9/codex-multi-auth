@@ -20,8 +20,6 @@ it.each(["reset-credits.json", "api-capability-probes.json", "api-routes.json"])
 	async (name) => {
 		const path = join(dir, name);
 		await fs.writeFile(path, '{"policy":"last-resort"}');
-		const rm = vi.spyOn(fs, "rm");
-		const removed = () => rm.mock.calls.some(([target]) => String(target) === path);
 		let release!: () => void;
 		let entered!: () => void;
 		const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -33,16 +31,25 @@ it.each(["reset-credits.json", "api-capability-probes.json", "api-routes.json"])
 			await fs.writeFile(path, '{"policy":"last-resort"}');
 		});
 		await inside;
-		const cleared = clearCredentialSidecars();
-		// Let the clear run up to the lock it needs; it must not have deleted yet.
-		// (For the later files, the earlier api-routes.json deletion proves the clear got this far.)
-		if (name !== "api-routes.json") await vi.waitFor(() => expect(rm.mock.calls.some(([target]) => String(target).endsWith("api-routes.json"))).toBe(true));
-		for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
-		expect(removed()).toBe(false);
-		release();
-		await writer;
-		await cleared;
-		expect(removed()).toBe(true);
-		await expect(fs.stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+		// Fresh spies for this case only, created after the writer owns the lock.
+		const rm = vi.spyOn(fs, "rm");
+		const rename = vi.spyOn(fs, "rename");
+		try {
+			const removedThisPath = () => rm.mock.calls.some(([target]) => String(target) === path);
+			const cleared = clearCredentialSidecars();
+			// A waiter repeatedly tries to publish its candidate as this path's
+			// lock directory: proof the clear is blocked on the held lock itself.
+			await vi.waitFor(() => expect(rename.mock.calls.some(([, to]) => String(to).endsWith(`${name}.write-lock`))).toBe(true), { timeout: 5000 });
+			expect(removedThisPath()).toBe(false);
+			release();
+			await writer;
+			await cleared;
+			expect(removedThisPath()).toBe(true);
+			await expect(fs.stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+		} finally {
+			release();
+			rm.mockRestore();
+			rename.mockRestore();
+		}
 	},
 );

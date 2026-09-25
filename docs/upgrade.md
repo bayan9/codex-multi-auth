@@ -242,6 +242,28 @@ are ignored by older versions and left in place.
 
 ---
 
+## 2.17.0 Command Changes
+
+- `check` accepts one scope: `check accounts`, `check resets` or
+  `check capabilities`. Unknown arguments exit 1. An unscoped `check` also
+  refreshes reset-credit availability and model/capability discovery.
+- `check --prime` (or `check accounts --prime`) additionally sends a tiny
+  first-use request to genuinely unused Personal subscriptions, which starts
+  their quota windows. No check primes without `--prime`, including scheduled
+  and dashboard checks.
+- API capability probes stay opt-in per credential. Plain `check` reuses
+  results younger than 15 minutes; `check capabilities` forces them.
+- `resets list|redeem|auto` manages subscription reset credits; redemption is
+  always explicit unless `resets auto last-resort` is set.
+- `login --api` opens the API/ZDR credential menu.
+- An interactive login with several workspaces and no unique Personal one asks
+  which to bind; a noninteractive login keeps the automatic choice and warns
+  with the `--org` remedy.
+- The new `ws` runtime dependency (and `@types/ws` for development) adds no npm
+  scripts, and no manual storage migration is needed.
+
+---
+
 ## Legacy Compatibility
 
 Legacy files may still be discovered during migration-only compatibility checks.
