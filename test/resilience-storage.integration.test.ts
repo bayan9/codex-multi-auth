@@ -158,3 +158,75 @@ it("persists a matched auth fallback's newer refresh token on the first save", a
     await manager.saveToDisk();
     expect((await loadAccounts())?.accounts.map(row => row.refreshToken)).toEqual(["fixture-rotated"]);
 });
+
+it("lets two managers disable different workspaces across repeated saves", async () => {
+    const first = await setup();
+    const second = new AccountManager(undefined, await loadAccounts());
+    first.disableCurrentWorkspace(first.getAccountByIndex(0)!, "personal");
+    const other = second.getAccountByIndex(0)!;
+    other.currentWorkspaceIndex = 1;
+    second.disableCurrentWorkspace(other, "business");
+    await first.saveToDisk();
+    await second.saveToDisk();
+    await first.saveToDisk();
+    await second.saveToDisk();
+    const workspaces = (await loadAccounts())!.accounts[0]!.workspaces!;
+    expect(workspaces.map(w => [w.id, w.enabled])).toEqual([["personal", false], ["business", false]]);
+});
+it("persists an identity-changing refresh and its cleared auth cooldown despite a concurrent label edit", async () => {
+    await setup();
+    const initial = (await loadAccounts())!;
+    Object.assign(initial.accounts[0]!, { email: "old@example.test", coolingDownUntil: Date.now() + 600000, cooldownReason: "auth-failure" });
+    await saveAccounts(initial);
+    const manager = new AccountManager(undefined, await loadAccounts());
+    manager.getAccountByIndex(0)!.accountLabel = "Local";
+    const disk = (await loadAccounts())!;
+    disk.accounts[0]!.accountLabel = "External";
+    await saveAccounts(disk);
+    const access = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "first", email: "new@example.test" } })).toString("base64url")}.signature`;
+    await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access, refresh: "fixture-rotated", expires: Date.now() + 3600000 });
+    const row = (await loadAccounts())!.accounts[0]!;
+    expect(row.refreshToken).toBe("fixture-rotated");
+    expect(row.email).toBe("new@example.test");
+    expect(row.coolingDownUntil).toBeUndefined();
+    expect(row.cooldownReason).toBeUndefined();
+    expect(row.accountLabel).toBe("External");
+});
+
+for (const conflict of [false, true]) {
+ it.each(["network-error", "rate-limit"])(`preserves a concurrent %s cooldown during refresh (label conflict=${conflict})`, async reason => {
+    await setup();
+    const initial = (await loadAccounts())!;
+    Object.assign(initial.accounts[0]!, { coolingDownUntil: Date.now() + 60000, cooldownReason: "auth-failure" });
+    await saveAccounts(initial);
+    const manager = new AccountManager(undefined, await loadAccounts());
+    if (conflict) manager.getAccountByIndex(0)!.accountLabel = "Local";
+    const disk = (await loadAccounts())!;
+    const until = Date.now() + 600000;
+    Object.assign(disk.accounts[0]!, { accountLabel: "External", coolingDownUntil: until, cooldownReason: reason });
+    await saveAccounts(disk);
+    await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 });
+    expect((await loadAccounts())!.accounts[0]).toMatchObject({ refreshToken: "fixture-rotated", accountLabel: "External", coolingDownUntil: until, cooldownReason: reason });
+    expect(manager.getAccountByIndex(0)).toMatchObject({ coolingDownUntil: until, cooldownReason: reason });
+    expect(manager.isAccountCoolingDown(manager.getAccountByIndex(0)!)).toBe(true);
+    if (conflict) await expect(manager.saveToDisk()).rejects.toMatchObject({ code: "ESTALE" });
+    manager.getAccountByIndex(0)!.accountLabel = "External";
+    await manager.saveToDisk();
+    await manager.saveToDisk();
+    expect((await loadAccounts())!.accounts[0]).toMatchObject({ coolingDownUntil: until, cooldownReason: reason });
+ });
+}
+
+it.each([false, true])("allows an explicit cooldown clear after a refreshed blocker was adopted (conflict=%s)", async conflict => {
+ const manager = await setup();
+ if (conflict) manager.getAccountByIndex(0)!.accountLabel = "Local";
+ const disk = (await loadAccounts())!;
+ Object.assign(disk.accounts[0]!, { accountLabel: "External", coolingDownUntil: Date.now() + 600000, cooldownReason: "network-error" });
+ await saveAccounts(disk);
+ await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 });
+ manager.getAccountByIndex(0)!.accountLabel = "External";
+ manager.clearAccountCooldown(manager.getAccountByIndex(0)!);
+ await manager.saveToDisk();
+ expect((await loadAccounts())!.accounts[0]!.coolingDownUntil).toBeUndefined();
+ expect((await loadAccounts())!.accounts[0]!.cooldownReason).toBeUndefined();
+});

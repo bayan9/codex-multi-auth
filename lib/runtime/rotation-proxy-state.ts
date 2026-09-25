@@ -84,7 +84,6 @@ export interface RotationProxyState extends RotationProxyStateInit {
  capabilityFailures?: RuntimeCapabilityFailures;
 	apiModelRuntime?: ApiModelRuntime;
  apiModelCapabilities?:ApiModelCapabilities;
-	catalogClientVersion?: string;
 	catalogEtag?: string;
  catalogOAuthModels?:RouteModel[];
  catalogApiRoutes?:ApiRouteCredential[];

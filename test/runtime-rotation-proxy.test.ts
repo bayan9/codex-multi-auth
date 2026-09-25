@@ -5061,7 +5061,7 @@ it("returns a warm picker cache immediately while expired workspace data refresh
  let now=Date.now(),slow=false,release!:()=>void;
  const gate=new Promise<void>(resolve=>{release=resolve;});let reads=0;
  const proxy=await startProxy({accountManager:new AccountManager(undefined,createStorage(now)),fetchImpl:async()=>{reads++;if(slow)await gate;return Response.json({models:[{slug:slow?"new-model":"old-model"}]});},options:{nativeOpenai:true,now:()=>now}});
- await (await getModels(proxy)).text();slow=true;now+=6*60_000;
+ await (await getModels(proxy, "/models")).text();slow=true;now+=6*60_000;
  try{
   const r=await fetch(`${proxy.baseUrl}/models`,{headers:{authorization:`Bearer ${DEFAULT_CLIENT_API_KEY}`},signal:AbortSignal.timeout(500)});
   expect((await r.json()).models.map((m:{slug:string})=>m.slug)).toEqual(["old-model"]);
@@ -5173,5 +5173,22 @@ describe("native catalog outage with reasoning settings", () => {
 		await response.text();
 		expect(response.status).toBe(503);
 		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(false);
+	});
+});
+
+describe("unversioned catalog requests", () => {
+	it("does not borrow another client's catalog version", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+		const { fetchImpl } = createRecordingFetch(call => {
+			if (!call.url.includes("/models")) return textEventStream();
+			const version = new URL(call.url).searchParams.get("client_version");
+			return Response.json({ models: [{ slug: version === "2.0" ? "model-new" : "model-old" }] });
+		});
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const versioned = await getModels(proxy, "/models?client_version=2.0");
+		expect((await versioned.json()).models.map((m: { slug: string }) => m.slug)).toEqual(["model-new"]);
+		const unversioned = await postResponses(proxy, { model: "model-old", input: "test" });
+		await unversioned.text();
+		expect(unversioned.status).toBe(200);
 	});
 });

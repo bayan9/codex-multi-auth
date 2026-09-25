@@ -1616,8 +1616,7 @@ async function handleRequestInner(
 		const isPinned = typeof pinnedIndex === "number";
 		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
 			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
-            const catalogClientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : state.catalogClientVersion;
-            state.catalogClientVersion = catalogClientVersion;
+            const catalogClientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : undefined;
             const backoff = state.catalogBackoff ??= new Map();
 			const forceCatalogRefresh = isModelsRequest && incomingUrl.searchParams.get("refresh_capabilities") === "1";
 			const catalogsByVersion = state.modelCatalogs ??= new Map();

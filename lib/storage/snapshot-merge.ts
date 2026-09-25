@@ -22,6 +22,52 @@ function mergeValue(base: unknown, disk: unknown, local: unknown): unknown {
     }
     return conflict();
 }
+type Workspace = NonNullable<AccountMetadataV3["workspaces"]>[number];
+const byId = (rows: Workspace[] | undefined) => new Map((rows ?? []).map(row => [row.id, row]));
+/**
+ * Merge workspaces by id, never by array position. Fields changed on one side
+ * win; enabled/disabledAt move as one unit, and when both sides changed it an
+ * intentional re-enable wins over a disable. Other two-sided edits conflict.
+ * Removal follows the account rule: a record removed on either side stays
+ * removed.
+ */
+function mergeWorkspaces(base: AccountMetadataV3, disk: AccountMetadataV3, local: AccountMetadataV3): Pick<AccountMetadataV3, "workspaces" | "currentWorkspaceIndex"> {
+    const before = byId(base.workspaces), onDisk = byId(disk.workspaces), next = byId(local.workspaces);
+    const ids = [...onDisk.keys(), ...[...next.keys()].filter(id => !onDisk.has(id) && !before.has(id))];
+    const workspaces: Workspace[] = [];
+    for (const id of ids) {
+        const b = before.get(id), d = onDisk.get(id), l = next.get(id);
+        if (!d || !l) {
+            // Present on one side only: an addition survives, a removal wins.
+            const added = d ?? l;
+            if (!b && added) workspaces.push(structuredClone(added));
+            continue;
+        }
+        const state = (row: Workspace | undefined) => ({ enabled: row?.enabled, disabledAt: row?.disabledAt });
+        const stateSource = equal(state(b), state(l)) ? d : equal(state(b), state(d)) ? l : d.enabled !== false ? d : l.enabled !== false ? l : (d.disabledAt ?? 0) >= (l.disabledAt ?? 0) ? d : l;
+        const pick = (row: Workspace) => ({ ...row, enabled: stateSource.enabled, disabledAt: stateSource.disabledAt });
+        const merged = mergeValue(b ? pick(b) : undefined, pick(d), pick(l)) as Workspace;
+        if (merged.disabledAt === undefined) delete merged.disabledAt;
+        workspaces.push(merged);
+    }
+    const currentId = (row: AccountMetadataV3) => row.workspaces?.[row.currentWorkspaceIndex ?? 0]?.id;
+    const chosen = currentId(local) !== currentId(base) ? currentId(local) : currentId(disk);
+    let index = workspaces.findIndex(row => row.id === chosen);
+    if (index < 0 || workspaces[index]?.enabled === false) {
+        const enabled = workspaces.findIndex(row => row.enabled !== false);
+        index = enabled >= 0 ? enabled : Math.max(index, 0);
+    }
+    const untracked = [base, disk, local].every(row => row.currentWorkspaceIndex === undefined);
+    return { workspaces, currentWorkspaceIndex: untracked && index === 0 ? undefined : index };
+}
+/** Preserve concurrent cooldown observations while allowing an unchanged blocker to clear. */
+export function mergeAccountCooldown(base: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">, disk: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">, local: Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason">): Pick<AccountMetadataV3, "coolingDownUntil" | "cooldownReason"> {
+    const cleared = base.coolingDownUntil !== undefined && (
+        (disk.coolingDownUntil === undefined && (local.coolingDownUntil === undefined || local.coolingDownUntil === base.coolingDownUntil)) ||
+        (local.coolingDownUntil === undefined && disk.coolingDownUntil === base.coolingDownUntil));
+    const cooldown = (disk.coolingDownUntil ?? 0) >= (local.coolingDownUntil ?? 0) ? disk : local;
+    return { coolingDownUntil: cleared ? undefined : cooldown.coolingDownUntil, cooldownReason: cleared ? undefined : cooldown.cooldownReason };
+}
 /** Runtime observations commute; user-owned edits retain conflict detection. */
 function mergeRuntimeAccount(base: AccountMetadataV3, disk: AccountMetadataV3, local: AccountMetadataV3): AccountMetadataV3 {
     const limits: Record<string, number> = {};
@@ -32,15 +78,11 @@ function mergeRuntimeAccount(base: AccountMetadataV3, disk: AccountMetadataV3, l
         const value = clear ? undefined : Math.max(a ?? 0, b ?? 0);
         if (value !== undefined) limits[key] = value;
     }
-    const cleared = base.coolingDownUntil !== undefined && (
-        (disk.coolingDownUntil === undefined && (local.coolingDownUntil === undefined || local.coolingDownUntil === base.coolingDownUntil)) ||
-        (local.coolingDownUntil === undefined && disk.coolingDownUntil === base.coolingDownUntil));
-    const cooldown = (disk.coolingDownUntil ?? 0) >= (local.coolingDownUntil ?? 0) ? disk : local;
     const runtime = {
         rateLimitResetTimes: Object.keys(limits).length ? limits : undefined,
-        coolingDownUntil: cleared ? undefined : cooldown.coolingDownUntil,
-        cooldownReason: cleared ? undefined : cooldown.cooldownReason,
+        ...mergeAccountCooldown(base, disk, local),
         lastSwitchReason: local.lastSwitchReason ?? disk.lastSwitchReason,
+        ...(disk.workspaces || local.workspaces ? mergeWorkspaces(base, disk, local) : {}),
     };
     // Omitted and true both mean enabled; serialization does not express a user edit.
     const normalized = (row: AccountMetadataV3) => ({...row, enabled:row.enabled === false ? false : undefined});
