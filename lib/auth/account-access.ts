@@ -155,11 +155,7 @@ export interface AccountSelectionLike {
  * label (not undefined) is deliberate, because the account-pool merge keeps
  * the saved label on undefined and would go on naming the rejected workspace.
  *
- * The rejected workspace is dropped and the authorized one marked default.
- * Merging into an existing row keeps its workspace pointer while that
- * pointer's id survives the merge, then falls back to the default workspace;
- * the plugin host sends the pointed-at id ahead of accountId, so leaving the
- * rejected workspace in place would keep it selected.
+ * The workspace list is narrowed with {@link toAuthorizedWorkspaces}.
  */
 export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>(
 	selection: T,
@@ -171,16 +167,9 @@ export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>
 	const result = constrainSelectionToAuthorized(current, authorized);
 	if (!result.changed) return { selection, result };
 
-	const authorizedTracked = selection.workspaces?.some(
-		(workspace) => workspace.id === result.accountId,
-	);
 	const workspaces = selection.workspaces
-		?.filter((workspace) => workspace.id !== result.rejected)
-		.map((workspace) =>
-			authorizedTracked
-				? { ...workspace, isDefault: workspace.id === result.accountId }
-				: workspace,
-		);
+		? toAuthorizedWorkspaces(selection.workspaces, authorized, result.accountId)
+		: undefined;
 	return {
 		selection: {
 			...selection,
@@ -193,6 +182,33 @@ export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>
 		},
 		result,
 	};
+}
+
+/**
+ * Keeps only workspaces the backend authorizes and makes `accountId` the one
+ * default, adding it when the token claims never listed it.
+ *
+ * The plugin host sends workspaces[currentWorkspaceIndex].id ahead of
+ * accountId, and the account-pool merge keeps a saved pointer while its id
+ * survives, else falls back to the default. With every unauthorized
+ * workspace gone and `accountId` the only default, neither path can land on
+ * a workspace the backend refuses.
+ */
+function toAuthorizedWorkspaces(
+	workspaces: Workspace[],
+	authorized: AuthorizedAccounts,
+	accountId: string,
+): Workspace[] {
+	const kept = workspaces
+		.filter(
+			(workspace) =>
+				workspace.id === accountId || authorized.accountIds.includes(workspace.id),
+		)
+		.map((workspace) => ({ ...workspace, isDefault: workspace.id === accountId }));
+	if (!kept.some((workspace) => workspace.id === accountId)) {
+		kept.push({ id: accountId, enabled: true, isDefault: true });
+	}
+	return kept;
 }
 
 /** The slice of a saved account record this migration reads and rewrites. */
@@ -226,20 +242,23 @@ export async function reboundUnauthorizedAccountIdentity(
 
 	const authorized = await fetchAuthorizedAccounts(accessToken, options);
 	const result = constrainSelectionToAuthorized(currentId, authorized);
-	if (!result.changed) return null;
+	if (!authorized || !result.changed) return null;
 
 	account.accountId = result.accountId;
 	account.accountIdSource = "token";
-	// The plugin host sends workspaces[currentWorkspaceIndex].id in preference
-	// to accountId, so the workspace pointer has to follow the rebind or that
-	// path keeps using the rejected id.
-	const workspaceIndex =
-		account.workspaces?.findIndex(
+	// The workspace pointer has to follow the rebind: the plugin host sends
+	// the pointed-at workspace id ahead of accountId.
+	if (account.workspaces) {
+		account.workspaces = toAuthorizedWorkspaces(
+			account.workspaces,
+			authorized,
+			result.accountId,
+		);
+		const workspaceIndex = account.workspaces.findIndex(
 			(workspace) => workspace.id === result.accountId,
-		) ?? -1;
-	if (workspaceIndex >= 0) {
+		);
 		account.currentWorkspaceIndex = workspaceIndex;
-		account.accountLabel = account.workspaces?.[workspaceIndex]?.name ?? "";
+		account.accountLabel = account.workspaces[workspaceIndex]?.name ?? "";
 	} else if (account.accountLabel !== undefined) {
 		account.accountLabel = "";
 	}

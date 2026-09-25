@@ -448,4 +448,77 @@ describe("workspace metadata follows a rewritten account id", () => {
 			"org-team",
 		);
 	});
+
+	// Greptile P1 (round 3): the authorized default is not in the token's
+	// workspace list and another unauthorized workspace carries the default
+	// flag. Dropping only the rejected id let the merge point at that one.
+	it("keeps the pointer off every unauthorized workspace when the authorized id is untracked", async () => {
+		const { buildUpdatedAccount } = await import(
+			"../lib/codex-manager/account-pool-write.js"
+		);
+		const incoming = [
+			{ id: "org-team", name: "Team", enabled: true },
+			{ id: "org-other", name: "Other", enabled: true, isDefault: true },
+		];
+		const { selection } = applyAuthorizedAccountConstraint(
+			{
+				accountIdOverride: "org-team",
+				accountIdSource: "org" as const,
+				accountLabel: "Team",
+				workspaces: incoming,
+			},
+			authorized,
+		);
+		const existing = {
+			accountId: "org-team",
+			accountIdSource: "org" as const,
+			accountLabel: "Team",
+			email: "a@example.com",
+			refreshToken: "refresh",
+			addedAt: 1,
+			lastUsed: 1,
+			workspaces: structuredClone(incoming),
+			currentWorkspaceIndex: 0,
+		};
+
+		const { account } = buildUpdatedAccount(existing, {
+			accountId: selection.accountIdOverride,
+			accountIdSource: selection.accountIdSource,
+			accountLabel: selection.accountLabel,
+			refreshToken: "refresh-next",
+			workspaces: selection.workspaces,
+			now: 2,
+		});
+
+		expect(account.workspaces?.[account.currentWorkspaceIndex ?? 0]?.id).toBe(
+			"personal-id",
+		);
+		expect(account.workspaces?.map((workspace) => workspace.id)).toEqual([
+			"personal-id",
+		]);
+	});
+
+	it("points a rebound account at the authorized id even when the token never listed it", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response(JSON.stringify({ accounts: [{ id: "personal-id" }], default_account_id: "personal-id" }), {
+				status: 200,
+			}),
+		);
+		const account = {
+			accountId: "org-team",
+			accountIdSource: "org" as const,
+			accountLabel: "Team",
+			workspaces: [
+				{ id: "org-team", name: "Team", enabled: true },
+				{ id: "org-other", name: "Other", enabled: true, isDefault: true },
+			],
+			currentWorkspaceIndex: 0,
+		};
+
+		await reboundUnauthorizedAccountIdentity(account, "token-abc", { fetch: fetchMock });
+
+		expect(account.workspaces[account.currentWorkspaceIndex]?.id).toBe("personal-id");
+		expect(account.workspaces.map((workspace) => workspace.id)).toEqual(["personal-id"]);
+		expect(account.accountLabel).toBe("");
+	});
 });

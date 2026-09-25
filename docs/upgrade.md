@@ -114,8 +114,9 @@ codex-multi-auth forecast --live --model gpt-5.6-sol
 - `codex-multi-auth login --manual` and `codex-multi-auth login --no-browser` force manual callback handling for browser-restricted shells.
 - `CODEX_AUTH_NO_BROWSER=1` suppresses browser launch for automation/headless sessions. False-like values such as `0` and `false` no longer force manual mode.
 - In non-TTY/manual shells, provide the full redirect URL on stdin, for example: `echo "http://127.0.0.1:1455/auth/callback?code=..." | codex-multi-auth login --manual`.
-- No new npm scripts, storage migrations, or extra upgrade steps were introduced for this auth-flow change.
-- Codex CLI 0.156+ refuses a workspace that `wham/accounts/check` does not authorize (issue #700). `login` now makes that check (one extra request; it fails open) before saving an automatic selection. For accounts saved earlier, run `codex-multi-auth fix --live`: it makes the same check per account, rebinds an unauthorized org-sourced id, reports `rebound-unauthorized-workspace` in `--json`, and resyncs `~/.codex/auth.json` when the active account changed.
+- No new npm scripts or storage migrations were introduced for this auth-flow change, and new logins need no extra steps.
+- Codex CLI 0.156+ refuses a workspace that `wham/accounts/check` does not authorize (issue #700). `login` now makes that check (one extra request; it fails open). An unauthorized automatic selection is replaced by the backend's default account. An explicit `--org` or `CODEX_AUTH_ACCOUNT_ID` binding is saved as chosen, but `~/.codex/auth.json` gets the backend's default and the login warns. `login --account` skips the check; it is identity-checked instead.
+- Accounts saved before this check need one step: run `codex-multi-auth fix --live`. It makes the same check per account, rebinds an unauthorized org-sourced id, reports `rebound-unauthorized-workspace` in `--json`, and resyncs `~/.codex/auth.json` when the active account changed.
 
 For the full command/behavior reference, see [reference/commands.md](reference/commands.md).
 

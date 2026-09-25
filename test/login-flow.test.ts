@@ -555,4 +555,31 @@ describe("runAuthLogin workspace authorization guard", () => {
 		expect(syncSelectionToCodexMock).toHaveBeenCalledExactlyOnceWith(rewritten);
 		expect(loggedLines(warnSpy).join("\n")).toContain("not authorized");
 	});
+
+	// A targeted re-auth is identity-checked by persistAccountPool, which would
+	// reject a rewritten id, so it must skip the authorization check entirely.
+	it("does not constrain a targeted re-authentication", async () => {
+		accountsOnDisk = storageWith(2);
+		runSignInFlowMock.mockResolvedValue(SIGNED_IN);
+		const targeted = {
+			...SIGNED_IN,
+			accountIdOverride: "org-team",
+			accountIdSource: "org" as const,
+		};
+		resolveAccountSelectionMock.mockReturnValue(targeted);
+		fetchAuthorizedAccountsMock.mockResolvedValue(AUTHORIZED);
+		persistAccountPoolMock.mockResolvedValue(
+			persistResult({ outcome: "updated", accountIndex: 0, isActiveAccount: true }),
+		);
+
+		expect(await runAuthLogin(["--account", "1"], deps())).toBe(0);
+
+		expect(fetchAuthorizedAccountsMock).not.toHaveBeenCalled();
+		expect(persistAccountPoolMock).toHaveBeenCalledWith(
+			[targeted],
+			false,
+			expect.anything(),
+		);
+		expect(syncSelectionToCodexMock).toHaveBeenCalledExactlyOnceWith(targeted);
+	});
 });

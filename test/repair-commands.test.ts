@@ -1796,6 +1796,7 @@ describe("repair-commands direct deps coverage", () => {
 				accountIdSource?: string;
 				accountLabel?: string;
 				currentWorkspaceIndex?: number;
+				workspaces?: Array<{ id: string; name?: string; enabled: boolean }>;
 			}) => {
 				if (account.accountIdSource !== "org") return null;
 				account.accountId = "personal-id";
@@ -1803,6 +1804,7 @@ describe("repair-commands direct deps coverage", () => {
 				if (workspaces) {
 					account.accountLabel = "Personal";
 					account.currentWorkspaceIndex = 0;
+					account.workspaces = [{ id: "personal-id", name: "Personal", enabled: true }];
 				}
 				return { accountId: "personal-id", changed: true, rejected: "org-team" };
 			},
@@ -1938,13 +1940,21 @@ describe("repair-commands direct deps coverage", () => {
 			}),
 		);
 		const persisted = persist.mock.calls[0]?.[0] as {
-			accounts: Array<{ accountId?: string; accountLabel?: string; currentWorkspaceIndex?: number }>;
+			accounts: Array<{
+				accountId?: string;
+				accountLabel?: string;
+				currentWorkspaceIndex?: number;
+				workspaces?: Array<{ id: string }>;
+			}>;
 		};
 		expect(persisted.accounts[0]).toMatchObject({
 			accountId: "personal-id",
 			accountLabel: "Personal",
 			currentWorkspaceIndex: 0,
 		});
+		expect(persisted.accounts[0]?.workspaces?.map((workspace) => workspace.id)).toEqual([
+			"personal-id",
+		]);
 		const payload = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}")) as {
 			codexActiveSynced: boolean | null;
 		};
@@ -2096,5 +2106,144 @@ describe("repair-commands direct deps coverage", () => {
 		} finally {
 			vi.unstubAllGlobals();
 		}
+	});
+
+	// CodeRabbit (round 3): the mirror write has to happen while the storage
+	// transaction still holds the lock, so a switch that commits right after
+	// this repair also writes auth.json after it.
+	it("runFix writes the Codex auth mirror inside the storage transaction", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		const onDisk = orgAccountStorage(Date.now() + 60_000);
+		storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(onDisk));
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		const events: string[] = [];
+		storageMocks.withAccountStorageTransaction.mockImplementation(
+			async (fn: (storage: unknown, persist: unknown) => Promise<void>) => {
+				await fn(structuredClone(onDisk), async () => {
+					events.push("persist");
+				});
+				events.push("transaction-end");
+			},
+		);
+		codexCliWriterMocks.setCodexCliActiveSelection.mockImplementationOnce(async () => {
+			events.push("sync");
+			return true;
+		});
+		silenceConsole("log");
+
+		await runFix(
+			["--json", "--live"],
+			createDeps({
+				hasUsableAccessToken: () => true,
+				reboundUnauthorizedAccountIdentity: orgRebinder(),
+			}),
+		);
+
+		expect(events).toEqual(["persist", "sync", "transaction-end"]);
+	});
+
+	// CodeRabbit (round 3): another process added a row ahead of the rebound
+	// one, so the committed active index is 2 while this run loaded it as 1.
+	it("runFix names the committed active index in the sync retry hint", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		const loaded = orgAccountStorage(Date.now() + 60_000);
+		storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(loaded));
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		const committed = {
+			...structuredClone(loaded),
+			accounts: [
+				{
+					email: "other@example.com",
+					refreshToken: "other-refresh",
+					accessToken: "other-access",
+					expiresAt: Date.now() + 60_000,
+					accountId: "other-id",
+					accountIdSource: "token" as const,
+					enabled: true,
+				},
+				...structuredClone(loaded.accounts),
+			],
+			activeIndex: 1,
+		};
+		storageMocks.withAccountStorageTransaction.mockImplementation(
+			async (fn: (storage: unknown, persist: unknown) => Promise<void>) =>
+				fn(committed, vi.fn(async () => {})),
+		);
+		codexCliWriterMocks.setCodexCliActiveSelection.mockResolvedValueOnce(false);
+		const consoleSpy = silenceConsole("log");
+
+		await runFix(
+			["--live"],
+			createDeps({
+				hasUsableAccessToken: () => true,
+				resolveActiveIndex: (storage) => storage.activeIndex,
+				reboundUnauthorizedAccountIdentity: orgRebinder(),
+			}),
+		);
+
+		const output = consoleSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+		expect(codexCliWriterMocks.setCodexCliActiveSelection).toHaveBeenCalledTimes(1);
+		expect(output).toContain("codex-multi-auth switch 2");
+	});
+
+	// Guard with a populated active slot: row 1 is rebound, row 2 is active
+	// and untouched, so auth.json must not be rewritten.
+	it("runFix does not sync Codex auth state when the active account was not rebound", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		const onDisk = orgAccountStorage(Date.now() + 60_000);
+		const withOther = {
+			...onDisk,
+			accounts: [
+				...onDisk.accounts,
+				{
+					email: "other@example.com",
+					refreshToken: "other-refresh",
+					accessToken: "other-access",
+					expiresAt: Date.now() + 60_000,
+					accountId: "other-id",
+					accountIdSource: "token" as const,
+					enabled: true,
+				},
+			],
+			activeIndex: 1,
+		};
+		storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(withOther));
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		const persist = vi.fn(async () => {});
+		storageMocks.withAccountStorageTransaction.mockImplementation(
+			async (fn: (storage: unknown, persist: unknown) => Promise<void>) =>
+				fn(structuredClone(withOther), persist),
+		);
+		silenceConsole("log");
+
+		await runFix(
+			["--json", "--live"],
+			createDeps({
+				hasUsableAccessToken: () => true,
+				resolveActiveIndex: (storage) => storage.activeIndex,
+				reboundUnauthorizedAccountIdentity: orgRebinder(),
+			}),
+		);
+
+		expect(persist).toHaveBeenCalledTimes(1);
+		expect(codexCliWriterMocks.setCodexCliActiveSelection).not.toHaveBeenCalled();
 	});
 });

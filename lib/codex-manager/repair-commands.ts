@@ -390,6 +390,7 @@ function hasAccountStorageMutation(
 		|| before.enabled !== after.enabled
 		|| before.accountLabel !== after.accountLabel
 		|| before.currentWorkspaceIndex !== after.currentWorkspaceIndex
+		|| JSON.stringify(before.workspaces) !== JSON.stringify(after.workspaces)
 	);
 }
 
@@ -443,6 +444,12 @@ function applyAccountStorageMutations(
 			mutation.before.currentWorkspaceIndex !== mutation.after.currentWorkspaceIndex
 		) {
 			target.currentWorkspaceIndex = mutation.after.currentWorkspaceIndex;
+		}
+		if (
+			JSON.stringify(mutation.before.workspaces) !==
+			JSON.stringify(mutation.after.workspaces)
+		) {
+			target.workspaces = mutation.after.workspaces;
 		}
 	}
 }
@@ -1570,9 +1577,11 @@ export async function runFix(
 	// ~/.codex/auth.json still carries the rejected id for the active account,
 	// and Codex CLI keeps refusing it until something rewrites that file. The
 	// mirror is taken from the committed snapshot, not this run's in-memory
-	// view: another process may have switched the active account since load,
-	// and syncing then would put the old selection back into auth.json.
-	let committedReboundActive: AccountMetadataV3 | undefined;
+	// view, and written while the storage lock is still held: another process
+	// may switch the active account around this run, and a sync outside the
+	// lock could put the old selection back into auth.json.
+	let codexActiveSynced: boolean | null = null;
+	let committedActiveIndex = activeIndex;
 	if (accountStorageChanged && !options.dryRun) {
 		await withAccountStorageTransaction(async (loadedStorage, persist) => {
 			const nextStorage = loadedStorage
@@ -1580,8 +1589,8 @@ export async function runFix(
 				: createEmptyAccountStorage();
 			applyAccountStorageMutations(nextStorage, accountMutations);
 			await persist(nextStorage);
-			const committedActive =
-				nextStorage.accounts[deps.resolveActiveIndex(nextStorage, "codex")];
+			committedActiveIndex = deps.resolveActiveIndex(nextStorage, "codex");
+			const committedActive = nextStorage.accounts[committedActiveIndex];
 			const isRebound =
 				committedActive !== undefined &&
 				[...reboundIndexes].some((index) => {
@@ -1592,21 +1601,15 @@ export async function runFix(
 						rebound.refreshToken === committedActive.refreshToken
 					);
 				});
-			committedReboundActive =
-				isRebound && committedActive?.enabled !== false
-					? structuredClone(committedActive)
-					: undefined;
-		});
-	}
-
-	let codexActiveSynced: boolean | null = null;
-	if (committedReboundActive) {
-		codexActiveSynced = await setCodexCliActiveSelection({
-			accountId: committedReboundActive.accountId,
-			email: committedReboundActive.email,
-			accessToken: committedReboundActive.accessToken,
-			refreshToken: committedReboundActive.refreshToken,
-			expiresAt: committedReboundActive.expiresAt,
+			if (isRebound && committedActive.enabled !== false) {
+				codexActiveSynced = await setCodexCliActiveSelection({
+					accountId: committedActive.accountId,
+					email: committedActive.email,
+					accessToken: committedActive.accessToken,
+					refreshToken: committedActive.refreshToken,
+					expiresAt: committedActive.expiresAt,
+				});
+			}
 		});
 	}
 
@@ -1685,7 +1688,7 @@ export async function runFix(
 	if (codexActiveSynced === false) {
 		console.log(
 			deps.stylePromptText(
-				`Warning: the rebound active account could not be synced into Codex auth state; run \`codex-multi-auth switch ${activeIndex + 1}\` to retry.`,
+				`Warning: the rebound active account could not be synced into Codex auth state; run \`codex-multi-auth switch ${committedActiveIndex + 1}\` to retry.`,
 				"warning",
 			),
 		);
