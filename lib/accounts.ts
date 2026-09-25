@@ -732,7 +732,13 @@ export class AccountManager {
 
 	private rememberWorkspaceSelections(snapshot?: AccountStorageV3): void {
 		this.accounts.forEach(account => {
-			const saved = snapshot?.accounts.find(row => row.recordId === account.recordId || getAccountIdentityKey(row) === getAccountIdentityKey(account)) ?? account;
+			// recordId first; the identity key only when defined and unique, since
+			// duplicate identities (or two missing ones) would pick another row's baseline.
+			const rows = snapshot?.accounts ?? [];
+			const byRecord = account.recordId ? rows.filter(row => row.recordId === account.recordId) : [];
+			const key = getAccountIdentityKey(account);
+			const matches = byRecord.length ? byRecord : key ? rows.filter(row => getAccountIdentityKey(row) === key) : [];
+			const saved = (matches.length === 1 ? matches[0] : undefined) ?? account;
 			this.persistedWorkspaceSelections.set(account, saved.workspaces?.[saved.currentWorkspaceIndex ?? 0]?.id);
 			this.persistedWorkspaces.set(account, structuredClone(saved.workspaces));
 		});
