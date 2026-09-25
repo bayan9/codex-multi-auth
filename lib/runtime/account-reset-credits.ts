@@ -30,7 +30,8 @@ export function createResetCreditService(manager?:AccountManager):ResetCreditSer
   if(!manager||!current||current.enabled===false)throw Error('Reset workspace is not enabled');
   const fresh=await ensureFreshAccessToken({accountManager:manager,account:current,family:'codex',model:null,now:Date.now(),tokenRefreshSkewMs:60000,tokenInvalidationCooldownMs:300000});
   if(!fresh.ok)throw Error('Reset account authentication unavailable');
-  return {accessToken:fresh.accessToken,accountId:target.accountId,expiresAt:fresh.account.expires??0};
+  // The mirror carries the id Codex CLI accepts when the backend refused an explicit binding.
+ return {accessToken:fresh.accessToken,accountId:target.accountId,expiresAt:fresh.account.expires??0,codexCliMirror:current.codexCliMirror};
  };
  return new ResetCreditService(join(getCodexMultiAuthDir(),'reset-credits.json'),{
   read:async target=>nativeRateLimitsRpc(await auth(target),'account/rateLimits/read',{excludeResetCreditDetails:true}),
