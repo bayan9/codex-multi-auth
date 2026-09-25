@@ -367,3 +367,38 @@ it("asks a running proxy to force paid probes only for an explicit capability ch
  }
  expect(urls).toEqual(["http://127.0.0.1:12345/models?refresh_capabilities=1", "http://127.0.0.1:12345/models?refresh_capabilities=1&force_probes=1"]);
 });
+
+it("merges concurrent checks' probe results instead of replacing the shared cache", async () => {
+ const { promises: fs } = await import("node:fs");
+ const { tmpdir } = await import("node:os");
+ const { join } = await import("node:path");
+ const dir = await fs.mkdtemp(join(tmpdir(), "probe-merge-"));
+ vi.stubEnv("CODEX_MULTI_AUTH_DIR", dir);
+ try {
+  let probes = 0;
+  const fetcher = vi.fn(async (url: string | URL) => {
+   const href = String(url);
+   if (href.endsWith("/v1/responses")) { probes++; return Response.json({ error: { message: "no" } }, { status: 500 }); }
+   if (href.includes("/v1/models")) return Response.json({ data: [{ id: "fixture-model" }] });
+   return new Response("missing", { status: 404 });
+  });
+  const route = (id: string) => ({ id, label: id, kind: "api" as const, apiKey: `key-${id}`, enabled: true, priority: 0, visibleModels: ["fixture-model"], probeCapabilities: true });
+  vi.resetModules();
+  const a = await import("../lib/runtime/model-discovery-status.js");
+  vi.resetModules();
+  const b = await import("../lib/runtime/model-discovery-status.js");
+  const options = { fetchImpl: fetcher as typeof fetch, now: () => 1_000_000, updateApiDiscovery: async (r: never) => r, persistProbes: true };
+  // Both start from the same (empty) cache and probe different credentials.
+  await Promise.all([a.discoverModelInventory(null, [route("one")], options), b.discoverModelInventory(null, [route("two")], options)]);
+  const cached = JSON.parse(await fs.readFile(join(dir, "api-capability-probes.json"), "utf8")).entries;
+  expect(cached).toHaveLength(2);
+  const before = probes;
+  vi.resetModules();
+  const c = await import("../lib/runtime/model-discovery-status.js");
+  await c.discoverModelInventory(null, [route("one"), route("two")], options);
+  expect(probes).toBe(before);
+ } finally {
+  vi.unstubAllEnvs();
+  await fs.rm(dir, { recursive: true, force: true });
+ }
+});

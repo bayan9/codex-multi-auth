@@ -160,9 +160,18 @@ export async function discoverModelInventory(
 	);
 	await api.catalogs(routes, true, options.forceProbes === true);
 	if (options.persistProbes) {
-		const serialized = JSON.stringify(probeCacheSchema.parse({ version: 1, entries: capabilities.exportProbes().slice(-1000) })) + "\n";
 		const path = probeCachePath();
-		await withFileTransactionLock(path, () => writeFileAtomic(path, serialized)).catch(() => undefined);
+		await withFileTransactionLock(path, async () => {
+			// Merge with the latest file: a concurrent check may have probed other
+			// credentials since this one loaded. The newer result wins per key.
+			const merged = new Map(await loadProbeCache());
+			for (const [key, value] of capabilities.exportProbes()) {
+				const disk = merged.get(key);
+				if (!disk || disk.at <= value.at) merged.set(key, value);
+			}
+			const entries = [...merged].sort((x, y) => x[1].at - y[1].at).slice(-1000);
+			await writeFileAtomic(path, JSON.stringify(probeCacheSchema.parse({ version: 1, entries })) + "\n");
+		}).catch(() => undefined);
 	}
 	entries.push(
 		...api.statuses(routes).map((s, i) => ({
