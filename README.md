@@ -58,6 +58,10 @@ Use it when you need a local Codex CLI multi-account workflow with visible accou
 
 The package does not publish a global `codex` binary. Keep `codex` owned by the official OpenAI install path. Use `codex-multi-auth-codex ...` or `mcodex ...` only when you intentionally want this package's forwarding wrapper.
 
+With runtime rotation enabled, interactive `mcodex resume` lists saved CLI and desktop sessions across providers in the current directory. Use `mcodex resume --all` to include other directories, or `-C <directory>` to change the project scope. Select a session to resume it through multi-auth; Escape cancels. Discovery uses the official local Codex app-server and does not rewrite session metadata. Desktop and CLI must use the same `CODEX_HOME` for shared history.
+
+Explicit session IDs, `--last`, remote connections, non-interactive invocations, and the in-session `/resume` command retain native Codex behavior. The cross-provider picker requires an official Codex version supporting the app-server `thread/list` API.
+
 ---
 
 <details open>
