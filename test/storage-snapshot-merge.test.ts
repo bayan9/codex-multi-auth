@@ -135,3 +135,28 @@ it("moves the current workspace off one the other side disabled", () => {
     const [row] = mergeAccountSnapshot(base, disk, local).accounts;
     expect(row!.workspaces![row!.currentWorkspaceIndex!]!.id).toBe("personal");
 });
+
+it("keeps an auth-failure cooldown recorded against the refresh token that is kept", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    local.accounts[0]!.refreshToken = "fixture-rotated";
+    Object.assign(disk.accounts[0]!, { refreshToken: "fixture-rotated", coolingDownUntil: 900, cooldownReason: "auth-failure" });
+    const [row] = mergeAccountSnapshot(base, disk, local).accounts;
+    expect(row).toMatchObject({ refreshToken: "fixture-rotated", coolingDownUntil: 900, cooldownReason: "auth-failure" });
+});
+it("drops a local auth-failure cooldown when disk already holds a newer refresh token", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    disk.accounts[0]!.refreshToken = "fixture-winner";
+    Object.assign(local.accounts[0]!, { coolingDownUntil: 900, cooldownReason: "auth-failure" });
+    const [row] = mergeAccountSnapshot(base, disk, local).accounts;
+    expect(row!.refreshToken).toBe("fixture-winner");
+    expect(row!.coolingDownUntil).toBeUndefined();
+});
+it("does not drop unknown account fields another version wrote", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    (base.accounts[0] as Record<string, unknown>).codexCliMirror = { forAccountId: "a", accountId: "org-a" };
+    (disk.accounts[0] as Record<string, unknown>).codexCliMirror = { forAccountId: "a", accountId: "org-b" };
+    (local.accounts[0] as Record<string, unknown>).codexCliMirror = { forAccountId: "a", accountId: "org-a" };
+    local.accounts[0]!.lastUsed = 10;
+    const [row] = mergeAccountSnapshot(base, disk, local).accounts;
+    expect((row as Record<string, unknown>).codexCliMirror).toEqual({ forAccountId: "a", accountId: "org-b" });
+});

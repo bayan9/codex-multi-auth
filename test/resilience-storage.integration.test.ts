@@ -230,3 +230,22 @@ it.each([false, true])("allows an explicit cooldown clear after a refreshed bloc
  expect((await loadAccounts())!.accounts[0]!.coolingDownUntil).toBeUndefined();
  expect((await loadAccounts())!.accounts[0]!.cooldownReason).toBeUndefined();
 });
+
+it.each([false, true])("clears the loser's auth-failure cooldown when this process wins a single-use refresh (label conflict=%s)", async conflict => {
+    // Process A (this manager) and process B both hold refresh token fixture-first.
+    const manager = await setup();
+    if (conflict) manager.getAccountByIndex(0)!.accountLabel = "Local";
+    // B redeems the token first in the upstream race's losing order: its refresh
+    // fails with invalid_grant, so it records an auth-failure cooldown against
+    // fixture-first and saves. A's baseline never held that cooldown.
+    const loser = (await loadAccounts())!;
+    Object.assign(loser.accounts[0]!, { coolingDownUntil: Date.now() + 600000, cooldownReason: "auth-failure", ...(conflict ? { accountLabel: "External" } : {}) });
+    await saveAccounts(loser);
+    // A's refresh succeeded upstream with the same single-use token.
+    await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 });
+    const row = (await loadAccounts())!.accounts[0]!;
+    expect(row.refreshToken).toBe("fixture-rotated");
+    expect(row.coolingDownUntil).toBeUndefined();
+    expect(row.cooldownReason).toBeUndefined();
+    expect(manager.isAccountCoolingDown(manager.getAccountByIndex(0)!)).toBe(false);
+});
