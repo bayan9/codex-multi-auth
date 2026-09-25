@@ -378,3 +378,42 @@ it("probes the exact priority tier exposed by the native picker",async()=>{
  expect(tiers).toContain('priority');expect(tiers).not.toContain('fast');
  expect(model?.service_tiers).toEqual(expect.arrayContaining([expect.objectContaining({id:'priority'})]));
 });
+
+it("advertises documented image input on API and ZDR aliases using the existing metadata fetch", async () => {
+ const fetcher = vi.fn(async () => new Response("Model ID: `fixture`\nReasoning.effort supports: low, high.\n\n## Model details\n\n- Input modalities: text, image\n- Output modalities: text\n\n## Pricing\n"));
+ const reader = new ApiModelCapabilities(fetcher as typeof fetch);
+ const { apiPickerModel } = await import("../lib/runtime/api-model-runtime.js");
+ const { buildVisibleModelUnion } = await import("../lib/model-route-policy.js");
+ const models = await reader.enrich([apiPickerModel("fixture")]);
+ expect(models[0]?.input_modalities).toEqual(["text", "image"]);
+ const aliases = buildVisibleModelUnion(["api", "zdr"].map(kind => ({...route, kind:kind as "api"|"zdr", models, probeCapabilities:false})));
+ expect(aliases).toHaveLength(2);
+ expect(aliases.every(model => Array.isArray(model.input_modalities) && model.input_modalities.includes("image"))).toBe(true);
+ expect(await reader.reasoning("fixture")).toEqual(["low", "high"]);
+ expect(fetcher).toHaveBeenCalledTimes(1);
+ expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).has("authorization")).toBe(false);
+});
+
+it.each([
+ "Model ID: `other`\n\n## Model details\n- Input modalities: text, image\n",
+ "Model ID: `fixture`\n\n## Model details\n- Input modalities: text\n- Output modalities: image\n",
+ "Model ID: `fixture`\n\n## Examples\n- Input modalities: text, image\n",
+ "Model ID: `fixture`\n\n## Model details\n- Input modalities: text, image depending on access\n",
+])("does not infer image input from other models, output support, examples, or ambiguous prose", async doc => {
+ const reader = new ApiModelCapabilities(vi.fn(async () => new Response(doc)) as typeof fetch);
+ const [model] = await reader.enrich([{slug:"fixture", input_modalities:["text"]}]);
+ expect(model?.input_modalities).toEqual(["text"]);
+});
+
+it("retains documented image support through a metadata outage and adopts an explicit text-only update", async () => {
+ let now=1000;
+ const fetcher=vi.fn(async()=>new Response("Model ID: `fixture`\n\n## Model details\n- Input modalities: text, image\n"));
+ const reader=new ApiModelCapabilities(fetcher as typeof fetch,()=>now);
+ const input=[{slug:"fixture", input_modalities:["text"]}];
+ expect((await reader.enrich(input))[0]?.input_modalities).toContain("image");
+ now+=61000;
+ fetcher.mockResolvedValue(new Response("unavailable",{status:503}));
+ expect((await reader.enrich(input))[0]?.input_modalities).toContain("image");
+ fetcher.mockResolvedValue(new Response("Model ID: `fixture`\n\n## Model details\n- Input modalities: text\n"));
+ expect((await reader.enrich(input,true))[0]?.input_modalities).toEqual(["text"]);
+});

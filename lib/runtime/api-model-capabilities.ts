@@ -51,6 +51,19 @@ type ProbeResult = {
 	tiers: string[];
 	status: Record<string, string>;
 };
+type DocumentedCapabilities = { levels: string[]; inputModalities?: string[] };
+
+/** Only the exact model's input declaration can enable native image attachments. */
+function parseInputModalities(id: string, text: string): string[] | undefined {
+	if (text.match(/^Model ID:\s*`([^`]+)`/m)?.[1] !== id) return undefined;
+	const details = text.split(/^## Model details[ \t]*\r?\n/m)[1]?.split(/^## /m)[0];
+	const declaration = details?.match(/^- Input modalities:[ \t]*([^\r\n]+)$/m)?.[1];
+	if (!declaration) return undefined;
+	const modalities = declaration.split(",").map(value => value.trim());
+	if (!modalities.length || modalities.some(value => !["text", "image", "audio", "video"].includes(value))) return undefined;
+	// The native coding picker currently accepts text and image inputs.
+	return [...new Set(modalities.filter(value => value === "text" || value === "image"))];
+}
 export class ApiModelCapabilities {
 	private activeProbes = 0;
 	private readonly probeWaiters: Array<() => void> = [];
@@ -76,17 +89,20 @@ export class ApiModelCapabilities {
 			status: Record<string, string>;
 		}
 	>();
-	private readonly cache = new Map<string, { at: number; levels: string[] }>();
+	private readonly cache = new Map<string, DocumentedCapabilities & { at: number }>();
 	constructor(
 		private readonly fetchImpl: typeof fetch = fetch,
 		private readonly now: () => number = Date.now,
 	) {}
 	async reasoning(id: string, refresh = false): Promise<string[]> {
-		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(id)) return [];
+		return (await this.documentation(id, refresh)).levels;
+	}
+	private async documentation(id: string, refresh = false): Promise<DocumentedCapabilities> {
+		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(id)) return { levels: [] };
 		const cached = this.cache.get(id);
 		if (!refresh && cached && cached.at + 60000 > this.now())
-			return cached.levels;
-		let levels: string[] = [];
+			return cached;
+		let metadata: DocumentedCapabilities = { levels: [] };
 		try {
 			const response = await this.fetchImpl(
 				`https://developers.openai.com/api/docs/models/${encodeURIComponent(id)}.md`,
@@ -111,18 +127,19 @@ export class ApiModelCapabilities {
 			} finally {
 				await reader.cancel();
 			}
-			levels = parseApiReasoningDocumentation(
-				id,
-				Buffer.concat(chunks).toString("utf8"),
-			);
+			const text = Buffer.concat(chunks).toString("utf8");
+			metadata = {
+				levels: parseApiReasoningDocumentation(id, text),
+				inputModalities: parseInputModalities(id, text),
+			};
 		} catch {
 			// An outage is not a capability revocation. Keep last successful evidence.
-            levels = cached?.levels ?? [];
+			metadata = cached ?? metadata;
 		}
 		if (this.cache.size >= 1000)
 			this.cache.delete(this.cache.keys().next().value ?? "");
-		this.cache.set(id, { at: this.now(), levels });
-		return levels;
+		this.cache.set(id, { ...metadata, at: this.now() });
+		return metadata;
 	}
 	private async probe(
 		route: ApiRouteCredential,
@@ -327,7 +344,8 @@ export class ApiModelCapabilities {
 		forceProbes = false,
 	): Promise<RouteModel[]> {
 		return mapWithConcurrency(models, 3, async (model) => {
-						let levels = await this.reasoning(model.slug, refresh);
+						const documented = await this.documentation(model.slug, refresh);
+						let levels = documented.levels;
 						let extra: Record<string, unknown> = {};
 						if (route?.enabled && route.probeCapabilities) {
 							const probed = await this.probe(
@@ -362,6 +380,7 @@ export class ApiModelCapabilities {
 						return {
 							...model,
 							...extra,
+							...(documented.inputModalities ? { input_modalities: documented.inputModalities } : {}),
 							multi_agent_reasoning_effort: multiAgentEffort,
 							supported_reasoning_levels: nativeLevels.map((effort) => ({
 								effort,
