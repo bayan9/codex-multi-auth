@@ -149,3 +149,20 @@ describe("native account identity", () => {
 		expect(manager.getAccountByIndex(0)?.enabled).not.toBe(false);
 	});
 });
+
+describe("identity-less native accounts", () => {
+	it("does not bind two accounts without accountId or email to the same disk row", () => {
+		const row = (n: number) => ({ refreshToken: `refresh-${n}`, accessToken: `access-${n}`, expiresAt: 2000, addedAt: n, lastUsed: n });
+		const storage: AccountStorageV3 = { version: 3, activeIndex: 0, accounts: [row(1), row(2)] };
+		const manager = new AccountManager(undefined, structuredClone(storage));
+		const disk = structuredClone(storage);
+		disk.accounts.reverse();
+		disk.accounts[0]!.accessToken = "rotated-2";
+		disk.accounts[1]!.accessToken = "rotated-1";
+		syncNativeAccountCredentials(manager, disk);
+		const byRefresh = new Map(manager.getAccountsSnapshot().map((a) => [a.refreshToken, a]));
+		expect(byRefresh.get("refresh-1")?.access).toBe("rotated-1");
+		expect(byRefresh.get("refresh-2")?.access).toBe("rotated-2");
+		expect(manager.getAccountsSnapshot().every((a) => a.enabled !== false)).toBe(true);
+	});
+});
