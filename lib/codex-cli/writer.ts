@@ -13,7 +13,11 @@ import {
 	makeAccountFingerprint,
 } from "./observability.js";
 import { tempPathFor } from "../temp-path.js";
-import { extractAccountId } from "../auth/token-utils.js";
+import { decodeJWT } from "../auth/auth.js";
+import {
+	extractAccountId,
+	resolveCodexAuthAccountId,
+} from "../auth/token-utils.js";
 
 const log = createLogger("codex-cli-writer");
 let lastCodexCliSelectionWriteAt = 0;
@@ -451,26 +455,39 @@ async function writeCodexAuthState(
 	}
 	nextTokens.access_token = accessToken;
 	nextTokens.refresh_token = refreshToken;
-	const selectedAccountId = selection.accountId?.trim();
-	if (selectedAccountId) {
-		// Codex CLI >= 0.156 checks tokens.account_id against the ChatGPT
-		// workspaces of the token (wham/accounts/check). An OpenAI platform org
-		// id ("org-...") is never one of them, so fall back to the token's own
-		// chatgpt_account_id claim instead of writing an id Codex rejects. With no
-		// claim at all, drop the field so Codex derives it from the tokens.
-		const accountId = selectedAccountId.startsWith("org-")
-			? (extractAccountId(accessToken) ??
-				extractAccountId(readTrimmedString(selection.idToken)))
-			: selectedAccountId;
+	const selectedIdToken = readTrimmedString(selection.idToken);
+	const existingIdToken = readTrimmedString(existingTokens.id_token);
+	// A stale "org-..." id already in auth.json is sanitised too, not only a
+	// selected one. With no chatgpt_account_id claim, drop the field so Codex
+	// derives it from the tokens.
+	const rawAccountId =
+		selection.accountId?.trim() || readTrimmedString(existingTokens.account_id);
+	if (rawAccountId) {
+		const accountId = resolveCodexAuthAccountId(
+			rawAccountId,
+			accessToken,
+			selectedIdToken,
+		);
 		if (accountId) {
 			nextTokens.account_id = accountId;
 		} else {
 			delete nextTokens.account_id;
 		}
 	}
-	const selectedIdToken = readTrimmedString(selection.idToken);
-	const existingIdToken = readTrimmedString(existingTokens.id_token);
-	const fallbackIdToken = selectedTokenPair ? accessToken : (existingIdToken ?? accessToken);
+	// Without a selected id_token, keep the existing one when it belongs to the
+	// same user and workspace as the new access token (a same-account resync);
+	// only another account's id_token is replaced by the access-token fallback.
+	const existingIdClaims = existingIdToken ? decodeJWT(existingIdToken) : null;
+	const accessClaims = decodeJWT(accessToken);
+	const existingIdTokenMatches =
+		typeof existingIdClaims?.sub === "string" &&
+		existingIdClaims.sub === accessClaims?.sub &&
+		!!extractAccountId(existingIdToken) &&
+		extractAccountId(existingIdToken) === extractAccountId(accessToken);
+	const fallbackIdToken =
+		selectedTokenPair && !existingIdTokenMatches
+			? accessToken
+			: (existingIdToken ?? accessToken);
 	if (selectedIdToken) {
 		nextTokens.id_token = selectedIdToken;
 	} else if (fallbackIdToken) {

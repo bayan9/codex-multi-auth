@@ -1,4 +1,5 @@
 import { extractAccountId, sanitizeEmail } from "../accounts.js";
+import { resolveCodexAuthAccountId } from "../auth/token-utils.js";
 import type { ExistingAccountInfo } from "../cli.js";
 import { loadCodexCliState } from "../codex-cli/state.js";
 import { setCodexCliActiveSelection } from "../codex-cli/writer.js";
@@ -540,7 +541,12 @@ function activeAccountMatchesCodexCliState(
 	state: Awaited<ReturnType<typeof loadCodexCliState>>,
 ): boolean {
 	if (!state) return true;
-	const accountId = account.accountId?.trim();
+	// Compare what the writer would put in auth.json, not the raw stored id: an
+	// "org-..." id is written as the token's workspace id (#700).
+	const accountId = resolveCodexAuthAccountId(
+		account.accountId,
+		account.accessToken,
+	);
 	const activeAccountId = state.activeAccountId?.trim();
 	if (accountId && activeAccountId) {
 		return accountId === activeAccountId;

@@ -966,6 +966,48 @@ describe("repair-commands direct deps coverage", () => {
 		);
 	});
 
+	it("runDoctor treats an org id as aligned with the token workspace id in auth.json (#700)", async () => {
+		const accessToken = `h.${Buffer.from(
+			JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
+			}),
+		).toString("base64url")}.s`;
+		storageMocks.loadAccounts.mockResolvedValue({
+			version: 3,
+			accounts: [
+				{
+					email: "org@example.com",
+					refreshToken: "refresh-token",
+					accessToken,
+					expiresAt: 100,
+					accountId: "org-AbC123",
+					enabled: true,
+				},
+			],
+			activeIndex: 0,
+			activeIndexByFamily: {},
+		});
+		codexCliStateMocks.loadCodexCliState.mockResolvedValue({
+			path: "/mock/auth.json",
+			activeAccountId: "ws-uuid-1",
+			activeEmail: "org@example.com",
+		});
+		const consoleSpy = silenceConsole("log");
+
+		await runDoctor(["--json"], createDeps());
+
+		const payload = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0] ?? "{}")) as {
+			checks: Array<{ key: string; severity: string; message: string }>;
+		};
+		expect(payload.checks).toContainEqual(
+			expect.objectContaining({
+				key: "active-selection-sync",
+				severity: "ok",
+				message: "Manager active account and Codex active account are aligned",
+			}),
+		);
+	});
+
 	it("runDoctor checks refresh token shape even when email is missing", async () => {
 		storageMocks.loadAccounts.mockResolvedValueOnce({
 			version: 3,

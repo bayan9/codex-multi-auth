@@ -418,6 +418,22 @@ describe("syncCodexCliActiveSelectionIfDrifted", () => {
 		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
 	});
 
+	it("treats an org id as aligned with the token workspace id the writer stores (#700)", async () => {
+		const accessToken = `h.${Buffer.from(
+			JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
+			}),
+		).toString("base64url")}.s`;
+		loadCodexCliStateMock.mockResolvedValue({ activeAccountId: "ws-uuid-1" });
+
+		const result = await syncCodexCliActiveSelectionIfDrifted(
+			storageWith([account("a", { accountId: "org-AbC123", accessToken })]),
+		);
+
+		expect(result).toBe(false);
+		expect(setCodexCliActiveSelectionMock).not.toHaveBeenCalled();
+	});
+
 	it("does nothing when there is no CLI state to compare against", async () => {
 		loadCodexCliStateMock.mockResolvedValue(null);
 

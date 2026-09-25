@@ -286,6 +286,25 @@ export function extractAccountId(accessToken?: string): string | undefined {
 }
 
 /**
+ * Maps a stored account id to the value Codex CLI accepts as tokens.account_id.
+ * Codex CLI >= 0.156 checks that field against the token's ChatGPT workspaces;
+ * an OpenAI platform org id ("org-...") is never one of them, so it resolves to
+ * the token's chatgpt_account_id claim instead, or undefined without a claim.
+ * The auth.json writer and every stored-vs-auth.json comparison must share
+ * this mapping, or org-sourced accounts read as permanently drifted.
+ */
+export function resolveCodexAuthAccountId(
+	accountId: string | undefined,
+	accessToken?: string,
+	idToken?: string,
+): string | undefined {
+	const trimmed = accountId?.trim();
+	if (!trimmed) return undefined;
+	if (!/^org-/i.test(trimmed)) return trimmed;
+	return extractAccountId(accessToken) ?? extractAccountId(idToken);
+}
+
+/**
  * Extracts the email address from OAuth tokens.
  * Checks id_token first (where OpenAI puts email), then falls back to access_token.
  */
