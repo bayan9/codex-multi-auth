@@ -6473,6 +6473,33 @@ function ensureWindowsShellShimGuards() {
 	}
 }
 
+export function getResumePickerRequest(args, cwd = process.cwd()) {
+	const baseCwd = cwd;
+	const command = findForwardedCommand(args);
+	if (command?.command !== "resume" || findForwardedSubcommand(args, command.index)) return null;
+	const configArgs = [];
+	let showAll = false;
+	let includeNonInteractive = false;
+	for (let i = 0; i < args.length; i += 1) {
+		const arg = args[i];
+		if (arg === "--") break;
+		if (consumesNextArg(arg) && args[i + 1] === undefined) return null;
+		if (["--last", "--help", "-h", "--remote"].includes(arg) || arg.startsWith("--remote=")) return null;
+		if (arg === "--all") showAll = true;
+		if (arg === "--include-non-interactive") includeNonInteractive = true;
+		if (arg === "-C" || arg === "--cd") cwd = resolvePath(baseCwd, args[i + 1]);
+		else if (arg.startsWith("--cd=")) cwd = resolvePath(baseCwd, arg.slice(5));
+		else if (arg.startsWith("-C") && arg.length > 2) cwd = resolvePath(baseCwd, arg.slice(2));
+		if (["-c", "--config", "-p", "--profile", "--enable", "--disable"].includes(arg)) {
+			configArgs.push(arg, args[i + 1]);
+		} else if (/^--(config|profile|enable|disable)=/.test(arg) || /^-[cp].+/.test(arg)) {
+			configArgs.push(arg);
+		}
+		i = skipOptionValueSpan(args, i);
+	}
+	return { commandIndex: command.index, cwd, configArgs, showAll, includeNonInteractive };
+}
+
 async function main() {
 	hydrateCliVersionEnv();
 
@@ -6527,7 +6554,21 @@ async function main() {
 		console.error(forcedAccount.error);
 		return 1;
 	}
-	const forwardArgs = forcedAccount.forwardArgs;
+	const forwardArgs = [...forcedAccount.forwardArgs];
+	if (process.stdin.isTTY && process.stdout.isTTY && !bypass) {
+		const pickerRequest = getResumePickerRequest(forwardArgs);
+		if (pickerRequest && await isRuntimeRotationProxyEnabled(forwardArgs)) {
+			try {
+				const { pickResumeThread } = await import("../dist/lib/runtime/resume-picker.js");
+				const id = await pickResumeThread({ ...pickerRequest, codexBin: realCodexBin });
+				if (!id) return 0;
+				forwardArgs.splice(pickerRequest.commandIndex + 1, 0, id);
+			} catch (error) {
+				// Discovery is optional: fall back to native `codex resume` with the original args.
+				console.error(`Could not list saved Codex sessions: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
 
 	await ensurePersistedCodexFileAuthStore();
 	await autoSyncManagerActiveSelectionIfEnabled();
