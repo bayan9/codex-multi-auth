@@ -15,6 +15,7 @@ import {
 	findMatchingAccountIndex,
 	withAccountStorageTransaction,
 	ACCOUNT_STORAGE_UNREADABLE,
+	recordPendingAuth,
 } from "./storage.js";
 import type { AccountIdSource, OAuthAuthDetails } from "./types.js";
 import type { CodexCliMirror, Workspace } from "./storage/public-types.js";
@@ -1933,14 +1934,34 @@ export class AccountManager {
 				? this.getAccountByIdentity(source, auth)
 				: null;
 			if (live) {
+				const priorRefreshToken = live.refreshToken;
 				this.updateFromAuth(live, auth);
 				live.enabled = true;
 				this.clearAccountCooldown(live);
 				this.clearAuthFailures(live);
+				// The debounced save needs this process to survive and the file to
+				// unlock. Journal the rotated credential beside the pool so the next
+				// load (any process) applies it even if neither happens.
+				try {
+					await runWithStoragePathState(this.storagePathState, () =>
+						recordPendingAuth(getStoragePath(), {
+							priorRefreshToken,
+							refreshToken: auth.refresh,
+							accessToken: auth.access,
+							expiresAt: auth.expires,
+							at: nowMs(),
+						}),
+					);
+					log.warn("Account storage unreadable; rotated credential journaled until it can be saved", {
+						sourceIndex: source.index,
+					});
+				} catch (journalError) {
+					log.error("Account storage unreadable and the rotated credential could not be journaled; it is only in memory. Keep this process running until the accounts file is readable, or the account will need a re-login.", {
+						sourceIndex: source.index,
+						error: String(journalError),
+					});
+				}
 				this.saveToDiskDebounced();
-				log.warn("Account storage unreadable; rotated credential kept in memory until it can be saved", {
-					sourceIndex: source.index,
-				});
 				return live;
 			}
 			throw new CodexAuthError(ERROR_MESSAGES.TOKEN_REFRESH_FAILED, {

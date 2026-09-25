@@ -319,3 +319,27 @@ it("keeps a rotated refresh token while the primary stays locked and saves it on
  await manager.flushPendingSave();
  expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated");
 });
+
+it("recovers a rotated refresh token in a new process when the old one exits before saving", async () => {
+ const { vi } = await import("vitest");
+ const { promises: fs, existsSync } = await import("node:fs");
+ const manager = await setup();
+ const path = getStoragePath();
+ const original = fs.readFile.bind(fs);
+ const locked = vi.spyOn(fs, "readFile").mockImplementation((async (file: unknown, ...rest: unknown[]) => {
+  if (String(file) === path) throw Object.assign(new Error("locked"), { code: "EBUSY" });
+  return (original as (...args: unknown[]) => Promise<unknown>)(file, ...rest);
+ }) as typeof fs.readFile);
+ try {
+  await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, { type: "oauth", access: "fixture-fresh", refresh: "fixture-rotated", expires: Date.now() + 3600000 });
+ } finally { locked.mockRestore(); }
+ // The first process dies here: its debounced save never runs.
+ expect(JSON.parse(await readFile(path, "utf8")).accounts[0].refreshToken).toBe("fixture-first");
+ const next = new AccountManager(undefined, await loadAccounts());
+ expect(next.getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated");
+ await next.saveToDisk();
+ expect(JSON.parse(await readFile(path, "utf8")).accounts[0].refreshToken).toBe("fixture-rotated");
+ expect(existsSync(path + ".pending-auth.json")).toBe(false);
+ await manager.flushPendingSave();
+ expect((await loadAccounts())?.accounts[0]?.refreshToken).toBe("fixture-rotated");
+});

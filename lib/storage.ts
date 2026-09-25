@@ -148,6 +148,8 @@ import {
 } from "./storage/transactions.js";
 import { withFileTransactionLock } from "./storage/file-lock.js";
 import { mergeAccountSnapshot } from "./storage/snapshot-merge.js";
+import { applyPendingAuth, getPendingAuthPath, prunePendingAuth, recordPendingAuth } from "./storage/pending-auth.js";
+export { recordPendingAuth };
 const loadedAccountSnapshots = new WeakMap<AccountStorageV3, AccountStorageV3>();
 
 function withStorageLock<T>(action: () => Promise<T>): Promise<T> {
@@ -1487,7 +1489,7 @@ export function readPinAndGenFromDisk(
  * @returns AccountStorageV3 if file exists and is valid, null otherwise
  */
 export async function loadAccounts(): Promise<AccountStorageV3 | null> {
-	const storage = await loadAccountsInternal(saveAccounts);
+	const storage = await applyPendingAuth(getStoragePath(), await loadAccountsInternal(saveAccounts));
 	if (storage) loadedAccountSnapshots.set(storage, structuredClone(storage));
 	return storage;
 }
@@ -1901,6 +1903,14 @@ async function loadAccountsForExport(): Promise<AccountStorageV3 | null> {
 }
 
 async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
+	await saveAccountsUnlockedToDisk(storage);
+	// A persisted (or superseded) pending rotated credential is no longer needed.
+	await prunePendingAuth(getStoragePath(), storage).catch((error) => {
+		log.warn("Failed to prune pending rotated credentials", { error: String(error) });
+	});
+}
+
+async function saveAccountsUnlockedToDisk(storage: AccountStorageV3): Promise<void> {
 	const path = getStoragePath();
 	const resetMarkerPath = getIntentionalResetMarkerPath(path);
 	const walPath = getAccountsWalPath(path);
@@ -2054,13 +2064,15 @@ async function loadPrimaryAccountsForMerge(): Promise<AccountStorageV3 | null> {
 			isRecord,
 		});
 		if (!normalized) throw new Error("Invalid primary account storage");
-		return normalized;
+		// The merge base must carry pending rotated credentials too, or a merge
+		// would keep the spent token that is still on disk.
+		return applyPendingAuth(path, normalized);
 	} catch (cause) {
 		const code = (cause as NodeJS.ErrnoException).code;
 		// The journal is written before the primary and removed after it, so a
 		// journal beside a missing primary is the newest state, not a stale
 		// backup. Without one, the deletion is authoritative.
-		if (code === "ENOENT") return loadAccountsFromJournal(path, { silent: true });
+		if (code === "ENOENT") return applyPendingAuth(path, await loadAccountsFromJournal(path, { silent: true }));
 		// A locked or torn primary may hold newer state than any backup, so it is
 		// never replaced by a recovered copy here.
 		throw Object.assign(
@@ -2223,7 +2235,7 @@ export async function saveAccounts(storage: AccountStorageV3): Promise<void> {
  */
 export async function clearAccounts(): Promise<void> {
 	const path = getStoragePath();
-	return clearAccountsEntry({
+	await clearAccountsEntry({
 		path,
 		withStorageLock,
 		resetMarkerPath: getIntentionalResetMarkerPath(path),
@@ -2235,6 +2247,8 @@ export async function clearAccounts(): Promise<void> {
 			log.error(message, details);
 		},
 	});
+	// Pending rotated credentials belong to the cleared pool.
+	await fs.rm(getPendingAuthPath(path), { force: true });
 }
 
 export async function loadFlaggedAccounts(): Promise<FlaggedAccountStorageV1> {
