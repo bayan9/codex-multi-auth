@@ -5210,14 +5210,40 @@ it("keeps session affinity when the client disconnects mid-stream",async()=>{
 
 describe("request-level capability rejections",()=>{
  const reject=()=>Response.json({error:{code:"invalid_value",param:"reasoning.effort",message:"Unsupported effort fixture"}},{status:400});
- it.each([2,3])("forwards the upstream 400 after two accounts reject the effort (%i accounts)",async count=>{
-  const manager=new AccountManager(undefined,createStorage(Date.now(),count));
-  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common",supported_reasoning_levels:[{effort:"ultra"}]}]}):reject());
+ const catalog=()=>Response.json({models:[{slug:"common",supported_reasoning_levels:[{effort:"ultra"}]}]});
+ const rejectNumbered=(n:number)=>Response.json({error:{code:"invalid_value",param:"reasoning.effort",message:`Unsupported effort fixture ${n}`}},{status:400});
+ const run=async(storage:AccountStorageV3,respond:(n:number)=>Response)=>{
+  const manager=new AccountManager(undefined,storage);let n=0;
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?catalog():respond(++n));
   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
   const response=await postResponses(proxy,{model:"common",reasoning:{effort:"ultra"},input:"fixture"});
+  return {response,inference:calls.filter(c=>c.url.endsWith("/responses"))};
+ };
+ it("keeps trying distinct workspaces and succeeds on the third",async()=>{
+  const {response,inference}=await run(createStorage(Date.now(),3),n=>n<3?rejectNumbered(n):textEventStream());
+  expect(response.status).toBe(200);await response.text();
+  expect(inference).toHaveLength(3);
+  expect(new Set(inference.map(c=>c.headers.get("chatgpt-account-id"))).size).toBe(3);
+ });
+ it("tries a workspace shared by two accounts only once",async()=>{
+  const storage=createStorage(Date.now(),2);for(const account of storage.accounts)account.accountId="shared_workspace";
+  const {response,inference}=await run(storage,n=>rejectNumbered(n));
+  expect(response.status).toBe(400);await response.text();
+  expect(inference).toHaveLength(1);
+ });
+ it("reports a 429 that follows a capability rejection instead of the stale 400",async()=>{
+  const {response,inference}=await run(createStorage(Date.now(),2),n=>n===1?rejectNumbered(n):new Response(JSON.stringify({error:{code:"rate_limit_exceeded"}}),{status:429,headers:{"content-type":"application/json","retry-after":"30"}}));
+  expect(response.status).not.toBe(400);
+  const body=await response.json();
+  expect(body.error.code).toBe("codex_runtime_rotation_pool_exhausted");
+  expect(body.error.reason).toBe("rate-limit");
+  expect(inference).toHaveLength(2);
+ });
+ it("forwards the last upstream 400 when every workspace rejects the setting",async()=>{
+  const {response,inference}=await run(createStorage(Date.now(),3),n=>rejectNumbered(n));
   expect(response.status).toBe(400);
-  expect((await response.json()).error).toMatchObject({code:"invalid_value",param:"reasoning.effort"});
-  expect(calls.filter(c=>c.url.endsWith("/responses"))).toHaveLength(2);
+  expect((await response.json()).error).toMatchObject({code:"invalid_value",param:"reasoning.effort",message:"Unsupported effort fixture 3"});
+  expect(inference).toHaveLength(3);
  });
  it("forwards a capability 400 unchanged on a non-native proxy without rotating",async()=>{
   const manager=new AccountManager(undefined,createStorage(Date.now(),3));

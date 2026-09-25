@@ -1564,7 +1564,11 @@ async function handleRequestInner(
 		// The upstream's own capability 400/403/404, forwarded instead of a
 		// synthetic 503 when no other account can take the request.
 		let lastCapabilityRejection: { status: number; body: string; headers: Record<string, string>; account: ManagedAccount } | undefined;
-		let settingRejections = 0;
+		// True while no other failure has followed the last capability rejection.
+		let capabilityRejectionIsLatest = false;
+		// Entitlements belong to the workspace, so each workspace is tried at most
+		// once per request even when several accounts share it.
+		const rejectedWorkspaces = new Set<string>();
 		const forwardCapabilityRejection = async (rejection: NonNullable<typeof lastCapabilityRejection>): Promise<void> => {
 			res.writeHead(rejection.status, rejection.headers);
 			res.end(rejection.body);
@@ -2163,6 +2167,7 @@ async function handleRequestInner(
 					preemptiveDeferral.reason ?? "quota-near-exhaustion",
 				);
 				exhaustionReason = "rate-limit";
+				capabilityRejectionIsLatest = false;
 				accountManager.markRateLimitedWithReason(
 					selected,
 					preemptiveDeferral.waitMs,
@@ -2190,6 +2195,7 @@ async function handleRequestInner(
 			if (!admission.ok) {
 				accountSkipReasons.set(selected.index, admission.reason);
 				exhaustionReason = "rate-limit";
+				capabilityRejectionIsLatest = false;
 				// Neither gate can change inside this loop -- nothing here refills the
 				// bucket or closes a circuit -- and a pin has no other account to move
 				// to, so re-selecting would burn the whole 16-iteration ceiling
@@ -2219,6 +2225,7 @@ async function handleRequestInner(
 				// without reading the map at all, and the budget-boundary block
 				// below already records "auth-failure" for a pin out of retries.
 				exhaustionReason = "auth-failure";
+				capabilityRejectionIsLatest = false;
 				if (refreshed.invalidated) {
 					// Refresh endpoint explicitly revoked the token. Stop cascade:
 					// return auth error to client instead of rotating to the next account.
@@ -2266,10 +2273,23 @@ async function handleRequestInner(
 				// re-selects the still-broken account.
 				accountManager.saveToDiskDebounced();
 				exhaustionReason = "auth-failure";
+				capabilityRejectionIsLatest = false;
 				transientAttempts += 1;
 				transientExhaustionReason = "auth-failure";
 				state.status.retries += 1;
 				noteRotation();
+				continue;
+			}
+
+			if (rejectedWorkspaces.has(accountId)) {
+				// This workspace already rejected the model or setting for this request.
+				refundConsumedPoolToken(refreshed.account);
+				if (pendingScopes && pendingScopes.length > 1) {
+					pendingScopes.shift();
+					attemptedIndexes.delete(refreshed.account.index);
+				} else {
+					policyDecision?.blockedAccountIndexes.add(refreshed.account.index);
+				}
 				continue;
 			}
 
@@ -2394,6 +2414,7 @@ async function handleRequestInner(
 				accountManager.saveToDiskDebounced();
 				accountSkipReasons.set(refreshed.account.index, "network-error");
 				exhaustionReason = "network-error";
+				capabilityRejectionIsLatest = false;
 				transientAttempts += 1;
 				transientExhaustionReason = "network-error";
 				state.status.retries += 1;
@@ -2434,9 +2455,7 @@ async function handleRequestInner(
      const effort=isRecord(body?.reasoning)&&typeof body.reasoning.effort==="string"?body.reasoning.effort:undefined;
      const tier=typeof body?.service_tier==="string"?body.service_tier:undefined;
      (state.capabilityFailures??=new RuntimeCapabilityFailures(state.now)).record(requestScope?.id ?? catalogAccountKey(refreshed.account),context.model,failure,effort,tier);
-     // A reasoning/speed value rejected twice is a request problem, not an
-     // entitlement difference: forward the upstream 400 instead of trying every account.
-     if(failure!=="model" && ++settingRejections>=2){await forwardCapabilityRejection(lastCapabilityRejection);return;}
+     rejectedWorkspaces.add(accountId);capabilityRejectionIsLatest=true;
      if(pendingScopes && pendingScopes.length>1){
       pendingScopes.shift();attemptedIndexes.delete(refreshed.account.index);refundConsumedPoolToken(refreshed.account);state.status.retries++;continue;
      }
@@ -2496,6 +2515,7 @@ async function handleRequestInner(
 				);
 				accountManager.saveToDiskDebounced();
 				exhaustionReason = "rate-limit";
+				capabilityRejectionIsLatest = false;
 				transientAttempts += 1;
 				transientExhaustionReason = "rate-limit";
 				state.status.retries += 1;
@@ -2530,6 +2550,7 @@ async function handleRequestInner(
 					}
 					state.sessionAffinityStore?.forgetSession(context.sessionKey);
 					exhaustionReason = "deactivated";
+					capabilityRejectionIsLatest = false;
 					state.status.retries += 1;
 					noteRotation();
 					continue;
@@ -2650,6 +2671,7 @@ async function handleRequestInner(
 				);
 				accountManager.saveToDiskDebounced();
 				exhaustionReason = "auth-failure";
+				capabilityRejectionIsLatest = false;
 				transientAttempts += 1;
 				transientExhaustionReason = "auth-failure";
 				state.status.retries += 1;
@@ -2702,6 +2724,7 @@ async function handleRequestInner(
 				);
 				accountManager.saveToDiskDebounced();
 				exhaustionReason = "server-error";
+				capabilityRejectionIsLatest = false;
 				transientAttempts += 1;
 				transientExhaustionReason = "server-error";
 				state.status.retries += 1;
@@ -3027,7 +3050,9 @@ async function handleRequestInner(
 			return;
 		}
 
-		if (lastCapabilityRejection && !isThreadGoalRequest) {
+		// Forward the upstream capability rejection only when it is what ended the
+		// request; a later 429/5xx/transport failure reports itself instead.
+		if (lastCapabilityRejection && capabilityRejectionIsLatest && !isThreadGoalRequest) {
 			await forwardCapabilityRejection(lastCapabilityRejection);
 			return;
 		}
