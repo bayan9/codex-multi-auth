@@ -1,5 +1,6 @@
 import type { DashboardDisplaySettings } from "../../dashboard-settings.js";
 import { extractAccountEmail, sanitizeEmail } from "../../accounts.js";
+import { shouldUpdateAccountIdFromToken } from "../../auth/token-utils.js";
 import {
 	buildForecastExplanation,
 	type ForecastAccountResult,
@@ -300,7 +301,12 @@ export async function runForecastCommand(
 			if (refreshedEmail) {
 				refreshPatch.email = refreshedEmail;
 			}
-			if (refreshedAccountId) {
+			// Only a token-derived id follows the new token (as on every other
+			// refresh path); an explicit (manual) or org binding stays.
+			if (
+				refreshedAccountId &&
+				shouldUpdateAccountIdFromToken(account.accountIdSource, account.accountId)
+			) {
 				refreshPatch.accountId = refreshedAccountId;
 				refreshPatch.accountIdSource = "token";
 			}

@@ -14,7 +14,7 @@ import {
 	withAccountStorageTransaction,
 } from "./storage.js";
 import type { AccountIdSource, OAuthAuthDetails } from "./types.js";
-import type { Workspace } from "./storage/public-types.js";
+import type { CodexCliMirror, Workspace } from "./storage/public-types.js";
 import { MODEL_FAMILIES, type ModelFamily } from "./request/helpers/model-map.js";
 import {
 	getHealthTracker,
@@ -84,6 +84,7 @@ export {
 } from "./codex-cli/state.js";
 
 import {
+	codexCliAccountIdFor,
 	extractAccountId,
 	extractAccountEmail,
 	shouldUpdateAccountIdFromToken,
@@ -327,6 +328,7 @@ export interface ManagedAccount {
 	consecutiveAuthFailures?: number;
 	workspaces?: Workspace[];
 	currentWorkspaceIndex?: number;
+	codexCliMirror?: CodexCliMirror;
 }
 
 export class AccountManager {
@@ -597,6 +599,7 @@ export class AccountManager {
 						authInvalidationErrorCode: account.authInvalidationErrorCode,
 						workspaces: account.workspaces,
 						currentWorkspaceIndex: account.currentWorkspaceIndex,
+						codexCliMirror: account.codexCliMirror,
 					};
 				})
 				.filter((account): account is ManagedAccount => account !== null);
@@ -874,7 +877,7 @@ export class AccountManager {
 		const account = this.accounts[index];
 		if (!account) return;
 		await setCodexCliActiveSelection({
-			accountId: account.accountId,
+			accountId: codexCliAccountIdFor(account, account.access),
 			email: account.email,
 			accessToken: account.access,
 			refreshToken: account.refreshToken,
@@ -1704,6 +1707,7 @@ export class AccountManager {
 						: undefined,
 					workspaces: account.workspaces,
 					currentWorkspaceIndex: account.currentWorkspaceIndex,
+					codexCliMirror: account.codexCliMirror,
 				};
 			}),
 			activeIndex,

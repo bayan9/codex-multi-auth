@@ -13,7 +13,7 @@ User-facing capability map for Codex CLI multi-account OAuth, account switching,
 | Account dedupe and identity normalization | Avoid duplicate saved account rows | login flow |
 | Explicit active-account switching | Persist a manual pin by index instead of relying on hidden state | `codex-multi-auth switch <index>` |
 | Clear manual pin | Drop the persisted pin so hybrid rotation resumes | `codex-multi-auth unpin` |
-| Workspace selection | List or set personal vs business/team workspaces under one account | `codex-multi-auth workspace <account> [workspace]` |
+| Workspace selection | List or set personal vs business/team workspaces under one account; a fresh login verifies the automatic choice against the backend's authorized accounts before persisting it | `codex-multi-auth workspace <account> [workspace]` |
 | Fast and deep health checks | See whether the current pool is usable before a coding session, including when each quota window resets | `codex-multi-auth check` |
 | Flagged-account verification and restore | Recover accounts sidelined during prior failures | `codex-multi-auth verify-flagged` |
 
@@ -90,7 +90,7 @@ All governance data stays under `~/.codex/multi-auth`. Nothing here is a hosted 
 
 | Capability | What it gives you | Primary entry |
 | --- | --- | --- |
-| Safe repair workflow | Detects and repairs known local storage inconsistencies | `codex-multi-auth fix` |
+| Safe repair workflow | Detects and repairs known local storage inconsistencies, including (with `--live`) an org-sourced workspace id the backend no longer authorizes | `codex-multi-auth fix` |
 | Diagnostics with optional repair | One command to inspect and optionally fix common failures | `codex-multi-auth doctor` |
 | Backup and WAL recovery | Safer persistence when local writes are interrupted or partially applied | storage runtime |
 | Named backup export / restore | Recover account pools during empty-pool onboarding | login restore menu |

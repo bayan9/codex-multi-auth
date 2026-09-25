@@ -193,6 +193,9 @@ export const AccountMetadataV3Schema = z.object({
 	// silently vanish after one read/write round-trip.
 	workspaces: z.array(WorkspaceSchema).optional(),
 	currentWorkspaceIndex: z.number().optional(),
+	codexCliMirror: z
+		.object({ forAccountId: z.string().min(1), accountId: z.string().min(1) })
+		.optional(),
 });
 
 /**

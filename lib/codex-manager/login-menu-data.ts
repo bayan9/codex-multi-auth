@@ -1,6 +1,7 @@
 import { extractAccountId, sanitizeEmail } from "../accounts.js";
 import {
 	codexAuthAccountIdsMatch,
+	codexCliAccountIdFor,
 	codexCliActiveIdentity,
 	isOpenAiOrgId,
 } from "../auth/token-utils.js";
@@ -550,7 +551,9 @@ function activeAccountMatchesCodexCliState(
 	if (isOpenAiOrgId(state.authFileAccountId)) return false;
 	// A stored "org-..." id is written to auth.json as the token's workspace
 	// id, while the legacy accounts.json keeps the raw id (#700); match either.
-	const accountId = account.accountId?.trim();
+	// Compared as the writer would write it: through the account's
+	// CodexCliMirror, or an explicit id the backend refused comes back here.
+	const accountId = codexCliAccountIdFor(account, account.accessToken)?.trim();
 	const activeIdentity = codexCliActiveIdentity(state);
 	if (accountId && activeIdentity.accountId) {
 		return codexAuthAccountIdsMatch(
@@ -586,7 +589,7 @@ export async function syncCodexCliActiveSelectionIfDrifted(
 			return false;
 		}
 		return setCodexCliActiveSelection({
-			accountId: account.accountId,
+			accountId: codexCliAccountIdFor(account, account.accessToken),
 			email: account.email,
 			accessToken: account.accessToken,
 			refreshToken: account.refreshToken,
