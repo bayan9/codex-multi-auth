@@ -1567,6 +1567,12 @@ export async function runFix(
 		storage.accounts,
 	);
 
+	// ~/.codex/auth.json still carries the rejected id for the active account,
+	// and Codex CLI keeps refusing it until something rewrites that file. The
+	// mirror is taken from the committed snapshot, not this run's in-memory
+	// view: another process may have switched the active account since load,
+	// and syncing then would put the old selection back into auth.json.
+	let committedReboundActive: AccountMetadataV3 | undefined;
 	if (accountStorageChanged && !options.dryRun) {
 		await withAccountStorageTransaction(async (loadedStorage, persist) => {
 			const nextStorage = loadedStorage
@@ -1574,25 +1580,33 @@ export async function runFix(
 				: createEmptyAccountStorage();
 			applyAccountStorageMutations(nextStorage, accountMutations);
 			await persist(nextStorage);
+			const committedActive =
+				nextStorage.accounts[deps.resolveActiveIndex(nextStorage, "codex")];
+			const isRebound =
+				committedActive !== undefined &&
+				[...reboundIndexes].some((index) => {
+					const rebound = storage.accounts[index];
+					return (
+						rebound !== undefined &&
+						rebound.accountId === committedActive.accountId &&
+						rebound.refreshToken === committedActive.refreshToken
+					);
+				});
+			committedReboundActive =
+				isRebound && committedActive?.enabled !== false
+					? structuredClone(committedActive)
+					: undefined;
 		});
 	}
 
-	// ~/.codex/auth.json still carries the rejected id for the active account,
-	// and Codex CLI keeps refusing it until something rewrites that file.
 	let codexActiveSynced: boolean | null = null;
-	const reboundActiveAccount = storage.accounts[activeIndex];
-	if (
-		!options.dryRun &&
-		reboundIndexes.has(activeIndex) &&
-		reboundActiveAccount &&
-		reboundActiveAccount.enabled !== false
-	) {
+	if (committedReboundActive) {
 		codexActiveSynced = await setCodexCliActiveSelection({
-			accountId: reboundActiveAccount.accountId,
-			email: reboundActiveAccount.email,
-			accessToken: reboundActiveAccount.accessToken,
-			refreshToken: reboundActiveAccount.refreshToken,
-			expiresAt: reboundActiveAccount.expiresAt,
+			accountId: committedReboundActive.accountId,
+			email: committedReboundActive.email,
+			accessToken: committedReboundActive.accessToken,
+			refreshToken: committedReboundActive.refreshToken,
+			expiresAt: committedReboundActive.expiresAt,
 		});
 	}
 

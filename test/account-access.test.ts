@@ -396,4 +396,56 @@ describe("workspace metadata follows a rewritten account id", () => {
 
 		expect(account.accountLabel).toBe("");
 	});
+
+	// Greptile P1: merged into an existing row whose pointer is on the rejected
+	// org, the account-pool merge keeps that pointer while the org survives in
+	// the incoming list, and the plugin host keeps sending it.
+	it("moves an existing row's workspace pointer off the rejected org on a constrained login", async () => {
+		const { buildUpdatedAccount } = await import(
+			"../lib/codex-manager/account-pool-write.js"
+		);
+		const { selection } = applyAuthorizedAccountConstraint(
+			{
+				accountIdOverride: "org-team",
+				accountIdSource: "org" as const,
+				accountLabel: "Team",
+				workspaces: [
+					{ id: "personal-id", name: "Personal", enabled: true },
+					{ id: "org-team", name: "Team", enabled: true, isDefault: true },
+				],
+			},
+			authorized,
+		);
+		const existing = {
+			accountId: "org-team",
+			accountIdSource: "org" as const,
+			accountLabel: "Team",
+			email: "a@example.com",
+			refreshToken: "refresh",
+			addedAt: 1,
+			lastUsed: 1,
+			workspaces: [
+				{ id: "personal-id", name: "Personal", enabled: true },
+				{ id: "org-team", name: "Team", enabled: true, isDefault: true },
+			],
+			currentWorkspaceIndex: 1,
+		};
+
+		const { account } = buildUpdatedAccount(existing, {
+			accountId: selection.accountIdOverride,
+			accountIdSource: selection.accountIdSource,
+			accountLabel: selection.accountLabel,
+			refreshToken: "refresh-next",
+			workspaces: selection.workspaces,
+			now: 2,
+		});
+
+		expect(account.accountId).toBe("personal-id");
+		expect(account.workspaces?.[account.currentWorkspaceIndex ?? 0]?.id).toBe(
+			"personal-id",
+		);
+		expect(account.workspaces?.map((workspace) => workspace.id)).not.toContain(
+			"org-team",
+		);
+	});
 });

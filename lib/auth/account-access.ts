@@ -154,6 +154,12 @@ export interface AccountSelectionLike {
  * explicit org/manual choice is. The label follows the new id too; an empty
  * label (not undefined) is deliberate, because the account-pool merge keeps
  * the saved label on undefined and would go on naming the rejected workspace.
+ *
+ * The rejected workspace is dropped and the authorized one marked default.
+ * Merging into an existing row keeps its workspace pointer while that
+ * pointer's id survives the merge, then falls back to the default workspace;
+ * the plugin host sends the pointed-at id ahead of accountId, so leaving the
+ * rejected workspace in place would keep it selected.
  */
 export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>(
 	selection: T,
@@ -165,15 +171,25 @@ export function applyAuthorizedAccountConstraint<T extends AccountSelectionLike>
 	const result = constrainSelectionToAuthorized(current, authorized);
 	if (!result.changed) return { selection, result };
 
+	const authorizedTracked = selection.workspaces?.some(
+		(workspace) => workspace.id === result.accountId,
+	);
+	const workspaces = selection.workspaces
+		?.filter((workspace) => workspace.id !== result.rejected)
+		.map((workspace) =>
+			authorizedTracked
+				? { ...workspace, isDefault: workspace.id === result.accountId }
+				: workspace,
+		);
 	return {
 		selection: {
 			...selection,
 			accountIdOverride: result.accountId,
 			accountIdSource: "token",
 			accountLabel:
-				selection.workspaces?.find(
-					(workspace) => workspace.id === result.accountId,
-				)?.name ?? "",
+				workspaces?.find((workspace) => workspace.id === result.accountId)
+					?.name ?? "",
+			...(workspaces ? { workspaces } : {}),
 		},
 		result,
 	};

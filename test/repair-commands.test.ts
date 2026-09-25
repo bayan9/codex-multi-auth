@@ -74,12 +74,21 @@ vi.mock("../lib/forecast.js", () => ({
 	recommendForecastAccount: recommendForecastAccountMock,
 }));
 
-vi.mock("../lib/accounts.js", () => ({
-	extractAccountEmail: extractAccountEmailMock,
-	extractAccountId: extractAccountIdMock,
-	formatAccountLabel: formatAccountLabelMock,
-	sanitizeEmail: sanitizeEmailMock,
-}));
+vi.mock("../lib/accounts.js", async () => {
+	// The real identity helpers, so account-credentials.ts can be exercised
+	// unmocked where a test asks for it.
+	const tokenUtils = await vi.importActual<
+		typeof import("../lib/auth/token-utils.js")
+	>("../lib/auth/token-utils.js");
+	return {
+		extractAccountEmail: extractAccountEmailMock,
+		extractAccountId: extractAccountIdMock,
+		formatAccountLabel: formatAccountLabelMock,
+		sanitizeEmail: sanitizeEmailMock,
+		resolveRequestAccountId: tokenUtils.resolveRequestAccountId,
+		shouldUpdateAccountIdFromToken: tokenUtils.shouldUpdateAccountIdFromToken,
+	};
+});
 
 vi.mock("../lib/quota-cache.js", async () =>
 	(await import("./helpers/cli-test-fixtures.js")).quotaCacheModuleMock(
@@ -1969,5 +1978,123 @@ describe("repair-commands direct deps coverage", () => {
 		}
 
 		expect(codexCliWriterMocks.setCodexCliActiveSelection).not.toHaveBeenCalled();
+	});
+
+	// Greptile P1: the auth.json mirror must come from the committed snapshot.
+	// Here another process switched the active account to row 2 after this run
+	// loaded storage, so syncing the rebound row 1 would undo that switch.
+	it("runFix does not sync Codex auth state when the committed active account is no longer the rebound one", async () => {
+		quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+		const loaded = orgAccountStorage(Date.now() + 60_000);
+		storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(loaded));
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+		quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+			status: 200,
+			model: "gpt-5-codex",
+			primary: {},
+			secondary: {},
+		});
+		const committed = {
+			...structuredClone(loaded),
+			accounts: [
+				...structuredClone(loaded.accounts),
+				{
+					email: "other@example.com",
+					refreshToken: "other-refresh",
+					accessToken: "other-access",
+					expiresAt: Date.now() + 60_000,
+					accountId: "other-id",
+					accountIdSource: "token" as const,
+					enabled: true,
+				},
+			],
+			activeIndex: 1,
+		};
+		storageMocks.withAccountStorageTransaction.mockImplementation(
+			async (fn: (storage: unknown, persist: unknown) => Promise<void>) =>
+				fn(committed, vi.fn(async () => {})),
+		);
+		silenceConsole("log");
+
+		await runFix(
+			["--json", "--live"],
+			createDeps({
+				hasUsableAccessToken: () => true,
+				resolveActiveIndex: (storage) => storage.activeIndex,
+				reboundUnauthorizedAccountIdentity: orgRebinder(),
+			}),
+		);
+
+		expect(storageMocks.withAccountStorageTransaction).toHaveBeenCalledTimes(1);
+		expect(codexCliWriterMocks.setCodexCliActiveSelection).not.toHaveBeenCalled();
+	});
+
+	// A rebound row is "token"-sourced, so the next refresh lets the real
+	// applyTokenAccountIdentity follow the token's account claim. That claim is
+	// the account the token was minted for, which is the authorized default, so
+	// a second `fix --live` must leave the rebound id where it is.
+	it("runFix keeps a rebound id across a second --live run that refreshes the token", async () => {
+		const { applyTokenAccountIdentity, resolveStoredAccountIdentity } =
+			await import("../lib/codex-manager/account-credentials.js");
+		const { reboundUnauthorizedAccountIdentity } = await import(
+			"../lib/auth/account-access.js"
+		);
+		const fetchMock = vi.fn(async () =>
+			new Response(
+				JSON.stringify({ accounts: [{ id: "personal-id" }], default_account_id: "personal-id" }),
+				{ status: 200 },
+			),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			let onDisk = orgAccountStorage(Date.now() + 60_000);
+			storageMocks.withAccountStorageTransaction.mockImplementation(
+				async (fn: (storage: unknown, persist: unknown) => Promise<void>) =>
+					fn(structuredClone(onDisk), async (next: typeof onDisk) => {
+						onDisk = structuredClone(next);
+					}),
+			);
+			quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+			quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+				status: 200,
+				model: "gpt-5-codex",
+				primary: {},
+				secondary: {},
+			});
+			const deps = createDeps({
+				applyTokenAccountIdentity,
+				resolveStoredAccountIdentity,
+				reboundUnauthorizedAccountIdentity: (account, token) =>
+					reboundUnauthorizedAccountIdentity(account, token),
+			});
+			silenceConsole("log");
+
+			storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(onDisk));
+			await runFix(["--json", "--live"], { ...deps, hasUsableAccessToken: () => true });
+			expect(onDisk.accounts[0]).toMatchObject({
+				accountId: "personal-id",
+				accountIdSource: "token",
+			});
+
+			refreshQueueMocks.queuedRefresh.mockReset();
+			refreshQueueMocks.queuedRefresh.mockResolvedValue({
+				type: "success",
+				access: "personal-access-fresh",
+				refresh: "personal-refresh-next",
+				expires: Date.now() + 120_000,
+			});
+			extractAccountIdMock.mockReturnValue("personal-id");
+			storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(onDisk));
+			await runFix(["--json", "--live"], { ...deps, hasUsableAccessToken: () => false });
+
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(onDisk.accounts[0]).toMatchObject({
+				accountId: "personal-id",
+				accountIdSource: "token",
+				accessToken: "personal-access-fresh",
+			});
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 });
