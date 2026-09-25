@@ -1524,7 +1524,7 @@ async function handleRequestInner(
 				await usageRecorder.record({
 					outcome: forwarded && upstream.ok ? "success" : "failure",
 					statusCode: upstream.status,
-					errorCode: forwarded ? null : responseOutcome.finish().errorCode ?? "stream_forward_failed",
+					errorCode: responseOutcome.finish().errorCode ?? (forwarded ? null : "stream_forward_failed"),
 					...(scanner.result() ?? {}),
 				});
             } catch (error) {
@@ -2828,7 +2828,7 @@ async function handleRequestInner(
 			await usageRecorder.record({
 				outcome: forwarded && upstream.ok ? "success" : "failure",
 				statusCode: upstream.status,
-				errorCode: forwarded ? null : responseOutcome.finish().errorCode ?? "stream_forward_failed",
+				errorCode: responseOutcome.finish().errorCode ?? (forwarded ? null : "stream_forward_failed"),
 				account: refreshed.account,
 				...(usageTokens ?? {}),
 			});

@@ -4260,13 +4260,22 @@ describe("native OpenAI catalog routing", () => {
 		expect(response.status).toBe(503);await response.text();
 		expect(calls.some(call=>call.url.endsWith("/responses"))).toBe(false);
 	});
-	it.each(["response.created", "response.failed", "response.incomplete"])("does not reward an unsuccessful %s stream",async type=>{
+	it.each(["response.created", "response.failed"])("does not reward an unsuccessful %s stream",async type=>{
 		const manager=new AccountManager(undefined,createStorage(Date.now()));const success=vi.spyOn(manager,"recordSuccess");
 		const {fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"shared"}]}):new Response(`data: ${JSON.stringify({type,response:{id:"fixture-response"}})}\n\n`,{headers:{"content-type":"text/event-stream"}}));
 		const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,forcedAccountIndex:0}});
 		const response=await postResponses(proxy,{model:"shared",input:"hello",stream:true});const text=await response.text();
 		expect(success).not.toHaveBeenCalled();
 		if(type==="response.created")expect(text).toContain("upstream_missing_terminal");
+	});
+	it("treats an incomplete stream as delivered for account health",async()=>{
+		const manager=new AccountManager(undefined,createStorage(Date.now()));const success=vi.spyOn(manager,"recordSuccess");const failure=vi.spyOn(manager,"recordFailure");
+		const {fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"shared"}]}):new Response(`data: ${JSON.stringify({type:"response.incomplete",response:{id:"fixture-response",incomplete_details:{reason:"max_output_tokens"}}})}\n\n`,{headers:{"content-type":"text/event-stream"}}));
+		const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,forcedAccountIndex:0}});
+		const response=await postResponses(proxy,{model:"shared",input:"hello",stream:true});const text=await response.text();
+		expect(text).toContain("response.incomplete");expect(text).not.toContain("upstream_response_incomplete");
+		expect(success).toHaveBeenCalledTimes(1);expect(failure).not.toHaveBeenCalled();
+		expect(proxy.getStatus().lastError).toBeNull();
 	});
 	it("authenticates managed OAuth and unions account catalogs without returning credentials", async () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));

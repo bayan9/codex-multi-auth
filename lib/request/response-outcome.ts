@@ -31,13 +31,18 @@ export class ResponseOutcome {
 		}
 	}
 
+	/**
+	 * `response.incomplete` (e.g. max_output_tokens) is a delivered response, not an
+	 * account failure: it counts as success for health and affinity, and its terminal
+	 * type survives only as the usage annotation in `errorCode`.
+	 */
 	finish(): StreamCompletion {
 		const missingTerminal = this.requireTerminal && !this.terminal;
-		const success = !missingTerminal && (!this.terminal || this.terminal === "completed");
+		const success = !missingTerminal && (!this.terminal || this.terminal === "completed" || this.terminal === "incomplete");
 		return {
 			success,
 			missingTerminal,
-			errorCode: success ? null : missingTerminal ? "upstream_missing_terminal" : `upstream_response_${this.terminal}`,
+			errorCode: missingTerminal ? "upstream_missing_terminal" : this.terminal && this.terminal !== "completed" ? `upstream_response_${this.terminal}` : null,
 		};
 	}
 }
