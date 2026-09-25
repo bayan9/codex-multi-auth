@@ -1194,6 +1194,10 @@ async function handleRequestInner(
 		const managedOAuthFor = (manager: AccountManager): boolean => state.nativeOpenai === true && manager.getAccountsSnapshot().some(account =>
 			isLiveManagedToken(account.access, account.expires, account.enabled, account.authInvalidatedAt));
 		let managedStorageVerified = true;
+		// A missing or unreadable store (not a transient lock) must not become an
+		// empty pool: that would discard the live manager's learned state and hide
+		// the cause behind catalog/403 errors.
+		let nativeStorageMissing = false;
         let nativeOAuthResult: boolean | undefined;
 		const nativeOAuth = async (): Promise<boolean> =>
 			(nativeOAuthResult ??= !!(state.nativeOpenai && bearer && await isNativeClientToken(bearer, state.now())));
@@ -1222,7 +1226,8 @@ async function handleRequestInner(
                 writeJson(res, 503, {error:{code:"native_account_storage_unavailable",message:"Account storage is temporarily unavailable. Retry when it is readable."}});
                 return;
             }
-            if (snapshot.verified || (snapshot.storage === null && !snapshot.transientFailure)) {
+            nativeStorageMissing = snapshot.storage === null && !snapshot.transientFailure;
+            if (snapshot.verified && snapshot.storage !== null) {
 			const accounts = accountManager.getAccountsSnapshot();
 			const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
 			if (!sameInventory) {
@@ -1323,6 +1328,19 @@ async function handleRequestInner(
 		if (isResponsesRequest) {
 			context.headers.delete("content-encoding");
 			context.headers.delete("content-length");
+		}
+		// Explicit API/ZDR routes never touch the OAuth pool, so they stay available.
+		// Everything else would route through a manager the store no longer backs.
+		// A 401 would tell the native client its login is bad when the store is what
+		// is missing, so independently authenticated clients get a 503 (#702).
+		if (nativeStorageMissing && !(isResponsesRequest && context.model && /^(api|zdr)\//.test(context.model))) {
+			writeJson(res, HTTP_STATUS.SERVICE_UNAVAILABLE, {
+				error: {
+					message: "Account storage is unavailable. Run codex-multi-auth login or check the account store.",
+					code: "native_account_storage_unavailable",
+				},
+			});
+			return;
 		}
 		const requestStartedAt = state.now();
 		let policyDecision: RuntimePolicyDecision | null = null;

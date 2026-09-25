@@ -4420,8 +4420,26 @@ describe("native mode authenticates before touching account storage", () => {
 		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage: async () => null } });
 		const response = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: `Bearer ${DEFAULT_CLIENT_API_KEY}` } });
 		expect(response.status).toBe(503);
-		expect((await response.json()).error.code).toBe("account_catalog_unavailable");
+		expect((await response.json()).error.code).toBe("native_account_storage_unavailable");
 		expect(calls).toHaveLength(0);
+	});
+	it("keeps the live pool and its learned limits while the store is missing", async () => {
+		const storage = createStorage(Date.now(), 1);
+		const accountManager = new AccountManager(undefined, storage);
+		let missing = false;
+		const { calls, fetchImpl } = createRecordingFetch(call => call.url.includes("/models") ? Response.json({ models: [{ slug: "model-a" }] }) : textEventStream());
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage: async () => missing ? null : structuredClone(storage) } });
+		const until = Date.now() + 10 * 60_000;
+		accountManager.getAccountByIndex(0)!.rateLimitResetTimes["codex:model-b"] = until;
+		missing = true;
+		const gone = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(gone.status).toBe(503);
+		expect((await gone.json()).error.code).toBe("native_account_storage_unavailable");
+		expect(calls.filter(c => c.url.endsWith("/responses"))).toHaveLength(0);
+		missing = false;
+		const back = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(back.status).toBe(200); await back.text();
+		expect(accountManager.getAccountByIndex(0)!.rateLimitResetTimes["codex:model-b"]).toBe(until);
 	});
 });
 
