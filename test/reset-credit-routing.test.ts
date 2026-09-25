@@ -4,15 +4,17 @@ import { AccountManager } from '../lib/accounts.js';
 import { workspaceModelScopes } from '../lib/runtime/workspace-model-scopes.js';
 function fixture(){
  const manager=new AccountManager(undefined,{version:3,activeIndex:0,accounts:[{recordId:'first',accountId:'workspace',refreshToken:'r',addedAt:1,lastUsed:1}]});
+ // Recovery schedules a debounced save; never let it write the shared test store after the test.
+ const save=vi.spyOn(manager,'saveToDiskDebounced').mockImplementation(()=>{});
  const account=manager.getAccountByIndex(0)!;const scope=workspaceModelScopes(account)[0]!;
  const automatic=vi.fn(async()=>null);const status=vi.fn(async()=>({snapshots:{[scope.id]:{updatedAt:1000,ordinaryUsageAllowed:true,availableCount:1,planType:'pro',primary:{usedPercent:0},secondary:{usedPercent:0}}}}));
  const service={automatic,status};const observations=new Map();const clear=vi.fn();
- return {manager,account,scope,service,observations,clear,args:{model:'chat-test',native:true,pinned:false,manager,scopes:new Map([[0,[scope]]]),quotaForScope:()=>({updatedAt:900,status:200,model:'chat-test',planType:'pro',primary:{usedPercent:100},secondary:{}}),service,observations,clearQuotaScheduler:clear,now:()=>1000}};
+ return {manager,account,scope,service,observations,clear,save,args:{model:'chat-test',native:true,pinned:false,manager,scopes:new Map([[0,[scope]]]),quotaForScope:()=>({updatedAt:900,status:200,model:'chat-test',planType:'pro',primary:{usedPercent:100},secondary:{}}),service,observations,clearQuotaScheduler:clear,now:()=>1000}};
 }
 it.each(['api/chat-test','zdr/chat-test'])('never redeems across the %s privacy pool',async model=>{const f=fixture();await recoverResetQuota({...f.args,model});expect(f.service.automatic).not.toHaveBeenCalled();});
 it.each([5,50,94,99])('uses remaining subscription quota at %s%% used without spending a reset',async used=>{const f=fixture();await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),primary:{usedPercent:used}})});expect(f.service.automatic).not.toHaveBeenCalled();});
 it('does not redeem for an explicit pin or non-native route',async()=>{const f=fixture();await recoverResetQuota({...f.args,pinned:true});await recoverResetQuota({...f.args,native:false});expect(f.service.automatic).not.toHaveBeenCalled();});
-it('applies confirmed scheduled recovery even when no credit was consumed',async()=>{const f=fixture();f.account.lastRateLimitReason='quota';f.account.rateLimitResetTimes={codex:Date.now()+90000};expect(await recoverResetQuota(f.args)).toBe(true);expect(f.clear).toHaveBeenCalledWith(f.account);expect(f.account.rateLimitResetTimes).toEqual({});expect(f.observations.size).toBe(1);});
+it('applies confirmed scheduled recovery even when no credit was consumed',async()=>{const f=fixture();f.account.lastRateLimitReason='quota';f.account.rateLimitResetTimes={codex:Date.now()+90000};expect(await recoverResetQuota(f.args)).toBe(true);expect(f.save).toHaveBeenCalled();expect(f.clear).toHaveBeenCalledWith(f.account);expect(f.account.rateLimitResetTimes).toEqual({});expect(f.observations.size).toBe(1);});
 it('does not erase authentication cooldowns or policy-blocked candidates',async()=>{const f=fixture();f.account.cooldownReason='auth-failure';f.account.coolingDownUntil=Date.now()+100000;await recoverResetQuota(f.args);expect(f.service.automatic).not.toHaveBeenCalled();expect(f.account.cooldownReason).toBe('auth-failure');});
 it('requires positive native permission before clearing blockers',async()=>{const f=fixture();const until=Date.now()+90000;f.service.status.mockResolvedValue({snapshots:{}});f.account.rateLimitResetTimes={codex:until};expect(await recoverResetQuota(f.args)).toBe(false);expect(f.account.rateLimitResetTimes).toEqual({codex:until});});
 
