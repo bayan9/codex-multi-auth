@@ -699,3 +699,15 @@ it("dashboard reset also removes stored API keys and runtime sidecars", async ()
  expect(clearAccountsMock).toHaveBeenCalledTimes(1);
  expect(clearCredentialSidecarsMock).toHaveBeenCalledTimes(1);
 });
+
+it("returns to the dashboard when the workspace picker is cancelled during add-account", async () => {
+ accountsOnDisk = storageWith(1);
+ promptLoginModeMock.mockResolvedValueOnce({ mode: "add" }).mockResolvedValueOnce({ mode: "cancel" });
+ runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
+ chooseLoginWorkspaceMock.mockResolvedValue(null);
+ expect(await runAuthLogin([], deps())).toBe(0);
+ expect(chooseLoginWorkspaceMock).toHaveBeenCalledOnce();
+ // Back at the menu instead of leaving the CLI.
+ expect(promptLoginModeMock).toHaveBeenCalledTimes(2);
+ expect(persistAccountPoolMock).not.toHaveBeenCalled();
+});
