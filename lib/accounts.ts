@@ -2173,8 +2173,10 @@ export class AccountManager {
    const baselineRow = rescuedBaseline.accounts.find(matches);
    if (!baselineRow) throw error;
    // Only authentication was committed. Pending additions, removals and user
-   // edits must still differ from their old baseline on the next save.
-   for (const field of ["accessToken", "refreshToken", "expiresAt"] as const) {
+   // edits must still differ from their old baseline on the next save. The
+   // refresh can also move the identity and clears auth blockers; a restart
+   // must not bring the old identity or cooldown back.
+   for (const field of ["accessToken", "refreshToken", "expiresAt", "accountId", "accountIdSource", "email", "authInvalidatedAt", "authInvalidationErrorCode", "coolingDownUntil", "cooldownReason"] as const) {
     const value = refreshed[field];
     if (value === undefined) {delete row[field];delete baselineRow[field];}
     else {Object.assign(row, { [field]: value });Object.assign(baselineRow, { [field]: value });}

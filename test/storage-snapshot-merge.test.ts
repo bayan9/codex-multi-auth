@@ -98,3 +98,40 @@ it("keeps a local rate-limit clear when disk did not touch that key", () => {
     expect(row!.rateLimitResetTimes).toBeUndefined();
     expect(row!.accountLabel).toBe("External");
 });
+
+it("merges independent per-workspace disables by id", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    Object.assign(disk.accounts[0]!.workspaces![0]!, { enabled: false, disabledAt: 10 });
+    Object.assign(local.accounts[0]!.workspaces![1]!, { enabled: false, disabledAt: 20 });
+    const [row] = mergeAccountSnapshot(base, disk, local).accounts;
+    expect(row!.workspaces).toEqual([
+        { id: "personal", enabled: false, disabledAt: 10 },
+        { id: "business", enabled: false, disabledAt: 20 },
+    ]);
+});
+it("keeps an intentional re-enable when the other side edits a different workspace", () => {
+    const base = fixture();
+    Object.assign(base.accounts[0]!.workspaces![0]!, { enabled: false, disabledAt: 5 });
+    const disk = structuredClone(base), local = structuredClone(base);
+    disk.accounts[0]!.workspaces![0] = { id: "personal", enabled: true };
+    Object.assign(local.accounts[0]!.workspaces![1]!, { enabled: false, disabledAt: 20 });
+    const [row] = mergeAccountSnapshot(base, disk, local).accounts;
+    expect(row!.workspaces![0]).toEqual({ id: "personal", enabled: true });
+    expect(row!.workspaces![1]).toMatchObject({ id: "business", enabled: false, disabledAt: 20 });
+});
+it("resolves the current workspace by identity across a reorder", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    disk.accounts[0]!.workspaces!.reverse();
+    disk.accounts[0]!.currentWorkspaceIndex = 1;
+    local.accounts[0]!.currentWorkspaceIndex = 1;
+    const [row] = mergeAccountSnapshot(base, disk, local).accounts;
+    expect(row!.workspaces!.map(w => w.id)).toEqual(["business", "personal"]);
+    expect(row!.workspaces![row!.currentWorkspaceIndex!]!.id).toBe("business");
+});
+it("moves the current workspace off one the other side disabled", () => {
+    const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
+    Object.assign(disk.accounts[0]!.workspaces![1]!, { enabled: false, disabledAt: 10 });
+    local.accounts[0]!.currentWorkspaceIndex = 1;
+    const [row] = mergeAccountSnapshot(base, disk, local).accounts;
+    expect(row!.workspaces![row!.currentWorkspaceIndex!]!.id).toBe("personal");
+});

@@ -4646,3 +4646,20 @@ describe("native catalog outage with reasoning settings", () => {
 		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(true);
 	});
 });
+
+describe("unversioned catalog requests", () => {
+	it("does not borrow another client's catalog version", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+		const { fetchImpl } = createRecordingFetch(call => {
+			if (!call.url.includes("/models")) return textEventStream();
+			const version = new URL(call.url).searchParams.get("client_version");
+			return Response.json({ models: [{ slug: version === "2.0" ? "model-new" : "model-old" }] });
+		});
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const versioned = await getModels(proxy, "/models?client_version=2.0");
+		expect((await versioned.json()).models.map((m: { slug: string }) => m.slug)).toEqual(["model-new"]);
+		const unversioned = await postResponses(proxy, { model: "model-old", input: "test" });
+		await unversioned.text();
+		expect(unversioned.status).toBe(200);
+	});
+});

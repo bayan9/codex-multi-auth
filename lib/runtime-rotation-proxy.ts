@@ -1354,8 +1354,12 @@ async function handleRequestInner(
 			context.upstreamPath,
 		);
 		const attemptedIndexes = new Set<number>();
-        let catalogEligibleKeys: Set<string> | undefined;
-        const catalogExcludedIndexes = (): number[] => catalogEligibleKeys ? accountManager.getAccountsSnapshot().filter(account => !catalogEligibleKeys!.has(catalogAccountKey(account))).map(account => account.index) : [];
+		let catalogEligibleKeys: Set<string> | undefined;
+		const catalogExcludedIndexes = (): number[] => {
+			const eligibleKeys = catalogEligibleKeys;
+			if (!eligibleKeys) return [];
+			return accountManager.getAccountsSnapshot().filter(account => !eligibleKeys.has(catalogAccountKey(account))).map(account => account.index);
+		};
 		let exhaustionReason: ExhaustionReason = "no-account";
 		let accountCount = accountManager.getAccountCount();
 		let transientAttemptLimit = Math.max(
@@ -1435,8 +1439,9 @@ async function handleRequestInner(
 		const isPinned = typeof pinnedIndex === "number";
 		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
 			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
-            const clientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : state.catalogClientVersion;
-            state.catalogClientVersion = clientVersion;
+			// Unversioned requests use the stable unversioned catalog, never the last
+			// client's version: interleaved clients must not choose each other's catalog.
+			const clientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : undefined;
             const versionKey = clientVersion ?? "";
             const versions = state.catalogsByVersion ??= new Map();
             const backoff = state.catalogBackoff ??= new Map();
