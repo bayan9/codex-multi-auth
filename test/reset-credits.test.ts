@@ -47,6 +47,27 @@ describe('reset credits',()=>{
  it('serializes two services so concurrent exhaustion does not spend twice',async()=>{
   const f=fixture();await f.service.setPolicy('last-resort');const second=new ResetCreditService(join(dir,'state.json'),{read:f.read,consume:f.consume});await Promise.all([f.service.automatic([target('a')]),second.automatic([target('a')])]);expect(f.consume).toHaveBeenCalledTimes(1);
  });
+ it('serializes redemptions across separate module instances (cross-process)',async()=>{
+  // A fresh module instance has its own in-process promise map, so only the
+  // file lock can stop a second spend. Park the first instance's first state
+  // write (its check marker) so the second instance reads state in that window.
+  const f=fixture();await f.service.setPolicy('last-resort');
+  vi.resetModules();const {ResetCreditService:Other}=await import('../lib/runtime/reset-credits.js');
+  const realRename=fs.rename.bind(fs);let parked=false;let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});let entered!:()=>void;const inside=new Promise<void>(r=>{entered=r;});
+  const rename=vi.spyOn(fs,'rename').mockImplementation(async(from,to)=>{
+   if(!parked&&String(to).endsWith('state.json')){parked=true;entered();await Promise.race([gate,new Promise(r=>setTimeout(r,300))]);}
+   return realRename(from,to);
+  });
+  try {
+   const first=f.service.automatic([target('a')]);await inside;
+   const second=new Other(join(dir,'state.json'),{read:f.read,consume:f.consume}).automatic([target('a')]);
+   await new Promise(r=>setTimeout(r,50));
+   release();
+   const results=await Promise.all([first,second]);
+   expect(results.filter(result=>result!==null)).toHaveLength(1);
+   expect(f.consume).toHaveBeenCalledTimes(1);
+  } finally {rename.mockRestore();}
+ });
  it('keeps an uncertain completion pending if its follow-up read fails',async()=>{
   const f=fixture();f.read.mockResolvedValueOnce(payload('a')).mockRejectedValueOnce(Error('offline'));await expect(f.service.redeem(target('a'))).rejects.toThrow();expect((await f.service.status()).pending?.key).toBe('a');
  });
