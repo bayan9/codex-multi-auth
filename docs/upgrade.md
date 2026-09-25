@@ -230,6 +230,18 @@ No remote dashboard or hosted multi-user service is introduced. Data stays under
 
 ---
 
+## Downgrading From 2.17.0
+
+Account priority tiers (`codex-multi-auth account priority <index> <0..9>`) are
+stored as a `priority` field in `account-policies.json`. Versions before 2.17.0
+do not know that field and drop it the next time they write any account policy
+(pause, drain, tag, weight or note). After a downgrade and a policy edit, every
+account is back to the default tier; re-run `account priority` after upgrading
+again. The new `api-routes.json`, `reset-credits.json` and model discovery files
+are ignored by older versions and left in place.
+
+---
+
 ## Legacy Compatibility
 
 Legacy files may still be discovered during migration-only compatibility checks.
