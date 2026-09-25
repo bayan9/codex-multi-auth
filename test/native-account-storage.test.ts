@@ -52,3 +52,25 @@ it("refreshes the bounded fallback age after a verified settled cache hit", asyn
     await writeFile(path,"changed"); parse.mockRejectedValueOnce(Object.assign(Error("locked"),{code:"EBUSY"}));
     expect(await read()).toEqual({storage:initial.storage,verified:false});
 });
+
+
+it("counts a verified cache hit as fresh so one EBUSY after steady traffic keeps the snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-cache-grace-"));
+    roots.push(root);
+    const path = join(root, "accounts.json");
+    const disk = { version: 3, activeIndex: 0, accounts: [{ accountId: "example", email: "example@example.test", accessToken: "fixture-access", refreshToken: "fixture-refresh", addedAt: 1, lastUsed: 1 }] };
+    await writeFile(path, JSON.stringify(disk));
+    await utimes(path, new Date(0), new Date(0));
+    let now = Date.now() + 3000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const read = createNativeAccountStorageReader(undefined, path);
+    expect((await read()).verified).toBe(true);
+    now += 10_000;
+    expect((await read()).verified).toBe(true);
+    now += 1_000;
+    await writeFile(path, JSON.stringify({ ...disk, activeIndex: 0, accounts: [{ ...disk.accounts[0], lastUsed: 2 }] }));
+    vi.spyOn(parser, "loadAccountsFromPath").mockRejectedValueOnce(Object.assign(Error("locked"), { code: "EBUSY" }));
+    const busy = await read();
+    expect(busy.verified).toBe(false);
+    expect(busy.storage?.accounts[0]?.accessToken).toBe("fixture-access");
+});

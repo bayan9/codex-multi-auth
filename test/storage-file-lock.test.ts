@@ -132,3 +132,23 @@ it("retries its own deferred release even when this process makes no later write
  try {await expect(withFileTransactionLock(path,async()=>42)).resolves.toBe(42);}finally{unlink.mockRestore();}
  await vi.waitFor(async()=>{await expect(fs.stat(`${path}.write-lock`)).rejects.toMatchObject({code:"ENOENT"});},{timeout:1500});
 });
+
+
+it("keeps the committed result when the owner file cannot be released, and reclaims it next time", async () => {
+    const { path, dir } = await fixture();
+    const unlink = fs.unlink.bind(fs);
+    const spy = vi.spyOn(fs, "unlink").mockImplementation(async (...args) => {
+        const target = String(args[0]);
+        if (target.includes(".write-lock") && !target.includes(".candidate-"))
+            throw Object.assign(Error("fixture scanner"), { code: "EBUSY" });
+        return unlink(...args);
+    });
+    try {
+        await expect(withFileTransactionLock(path, async () => 42)).resolves.toBe(42);
+    }
+    finally {
+        spy.mockRestore();
+    }
+    await expect(withFileTransactionLock(path, async () => 43, { waitMs: 200 })).resolves.toBe(43);
+    expect((await readdir(dir)).filter(p => p.includes("write-lock"))).toEqual([]);
+});

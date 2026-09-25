@@ -4631,3 +4631,18 @@ describe("independent review catalog regressions",()=>{
   expect(refreshAccessTokenMock).not.toHaveBeenCalled();
  });
 });
+
+
+describe("native catalog outage with reasoning settings", () => {
+	it("routes an effort-bearing request while the catalog is rate limited", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+		const { fetchImpl, calls } = createRecordingFetch(call => call.url.includes("/models")
+			? new Response("busy", { status: 429, headers: { "retry-after": "120" } })
+			: textEventStream());
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await postResponses(proxy, { model: "model-test", reasoning: { effort: "high" }, service_tier: "priority", input: "test" });
+		await response.text();
+		expect(response.status).toBe(200);
+		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(true);
+	});
+});
