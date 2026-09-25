@@ -112,7 +112,6 @@ class SocketSession {
 		input: string | URL | Request,
 		init: RequestInit,
 		context: Context,
-		fresh = false,
 	): Promise<Response> {
         if (context.signal.aborted || this.closed) throw new ClientCancellationError();
 		const url = new URL(String(input));
@@ -138,11 +137,7 @@ class SocketSession {
 		delete body.background;
 		body.store = false;
 		body.type = "response.create";
-		let socket = fresh ? undefined : this.channels.get(key);
-		if (fresh) {
-			this.channels.get(key)?.terminate();
-			this.channels.delete(key);
-		}
+		let socket = this.channels.get(key);
 		if (socket?.readyState !== WebSocket.OPEN) {
 			socket?.terminate();
 			this.channels.delete(key);
@@ -159,7 +154,6 @@ class SocketSession {
 		else if (context.previousId && hasOrphanToolResult(body.input)) {
 			return Response.json(wireError("previous_response_not_found"), {status: 400});
 		}
-		const reused = socket !== undefined;
 		let handshakeHeaders: Record<string, string> | undefined;
 		if (!socket) {
 			if (context.signal.aborted || this.closed) throw new ClientCancellationError();
@@ -268,17 +262,20 @@ class SocketSession {
 				cleanup();
 				this.channels.delete(key);
                 const cancelled = context.signal.aborted || this.closed;
-                // A reused socket the server already closed is not this account's
-                // failure: retry once on a fresh socket before reporting one.
-                if (!accepted && reused && !cancelled) {
-                    resolve(this.fetch(input, init, context, true));
-                    return;
-                }
+                // Once create has been sent, a disconnect cannot prove generation
+                // did not start. Never replay it, even before the first event.
                 const error = cancelled
                     ? new ClientCancellationError()
                     : Error("Upstream WebSocket disconnected");
                 if (accepted) streamController.error(error);
-                else reject(error);
+                else if (cancelled) reject(error);
+                else {
+                    // A sent create has an ambiguous outcome. Return a terminal
+                    // stream error so the HTTP router cannot retry generation.
+                    resolve(new Response(`data: ${JSON.stringify(wireError("upstream_websocket_disconnected", 502))}\n\n`, {
+                        headers: {"content-type":"text/event-stream"},
+                    }));
+                }
 			};
 			const abort = () => active.terminate();
 			const onMessage = (raw: WebSocket.RawData, isBinary: boolean) => {

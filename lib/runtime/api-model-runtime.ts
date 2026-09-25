@@ -314,6 +314,7 @@ export class ApiModelRuntime {
 		if (route.serviceTier) payload.service_tier = route.serviceTier;
 		delete payload.client_metadata;
 		let lastStatus = 503;
+		let lastRejection: Response | undefined;
 		for (const candidate of route.candidates) {
 			const credential = routes.find((r) => r.id === candidate.id);
 			if (!credential) continue;
@@ -351,6 +352,7 @@ export class ApiModelRuntime {
 					},
 				);
 				lastStatus = response.status;
+				lastRejection = undefined;
 				if (response.ok) {
 					const headers = new Headers();
 					for (const name of [
@@ -375,7 +377,14 @@ export class ApiModelRuntime {
 					data = null;
 				}
 				const rejection = classifyCapabilityFailure(response.status, data);
-				if (rejection) {
+				const source = isRecord(data) && isRecord(data.error) ? data.error : {};
+                const sanitized: Record<string,string> = {message:"Upstream rejected the API request.",code:"api_request_rejected"};
+                for (const field of ["code","type","param"]) {
+                    const value=source[field];
+                    if (typeof value === "string" && /^[A-Za-z0-9_.]{1,80}$/.test(value)) sanitized[field]=value;
+                }
+                if (rejection) {
+                    lastRejection = Response.json({error:sanitized},{status:response.status});
 					this.failures.record(
 						this.key(credential),
 						route.upstreamModel,
@@ -386,23 +395,19 @@ export class ApiModelRuntime {
 					continue;
 				}
 				if (![401, 403, 429, 500, 502, 503, 504].includes(response.status)) {
-                    const source = isRecord(data) && isRecord(data.error) ? data.error : {};
-                    const error: Record<string,string> = {message:"Upstream rejected the API request.",code:"api_request_rejected"};
-                    for (const field of ["code","type","param"]) {
-                        const value=source[field];
-                        if (typeof value === "string" && /^[A-Za-z0-9_.]{1,80}$/.test(value)) error[field]=value;
-                    }
-                    return Response.json({error},{status:response.status});
+                    return Response.json({error:sanitized},{status:response.status});
                 }
 			} catch (error) {
                 if (error instanceof ClientCancellationError) throw error;
 				if (signal?.aborted) throw new ClientCancellationError();
 				lastStatus = 502;
+				lastRejection = undefined;
 			} finally {
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", abort);
 			}
 		}
+		if (lastRejection) return lastRejection;
 		// A 401/403 here belongs to the API key, not the desktop login; the native
 		// client must not read an exhausted credential pool as a bad login.
 		return this.failure(lastStatus === 401 || lastStatus === 403 ? 503 : lastStatus, "model_route_pool_unavailable");

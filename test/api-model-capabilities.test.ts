@@ -470,3 +470,21 @@ it("stops advertising a credential's verified settings once it loses access", as
 	expect(after?.service_tiers).toEqual([]);
 	expect(after?.supported_reasoning_levels ?? []).not.toEqual(expect.arrayContaining([expect.objectContaining({ effort: "xhigh" })]));
 });
+
+it("a setting-specific 403 removes only the denied effort", async () => {
+ let now=1, deny=false;
+ const fetcher=vi.fn(async (_u:unknown, init?:RequestInit)=>{
+  if(init?.method!=="POST")return new Response("missing",{status:404});
+  const body=JSON.parse(String(init.body));
+  if(deny && body.reasoning?.effort==="xhigh") return Response.json({error:{code:"unsupported_value",param:"reasoning.effort"}},{status:403});
+  if(body.tools)return Response.json({output:[{type:"function_call",name:"capability_probe"}]});
+  return Response.json({reasoning:body.reasoning,service_tier:body.service_tier??"default"});
+ });
+ const reader=new ApiModelCapabilities(fetcher as typeof fetch,()=>now);
+ await reader.enrich([{slug:"fixture"}],false,route);
+ deny=true;now+=900001;
+ const [model]=await reader.enrich([{slug:"fixture"}],false,route);
+ expect(model?.supported_reasoning_levels).toEqual(expect.arrayContaining([expect.objectContaining({effort:"high"})]));
+ expect(model?.supported_reasoning_levels).not.toEqual(expect.arrayContaining([expect.objectContaining({effort:"xhigh"})]));
+ expect(model?.service_tiers).toEqual(expect.arrayContaining([expect.objectContaining({id:"priority"})]));
+});

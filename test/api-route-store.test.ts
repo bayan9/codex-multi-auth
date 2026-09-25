@@ -190,3 +190,13 @@ it("retries EPERM when publishing API route configuration",async()=>{
  try {await saveApiRoutes([],path);expect(failed).toBe(true);expect(await loadApiRoutes(path)).toEqual([]);}
  finally{spy.mockRestore();}
 });
+
+it.each(["EBUSY","EPERM","EACCES"])("retries a transient %s opening the API routes",async code=>{
+ const path=join(await tempDir(),"api-routes.json");await saveApiRoutes([],path);
+ const original=fs.open.bind(fs);let calls=0;
+ const open=vi.spyOn(fs,"open").mockImplementation(async(...args)=>{
+  if(String(args[0])===path && ++calls===1)throw Object.assign(new Error("locked"),{code});
+  return original(...args);
+ });
+ try{expect(await loadApiRoutes(path)).toEqual([]);expect(calls).toBe(2);}finally{open.mockRestore();}
+});

@@ -238,7 +238,7 @@ describe("cli output contracts", () => {
 			"codex-multi-auth workspace <account> [workspace]",
 			"codex-multi-auth best [--live] [--json] [--model <model>]",
 			"codex-multi-auth forecast [--live] [--json] [--explain] [--model <model>] [--no-runtime-overlay]",
-			"codex-multi-auth account tag|untag|weight|priority|pause|unpause|drain|undrain|note|policy list ...",
+			"codex-multi-auth account tag|untag|weight|priority|auto-prime|pause|unpause|drain|undrain|note|policy list ...",
 			"codex-multi-auth uninstall [--dry-run] [--json] [--clear-accounts]",
 			"codex-multi-auth verify-flagged [--dry-run|-n] [--json] [--no-restore]",
 			"codex-multi-auth verify [--paths | --flagged | --all] [--json]",
@@ -322,8 +322,9 @@ describe("cli output contracts", () => {
 			expect(Array.isArray(accounts)).toBe(true);
 			expect(accounts).toHaveLength(2);
 			for (const account of accounts) {
-				expect(sortedKeys(account)).toEqual(["automaticOrder", "current", "enabled", "forecastQuotaUpdatedAt", "forecastRiskLevel", "forecastRiskScore", "index", "label", "lastInferenceRequestAt", "lastUsed", "markers", "priority", "quotaDrainPerHour", "quotaResetAt", "reason", "resetCreditsAvailable", "resetCreditsCheckedAt", "selectionPreference", "subscriptionReserve"]);
+				expect(sortedKeys(account)).toEqual(["autoPrime", "automaticOrder", "current", "enabled", "forecastQuotaUpdatedAt", "forecastRiskLevel", "forecastRiskScore", "index", "label", "lastInferenceRequestAt", "lastUsed", "markers", "priority", "quotaDrainPerHour", "quotaResetAt", "reason", "resetCreditsAvailable", "resetCreditsCheckedAt", "selectionPreference", "subscriptionReserve"]);
 				expect(account.priority).toBeTypeOf("number");
+				expect(account.autoPrime).toBe(false);
 				expect(account.subscriptionReserve).toBeTypeOf("boolean");
 				expect(account.index).toBeTypeOf("number");
 				expect(account.label).toBeTypeOf("string");

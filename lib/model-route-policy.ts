@@ -156,39 +156,7 @@ export function buildVisibleModelUnion(catalogs: RouteCatalog[]): RouteModel[] {
 				}
 			}
 			if (programs.size) entry.available_access_programs = Object.fromEntries([...programs].map(([category, values]) => [category, [...values]]));
-			// One picker entry per pool/model; native controls carry the settings.
-			// Eligibility is still checked against each original credential record.
-			const tiers = new Map<
-				string,
-				ReturnType<typeof modelServiceTiers>[number]
-			>();
-			for (const tier of [
-				...modelServiceTiers(entry),
-				...modelServiceTiers(model),
-			]) {
-				const id =
-					canonicalServiceTier(tier.id) === "fast" ? "priority" : tier.id;
-				if (!tiers.has(id)) tiers.set(id, { ...tier, id });
-			}
-			if (tiers.size) entry.service_tiers = [...tiers.values()];
-			if (
-				Array.isArray(entry.supported_reasoning_levels) &&
-				Array.isArray(model.supported_reasoning_levels)
-			) {
-				const levels = new Map<string, Record<string, unknown>>();
-				for (const level of [
-					...entry.supported_reasoning_levels,
-					...model.supported_reasoning_levels,
-				]) {
-					if (
-						isRecord(level) &&
-						typeof level.effort === "string" &&
-						!levels.has(level.effort)
-					)
-						levels.set(level.effort, { ...level });
-				}
-				entry.supported_reasoning_levels = [...levels.values()];
-			}
+
 		}
 	}
 	for (const [slug, group] of sources) {

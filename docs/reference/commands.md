@@ -65,8 +65,9 @@ Plain `check` refreshes model discovery but reuses API capability probe results
 younger than 15 minutes, including results from an earlier `check` process
 (stored as hashes in `api-capability-probes.json`). Only `check capabilities`
 sends the billable probes regardless of age. No check sends the first-use
-request unless you pass `--prime`; scheduled checks and the dashboard's Quick
-and Deep Check never do.
+request unless you pass `--prime`; the dashboard's Quick and Deep Check do not
+prime. Separately, `account auto-prime <index> on` authorizes periodic priming
+by a running CLI/app router.
 
 Existing scheduled checks keep their full-check behavior. Use
 `codex-multi-auth resets redeem <account-number>` for an explicit redemption. Unknown check arguments return a usage error;
@@ -339,6 +340,22 @@ Notes:
   interact with routing-profile preferred/avoid tags.
 
 ---
+
+### Automatic subscription priming
+
+`codex-multi-auth account auto-prime <index> on|off` controls automatic first-use
+completion for that account (default: off). `account policy list` and `status`
+show the setting; their JSON outputs include `autoPrime`.
+
+While a CLI/app router is running, it checks opted-in subscription accounts
+every 15 minutes. It completes the tiny response only for a personal subscription
+with zero usage and no established reset countdown. This consumes subscription
+quota. Paused, drained, disabled, invalidated, and cooling accounts are skipped;
+API/ZDR credentials and reset credits are never used. The private
+`<accounts-file>.automatic-checks.json` stores only hashed keys and attempt times
+to prevent duplicate attempts across router processes. Stopping the router stops
+these checks; this setting does not create an OS scheduled task. Manual `check`
+still needs `--prime`, regardless of account policy.
 
 ## `codex-multi-auth workspace`
 
@@ -815,7 +832,9 @@ failure.
   reuses results younger than 15 minutes, and `check capabilities` forces them.
   `check --prime` (or `check accounts --prime`) also sends a tiny first-use
   request to genuinely unused Personal subscriptions, which starts their quota
-  windows; no check does this without `--prime`. Use
+  windows; manual checks require `--prime`. Per-account `account auto-prime <index> on|off`
+  (default off) authorizes recurring router checks every 15 minutes, with durable
+  cross-process attempt limits in `<accounts-file>.automatic-checks.json`. Use
   `check accounts|resets|capabilities` to run one portion; unknown arguments exit 1.
 - `status` labels the forecast as "Forecast suggestion". `status --json` adds
   `apiAccounts`, `totalAccountCount`, `selectionMode`, `modelInventory`, and

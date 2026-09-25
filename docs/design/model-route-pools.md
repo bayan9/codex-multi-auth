@@ -115,9 +115,10 @@ no subscription access programs or speed entitlements are copied into API record
 
 The API credential menu has **Enable small billable capability probes**. This is
 opt-in per credential (`probeCapabilities`), uses a fixed benign prompt,
-`store:false`, and a 16-token maximum output. Explicit `check` runs fresh probes. Automatic refreshes reuse results for 15
-minutes in the running process; a restart clears that cache. Concurrent checks
-share a probe. Independent probes run in parallel under a shared four-request
+`store:false`, and a 16-token maximum output. Plain `check` and automatic refreshes reuse results for 15 minutes, including
+across restarts through the hashed `api-capability-probes.json` cache.
+`check capabilities` explicitly forces fresh probes. Concurrent checks in one
+process share a probe. Independent probes run in parallel under a shared four-request
 limit. Native model discovery has a five-second deadline, so automatic capability
 checks run in the background and update the catalog/ETag when ready; explicit
 CLI checks wait for the new results. Failed authentication, rate limiting and transport errors remain
@@ -248,6 +249,17 @@ timer started. A completed probe is reported explicitly. Incomplete or timed-out
 streams produce a warning, and no second model is tried after that first-use
 request. Existing countdowns, fractional usage, API credentials and business
 workspaces do not trigger extra consumption. Checks retain bounded parallelism.
+
+Automatic first-use completion is configured separately with
+`account auto-prime <index> on|off` (off by default). The CLI/app router checks
+opted-in accounts every 15 minutes while running, without opening the login
+dashboard. Only the saved subscription binding is checked. Disabled, paused,
+drained, invalidated, or cooling accounts are skipped. Checks reuse canonical
+model instructions and never redeem reset credits or use API/ZDR credentials.
+A private `<accounts-file>.automatic-checks.json` file contains hashed account
+keys and attempt timestamps; a cross-process lock prevents overlapping probes.
+Attempts are recorded before network I/O, including failures, to limit retries
+across router restarts. Manual `check` still requires `--prime`.
 
 Ordinary inference has no special priority override for 100% accounts. It follows
 configured tiers, capability eligibility, earliest reset and the

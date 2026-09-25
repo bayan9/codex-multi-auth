@@ -5,7 +5,7 @@ const personal={accountId:'personal',label:'Personal (role:owner) [id:fixture]',
 describe('new login workspace choice',()=>{
  it('defaults to the unique Personal workspace without prompting',async()=>{
   const select=vi.fn();
-  expect(await chooseLoginWorkspace([team,personal],{interactive:false,select})).toBeUndefined();
+  expect(await chooseLoginWorkspace([team,personal],{interactive:true,select})).toBeUndefined();
   expect(select).not.toHaveBeenCalled();
  });
  it('requires a choice when multiple workspaces have no identifiable Personal',async()=>{

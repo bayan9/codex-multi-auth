@@ -1,4 +1,4 @@
-import { mergeAccountCooldown, mergeAccountSnapshot } from "./storage/snapshot-merge.js";
+import { mergeAccountCooldown, mergeAccountSnapshot, mergeAccountRuntimeObservations } from "./storage/snapshot-merge.js";
 import type { Auth } from "@codex-ai/sdk";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -1932,14 +1932,14 @@ export class AccountManager {
 			// persist it once the file can be read.
 			// A write that still fails after the storage retries (e.g. a Windows lock)
 			// spends the old token just the same, so it is rescued like an unreadable file.
-			const live = (error as NodeJS.ErrnoException).code === ACCOUNT_STORAGE_UNREADABLE || isRetryableAuthPersistenceError(error)
+			const live = [ACCOUNT_STORAGE_UNREADABLE, "ELOCKED", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "") || isRetryableAuthPersistenceError(error)
 				? this.getAccountByIdentity(source, auth)
 				: null;
 			if (live) {
 				const priorRefreshToken = live.refreshToken;
 				this.updateFromAuth(live, auth);
 				live.enabled = true;
-				this.clearAccountCooldown(live);
+				if (live.cooldownReason === "auth-failure") this.clearAccountCooldown(live);
 				this.clearAuthFailures(live);
 				// The debounced save needs this process to survive and the file to
 				// unlock. Journal the rotated credential beside the pool so the next
@@ -1964,7 +1964,7 @@ export class AccountManager {
 				} catch (journalError) {
 					log.error("Account storage could not be read or written and the rotated credential could not be journaled; it is only in memory. Keep this process running until the accounts file is readable, or the account will need a re-login.", {
 						sourceIndex: source.index,
-						error: String(journalError),
+						code: typeof (journalError as NodeJS.ErrnoException).code === "string" && /^[A-Z_]{1,40}$/.test((journalError as NodeJS.ErrnoException).code ?? "") ? (journalError as NodeJS.ErrnoException).code : "INVALID_PENDING_AUTH",
 					});
 				}
 				this.saveToDiskDebounced();
@@ -2263,15 +2263,19 @@ export class AccountManager {
 		return account;
 	}
 
- private async persistSnapshot(current: AccountStorageV3 | null, proposed: AccountStorageV3, persist: (storage: AccountStorageV3) => Promise<void>, refreshed?: AccountStorageV3["accounts"][number]): Promise<void> {
-  const missingStore = current && "restoreReason" in current && current.restoreReason === "missing-storage" && current.accounts.length === 0;
+ private async persistSnapshot(current: AccountStorageV3 | null, proposed: AccountStorageV3, persist: (storage: AccountStorageV3) => Promise<void>, refreshed?: AccountStorageV3["accounts"][number], runtimeOnConflict = false): Promise<void> {
   // Preserve initial/missing-store creation. An intentionally cleared store has
   // distinct metadata and must still win over this manager's stale inventory.
   let merged: AccountStorageV3;
   let rescuedBaseline: AccountStorageV3 | undefined;
   try {
-   merged = current && !missingStore ? mergeAccountSnapshot(this.persistenceBaseline, current, proposed) : proposed;
+   merged = current ? mergeAccountSnapshot(this.persistenceBaseline, current, proposed) : proposed;
   } catch (error) {
+   if (runtimeOnConflict && (error as NodeJS.ErrnoException).code === "ESTALE" && current && this.persistenceBaseline) {
+    await persist(mergeAccountRuntimeObservations(this.persistenceBaseline, current, proposed));
+    log.warn("Saved runtime observations; conflicting account edits remain pending and require reload or reconciliation.");
+    return;
+   }
    if ((error as NodeJS.ErrnoException).code !== "ESTALE" || !refreshed?.recordId || !current) throw error;
    // A rotated credential must not be discarded because an unrelated user edit
    // conflicts. Persist only its auth delta under this same transaction lock.
@@ -2321,7 +2325,7 @@ export class AccountManager {
   }
  }
 
-	async saveToDisk(): Promise<void> {
+	async saveToDisk(runtimeOnConflict = false): Promise<void> {
 		await runWithStoragePathState(this.storagePathState, async () => {
 			await withAccountStorageTransaction(async (current, persist) => {
 				if (!current && this.hadPersistedStorage) throw Object.assign(new Error("Account storage was removed; reload before saving."), {code:"ESTALE"});
@@ -2331,7 +2335,7 @@ export class AccountManager {
 				this.reconcileSelectionFromDisk();
 				this.syncWorkspaceSelections(current);
 				const snapshot = this.reconcileTokensFromDisk(this.buildStorageSnapshot(), current);
-				await this.persistSnapshot(current, snapshot, persist);
+				await this.persistSnapshot(current, snapshot, persist, undefined, runtimeOnConflict);
 				this.rememberWorkspaceSelections(snapshot);
 			});
 		});
@@ -2348,7 +2352,7 @@ export class AccountManager {
 					if (this.pendingSave) {
 						await this.pendingSave;
 					}
-					this.pendingSave = this.saveToDisk().finally(() => {
+					this.pendingSave = this.saveToDisk(true).finally(() => {
 						this.pendingSave = null;
 					});
 					await this.pendingSave;
@@ -2393,7 +2397,7 @@ export class AccountManager {
 			if (this.saveDebounceTimer) {
 				clearTimeout(this.saveDebounceTimer);
 				this.saveDebounceTimer = null;
-				await this.saveToDisk();
+				await this.saveToDisk(true);
 			}
 			if (this.pendingSave) {
 				await this.pendingSave;

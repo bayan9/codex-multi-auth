@@ -76,3 +76,12 @@ it('names the account that owns a pending redemption when it is not the one retr
  expect(output).toContain('account 2');
  expect(output).not.toContain('retry the same account');
 });
+it('identifies a disabled pending account without calling it removed',async()=>{
+ const {resetTargetForStoredAccount}=await import('../lib/runtime/account-reset-credits.js');
+ const other={accountId:'other-workspace',refreshToken:'fixture',addedAt:1,lastUsed:1};
+ const key=resetTargetForStoredAccount(other)!.key;f.extraAccounts=[{...other,enabled:false}];
+ f.redeem.mockRejectedValue(Error('pending'));f.list.mockResolvedValue({version:1,policy:'manual',snapshots:{},pending:{key}});
+ expect(await runResetsCommand(['redeem','1'])).toBe(1);
+ const output=JSON.stringify(vi.mocked(console.error).mock.calls);
+ expect(output).toContain('account 2');expect(output).toContain('disabled');expect(output).not.toContain('was removed');
+});

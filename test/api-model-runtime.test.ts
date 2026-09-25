@@ -472,3 +472,15 @@ it.each([401,403])("answers an API pool whose credentials all return %i with 503
  expect((await response!.json()).error.code).toBe("model_route_pool_unavailable");
  expect(fetcher.mock.calls.filter(call=>(call[1] as RequestInit|undefined)?.method==="POST")).toHaveLength(2);
 });
+
+it("preserves the final sanitized setting rejection after trying every ZDR credential", async () => {
+ const fetcher=vi.fn(async (_u:unknown,init?:RequestInit)=>init?.method==="POST"
+  ?Response.json({error:{code:"invalid_value",param:"reasoning.effort",message:"private upstream detail"}},{status:400})
+  :Response.json({data:[{id:"exclusive"}]}));
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch, Date.now, undefined, async models=>models.map(model=>({...model,supported_reasoning_levels:[{effort:"high",description:"High"}]})));
+ await runtime.catalogs([credential("first"),credential("second")]);
+ const response=await runtime.request("zdr/exclusive",{model:"zdr/exclusive",reasoning:{effort:"high"}},[credential("first"),credential("second")]);
+ expect(response.status).toBe(400);
+ expect(await response.json()).toEqual({error:{code:"invalid_value",param:"reasoning.effort",message:"Upstream rejected the API request."}});
+ expect(fetcher.mock.calls.filter(call=>call[1]?.method==="POST")).toHaveLength(2);
+});

@@ -4030,29 +4030,20 @@ function installRuntimeRotationAppServerCliShim(forwardedEnv, configArgs = []) {
 			// Best-effort stale shim cleanup only; the copy below will report a
 			// persistent failure without leaving a partially-created helper.
 		}
-		if (
-			process.platform === "win32" ||
-			(process.env.CODEX_MULTI_AUTH_TEST_FORCE_APP_SERVER_SHIM_COPY ?? "") === "1"
-		) {
-			// A Windows hard link to the running node.exe remains locked by the
-			// helper process itself, which prevents the shim directory from being
-			// removed during graceful helper shutdown. Use an independent image so
-			// the helper can clean up its app-server shim before exiting.
+		if (process.platform === "win32") {
+			// A running hard-linked node.exe prevents helper cleanup on Windows.
 			withSynchronousFileOperationRetry(() => {
 				maybeThrowSimulatedAppServerShimFileError("copy");
 				copyFileSync(process.execPath, executablePath);
 			});
 		} else {
-			try {
-				linkSync(process.execPath, executablePath);
-			} catch {
-				withSynchronousFileOperationRetry(() => {
-					maybeThrowSimulatedAppServerShimFileError("copy");
-					copyFileSync(process.execPath, executablePath);
-				});
-			}
-		}
-		if (process.platform !== "win32") {
+			// Relocating Node breaks installations with executable-relative shared
+			// libraries (including Homebrew). Invoke the original image in place.
+			const quotedNode = "'" + process.execPath.replace(/'/g, "'\\''") + "'";
+			withSynchronousFileOperationRetry(() => {
+				maybeThrowSimulatedAppServerShimFileError("copy");
+				writeFileSync(executablePath, `#!/bin/sh\nexec ${quotedNode} "$@"\n`, { mode: 0o755 });
+			});
 			chmodSync(executablePath, 0o755);
 		}
 		writeFileSync(

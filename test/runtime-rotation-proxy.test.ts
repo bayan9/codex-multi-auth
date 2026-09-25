@@ -5487,3 +5487,37 @@ describe("unversioned catalog requests", () => {
 		expect(unversioned.status).toBe(200);
 	});
 });
+
+
+it("retains known exclusions when a forced catalog refresh fails",async()=>{
+ const manager=new AccountManager(undefined,createStorage(Date.now()));
+ let fail=false;
+ const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")
+  ?fail?new Response("busy",{status:503}):Response.json({models:[{slug:"known"}]})
+  :textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
+ const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+ await (await getModels(proxy,"/models?refresh_capabilities=1")).text();
+ fail=true;
+ await (await getModels(proxy,"/models?refresh_capabilities=1")).text();
+ const response=await postResponses(proxy,{model:"unknown",input:"hello"});
+ expect(response.status).toBe(403);await response.text();
+ expect(calls.filter(c=>c.url.endsWith("/responses"))).toHaveLength(0);
+});
+it("stops a stored pin after refresh disables its only workspace",async()=>{
+ vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
+ const stored=createStorage(Date.now(),1);stored.pinnedAccountIndex=0;
+ stored.accounts[0]!.workspaces=[{id:"acc_1",enabled:true}];
+ const manager=new AccountManager(undefined,stored);
+ const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"shared"}]}):textEventStream());
+ const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(stored)}});
+ await (await getModels(proxy,"/models?refresh_capabilities=1")).text();
+ const refresh=vi.spyOn(tokenRefreshRuntime,"ensureFreshAccessToken").mockImplementation(async({account})=>{
+  account.workspaces![0]!.enabled=false;
+  return {ok:true,accessToken:account.access!,account};
+ });
+ const response=await postResponses(proxy,{model:"shared",input:"hello"});
+ const body=await response.json();
+ expect(response.status).toBe(503);expect(body.error.reason).toBe("workspace-disabled");
+ expect(refresh).toHaveBeenCalledTimes(1);
+ expect(calls.filter(c=>c.url.endsWith("/responses"))).toHaveLength(0);
+});

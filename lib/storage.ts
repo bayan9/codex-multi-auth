@@ -148,7 +148,7 @@ import {
 } from "./storage/transactions.js";
 import { withFileTransactionLock } from "./storage/file-lock.js";
 import { mergeAccountSnapshot } from "./storage/snapshot-merge.js";
-import { applyPendingAuth, getPendingAuthPath, prunePendingAuth, recordPendingAuth } from "./storage/pending-auth.js";
+import { applyPendingAuth, clearPendingAuth, prunePendingAuth, recordPendingAuth } from "./storage/pending-auth.js";
 export { recordPendingAuth };
 const loadedAccountSnapshots = new WeakMap<AccountStorageV3, AccountStorageV3>();
 
@@ -1906,7 +1906,7 @@ async function saveAccountsUnlocked(storage: AccountStorageV3): Promise<void> {
 	await saveAccountsUnlockedToDisk(storage);
 	// A persisted (or superseded) pending rotated credential is no longer needed.
 	await prunePendingAuth(getStoragePath(), storage).catch((error) => {
-		log.warn("Failed to prune pending rotated credentials", { error: String(error) });
+		log.warn("Failed to prune pending rotated credentials", { code: typeof (error as NodeJS.ErrnoException).code === "string" && /^[A-Z_]{1,40}$/.test((error as NodeJS.ErrnoException).code ?? "") ? (error as NodeJS.ErrnoException).code : "INVALID_PENDING_AUTH" });
 	});
 }
 
@@ -2248,7 +2248,7 @@ export async function clearAccounts(): Promise<void> {
 		},
 	});
 	// Pending rotated credentials belong to the cleared pool.
-	await fs.rm(getPendingAuthPath(path), { force: true });
+	await clearPendingAuth(path);
 }
 
 export async function loadFlaggedAccounts(): Promise<FlaggedAccountStorageV1> {

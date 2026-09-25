@@ -13,6 +13,8 @@ export interface AccountPolicy {
 	weight: number;
 	/** Lower tiers are tried first; absent legacy values use tier 1. */
 	priority?: number;
+	/** Opt in to periodic first-use completion for unused personal subscriptions. */
+	autoPrime?: boolean;
 	paused: boolean;
 	drained: boolean;
 	note: string | null;
@@ -62,6 +64,7 @@ function normalizePolicy(key: string, value: unknown): AccountPolicy {
 		tags,
 		weight: normalizeWeight(record.weight),
 		priority: normalizePriority(record.priority),
+		autoPrime: record.autoPrime === true,
 		paused: record.paused === true,
 		drained: record.drained === true,
 		note: note.length > 0 ? note.slice(0, 500) : null,
@@ -216,6 +219,7 @@ export function upsertAccountPolicy(
 	].sort();
 	next.weight = normalizeWeight(next.weight);
 	next.priority = normalizePriority(next.priority);
+	next.autoPrime = next.autoPrime === true;
 	next.updatedAt = now;
 	store.accounts[accountKey] = next;
 	return next;

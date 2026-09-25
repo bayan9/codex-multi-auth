@@ -161,7 +161,7 @@ export async function runStatusCommand(
 	const modelInventory = await deps.loadModelInventory?.();
  const resetCredits = await deps.loadResetCreditState?.().catch(()=>null);
  const resetSnapshot = (account: AccountStorageV3["accounts"][number]) => {const target=resetTargetForStoredAccount(account);return target?resetCredits?.snapshots[target.key]:undefined;};
-	const accountPolicies = await (deps.loadAccountPolicies ?? loadAccountPolicyStore)();
+	const accountPolicies: Awaited<ReturnType<typeof loadAccountPolicyStore>> = await (deps.loadAccountPolicies ?? loadAccountPolicyStore)().catch(() => ({version:1 as const,accounts:{}}));
 	if (!deps.json && deps.loadModelInventory) for (const line of formatModelInventory(modelInventory ?? null)) logInfo(line);
 	if (!storage || (storage.accounts.length === 0 && apiRoutes.length === 0)) {
 		const restoreReason = storage ? readRestoreReason(storage) : undefined;
@@ -319,6 +319,7 @@ export async function runStatusCommand(
 				enabled: account.enabled !== false,
 				current: i === activeIndex,
 				priority: accountPolicies.accounts[getAccountPolicyKey(account, i)]?.priority ?? 1,
+				autoPrime: accountPolicies.accounts[getAccountPolicyKey(account, i)]?.autoPrime ?? false,
 				markers,
 				selectionPreference: storage.pinnedAccountIndex === i ? "strict-pin" : null,
 				forecastRiskScore: forecastResults[i]?.riskScore ?? null,
@@ -456,6 +457,7 @@ export async function runStatusCommand(
    : `inference not yet recorded; ${activity}`;
 		logInfo(`${paint(`${i + 1}. ${label}`, "heading")}${paint(markerLabel, markers.some(m => /disabled|cooldown|exhausted|limited|invalid/.test(m)) ? "warning" : "success")} ${paint(lastUsed, "muted")}`);
 		logInfo(`   ${paint(`priority tier: ${accountPolicies.accounts[getAccountPolicyKey(account, i)]?.priority ?? 1}`, "accent")}`);
+		if (accountPolicies.accounts[getAccountPolicyKey(account, i)]?.autoPrime) logInfo("   automatic first-use priming: on (router checks every 15 minutes)");
   if (appBindStatus?.nativeOpenai) {
    const preference=quotaPreferences[i];
    const order=automaticOrder.get(i);

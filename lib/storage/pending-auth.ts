@@ -6,6 +6,7 @@ import { withRetry } from "../fs-retry.js";
 import { createLogger } from "../logger.js";
 import { tempPathFor } from "../temp-path.js";
 import { withFileTransactionLock } from "./file-lock.js";
+import { getIntentionalResetMarkerPath } from "./backup-paths.js";
 import type { AccountStorageV3 } from "./public-types.js";
 
 /**
@@ -72,6 +73,10 @@ export async function recordPendingAuth(
 ): Promise<void> {
 	const path = getPendingAuthPath(storagePath);
 	await withFileTransactionLock(path, async () => {
+        try {
+            await fs.stat(getIntentionalResetMarkerPath(storagePath));
+            throw Object.assign(new Error("Account pool was reset; rotated credentials were not retained."), {code:"ESTALE"});
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 		const prior = hash(auth.priorRefreshToken);
 		const entries = (await read(path)).filter(
 			(entry) => entry.prior !== prior && entry.prior !== hash(auth.refreshToken),
@@ -99,7 +104,7 @@ export async function applyPendingAuth(
 		// Loading must still work; the file is left untouched for a later load.
 		log.error("Pending rotated credentials could not be read; affected accounts may need a re-login if this persists", {
 			path: getPendingAuthPath(storagePath),
-			error: String(error),
+			code: typeof (error as NodeJS.ErrnoException).code === "string" && /^[A-Z_]{1,40}$/.test((error as NodeJS.ErrnoException).code ?? "") ? (error as NodeJS.ErrnoException).code : "INVALID_PENDING_AUTH",
 		});
 		return storage;
 	}
@@ -110,6 +115,12 @@ export async function applyPendingAuth(
 		account.refreshToken = entry.refreshToken;
 		account.accessToken = entry.accessToken;
 		account.expiresAt = entry.expiresAt;
+		delete account.authInvalidatedAt;
+		delete account.authInvalidationErrorCode;
+		if (account.cooldownReason === "auth-failure") {
+			delete account.coolingDownUntil;
+			delete account.cooldownReason;
+		}
 	}
 	return storage;
 }
@@ -125,4 +136,10 @@ export async function prunePendingAuth(storagePath: string, saved: AccountStorag
 		const remaining = entries.filter((entry) => spent.has(entry.prior));
 		if (remaining.length !== entries.length) await write(path, remaining);
 	});
+}
+
+/** Coordinate resets with pending credential writers, including Windows rename locks. */
+export async function clearPendingAuth(storagePath: string): Promise<void> {
+ const path=getPendingAuthPath(storagePath);
+ await withFileTransactionLock(path,()=>withRetry(()=>fs.rm(path,{force:true}),retry));
 }

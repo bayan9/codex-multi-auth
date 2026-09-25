@@ -249,8 +249,14 @@ are ignored by older versions and left in place.
   refreshes reset-credit availability and model/capability discovery.
 - `check --prime` (or `check accounts --prime`) additionally sends a tiny
   first-use request to genuinely unused Personal subscriptions, which starts
-  their quota windows. No check primes without `--prime`, including scheduled
-  and dashboard checks.
+  their quota windows. Manual and dashboard checks do not prime implicitly.
+- `account auto-prime <index> on|off` opts individual accounts into recurring
+  router checks (default off). While running, the CLI/app router checks every
+  15 minutes and can complete first-use probes for unused personal subscriptions.
+  These consume subscription quota. Hashed attempt timestamps in
+  `<accounts-file>.automatic-checks.json` prevent duplicate attempts across
+  router processes. API/ZDR credentials and reset credits are never used.
+  `status --json` and `account policy list --json` expose `autoPrime`.
 - API capability probes stay opt-in per credential. Plain `check` reuses
   results younger than 15 minutes; `check capabilities` forces them.
 - `resets list|redeem|auto` manages subscription reset credits; redemption is

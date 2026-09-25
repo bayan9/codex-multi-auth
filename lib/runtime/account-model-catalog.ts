@@ -93,6 +93,8 @@ export class AccountModelCatalog {
 		}));
 	}
 	invalidate(): void { this.cache.clear(); }
+	/** Retry discovery while retaining known routing exclusions if it fails. */
+	refresh(): void { for (const entry of this.cache.values()) entry.expires = Number.NEGATIVE_INFINITY; }
 	supportsCached(key: string, model: string, effort?: string, tier?: string): boolean {
 		const cached = this.cache.get(key);
 		return Boolean(cached && !cached.error && cached.expires > this.now() && cached.models?.some(entry => entry.slug === model && supportsModelSettings(entry, effort, tier)));

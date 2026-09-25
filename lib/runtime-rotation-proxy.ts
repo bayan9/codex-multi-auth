@@ -1,3 +1,5 @@
+import { startAutomaticAccountChecks } from "./runtime/automatic-account-checks.js";
+import { createAutomaticSubscriptionCheck } from "./runtime/automatic-subscription-checks.js";
 import { ClientCancellationError } from "./request/client-cancellation.js";
 import { createNativeAccountStorageReader } from "./runtime/native-account-storage.js";
 import { resetSnapshotQuota } from "./runtime/reset-credits.js";
@@ -1149,11 +1151,14 @@ export async function startRuntimeRotationProxy(
 		typeof address === "object" && address ? address.port : port;
 
 	if (state.nativeOpenai) websocketGateway.attach(server, `http://${urlHost}:${resolvedPort}`);
+	// Embedded managers own their own lifecycle; ordinary CLI/app routers check opted-in accounts periodically.
+	const automaticChecks = options.accountManager ? undefined : startAutomaticAccountChecks(createAutomaticSubscriptionCheck());
 	return {
 		host: bindHost,
 		port: resolvedPort,
 		baseUrl: `http://${urlHost}:${resolvedPort}`,
 		close: async () => {
+			await automaticChecks?.stop();
 			websocketGateway.close();
 			await closeServer(server, sockets);
 			await flushRuntimeInferenceActivity();
@@ -1702,7 +1707,8 @@ async function handleRequestInner(
 			if (forceCatalogRefresh) backoff.clear();
 			const catalogsByVersion = state.modelCatalogs ??= new Map();
 			const versionKey = catalogClientVersion ?? "";
-			state.modelCatalog = forceCatalogRefresh ? undefined : catalogsByVersion.get(versionKey);
+			state.modelCatalog = catalogsByVersion.get(versionKey);
+			if (forceCatalogRefresh) state.modelCatalog?.refresh();
 			state.modelCatalog ??= new AccountModelCatalog(async (key) => {
                 const retryAt = backoff.get(key) ?? 0;
                 if (retryAt > state.now()) throw new CatalogRetryError(retryAt - state.now());
@@ -2272,7 +2278,13 @@ async function handleRequestInner(
    // Revalidate enabled scopes after token refresh; never write a per-request choice to the account.
    const enabledScopes = new Set(workspaceModelScopes(refreshed.account).filter(s=>s.routable).map(s=>s.id));
    while(pendingScopes?.length && !enabledScopes.has(pendingScopes[0]?.id ?? "")) pendingScopes.shift();
-   if(pendingScopes && !pendingScopes.length){refundConsumedPoolToken(refreshed.account);continue;}
+   if (pendingScopes && !pendingScopes.length) {
+    refundConsumedPoolToken(refreshed.account);
+    accountSkipReasons.set(refreshed.account.index, "workspace-disabled");
+    capabilityRejectionIsLatest = false;
+    if (isPinned) break;
+    continue;
+   }
    const requestScope = pendingScopes?.[0];
    const accountId = requestScope?.accountId ?? resolveAccountId(refreshed.account, refreshed.accessToken);
 			if (!accountId) {

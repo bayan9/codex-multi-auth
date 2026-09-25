@@ -346,6 +346,7 @@ export function formatQuotaSnapshotLine(snapshot: CodexQuotaSnapshot): string {
 }
 
 export interface ProbeCodexQuotaOptions {
+	signal?: AbortSignal;
 	primeUnusedSubscription?: boolean;
 	accountId: string;
 	accessToken: string;
@@ -381,9 +382,11 @@ export async function fetchCodexQuotaSnapshot(
 	let sawOtherFailure = false;
 
 	for (const model of models) {
+		options.signal?.throwIfAborted();
 		attemptedAnyModel = true;
 		try {
 			const instructions = await getCodexInstructions(model);
+			options.signal?.throwIfAborted();
 			const probeBody: RequestBody = {
 				model,
 				stream: true,
@@ -421,7 +424,7 @@ export async function fetchCodexQuotaSnapshot(
 					method: "POST",
 					headers,
 					body: JSON.stringify(probeBody),
-					signal: controller.signal,
+					signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
 				});
 			} finally {
 				clearTimeout(timeout);
@@ -477,6 +480,7 @@ export async function fetchCodexQuotaSnapshot(
 			sawOtherFailure = true;
 			lastError = new Error("Codex response did not include quota headers");
 		} catch (error) {
+			options.signal?.throwIfAborted();
 			if (error instanceof FirstUseProbeError) throw error;
 			sawOtherFailure = true;
 			lastError = error instanceof Error ? error : new Error(String(error));

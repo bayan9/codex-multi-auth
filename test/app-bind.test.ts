@@ -2167,7 +2167,7 @@ describe("reviewed provider transitions",()=>{
    "setInterval(() => undefined, 1000);",
    "",
   ].join("\n"),"utf8");
-  const options={platform:"linux" as const,home:root,env,nodePath:process.execPath,routerScriptPath};
+  const options={platform:process.platform,home:root,env,nodePath:process.execPath,routerScriptPath};
   // A port nothing listens on: the old router is gone.
   const freePort=await unusedPort();
   const oldUrl=`http://127.0.0.1:${freePort}`;
@@ -2182,9 +2182,8 @@ describe("reviewed provider transitions",()=>{
    expect(result.status.state?.baseUrl).toBe("http://127.0.0.1:54323");
    expect(routerPid).not.toBe(process.pid);
   } finally {
-   // Same paths as the bind; the host platform is deliberate, because stopping the
-   // real detached child must use the host's process-identity probe.
-   await unbindCodexAppRuntimeRotation({...options,platform:process.platform});
+   // Binding and cleanup use the same host platform and process-identity probe.
+   await unbindCodexAppRuntimeRotation(options);
    const alive=(pid:number)=>{try{process.kill(pid,0);return true;}catch{return false;}};
    if(routerPid&&routerPid!==process.pid){
     const stopped=await vi.waitFor(()=>{if(alive(routerPid!))throw Error("router still running");return true;},{timeout:5000}).catch(()=>false);

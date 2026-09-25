@@ -2158,7 +2158,7 @@ describe("AccountManager", () => {
 				withAccountStorageTransaction,
 			);
 			mockWithAccountStorageTransaction.mockRejectedValueOnce(
-				Object.assign(new Error("EACCES"), { code: "EACCES" }),
+				Object.assign(new Error("EINVAL"), { code: "EINVAL" }),
 			);
 
 			const now = Date.now();

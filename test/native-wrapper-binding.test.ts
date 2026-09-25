@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { chmod, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it, expect } from "vitest";
@@ -44,20 +44,33 @@ it("gives native-specific remediation for an invocation account selector",async(
  } finally{await rm(home,{recursive:true,force:true,maxRetries:5});}
 });
 
-it.each([false,true])("forwards native launches with the file auth store and untouched reasoning settings (read-only config=%s)",async readOnly=>{
+it.each([false,true])("forwards native launches even when auth-store persistence fails=%s",async failWrite=>{
  const home=await mkdtemp(join(tmpdir(),"native-auth-store-"));
  const config=join(home,"config.toml");
  try {
-  await writeFile(config,'# codex-multi-auth native provider begin\nmodel_provider = "openai"\nopenai_base_url = "http://127.0.0.1:43210"\n# codex-multi-auth native provider end\n');
-  if(readOnly)await chmod(config,0o444);
+  const original='# codex-multi-auth native provider begin\nmodel_provider = "openai"\nopenai_base_url = "http://127.0.0.1:43210"\n# codex-multi-auth native provider end\n';
+  await writeFile(config,original);
+  await mkdir(join(home,"scripts"));await mkdir(join(home,"dist/lib/codex-cli"),{recursive:true});
+  await writeFile(join(home,"package.json"),JSON.stringify({type:"module"}));
+  for(const name of ["codex.js","codex-routing.js","codex-bin-resolver.js"])
+   await copyFile(join("scripts",name),join(home,"scripts",name));
+  // Isolate the wrapper contract from build output; the real writer is covered in codex-cli-writer.test.ts.
+  await writeFile(join(home,"dist/lib/codex-cli/writer.js"),`
+   import {writeFile,appendFile} from "node:fs/promises";
+   export async function ensureCodexCliFileAuthStore(){
+    await writeFile(${JSON.stringify(join(home,"writer-called"))},"called");
+    if(${failWrite})throw Object.assign(Error("fixture denied"),{code:"EACCES"});
+    await appendFile(${JSON.stringify(config)},'cli_auth_credentials_store = "file"\\n');
+   }
+  `);
   const binary=join(home,"codex-fixture.js");await writeFile(binary,'console.log(JSON.stringify(process.argv.slice(2)))');
-  const run=promisify(execFile);
-  const {stdout}=await run(process.execPath,["scripts/codex.js","exec","-c",'model_reasoning_effort="xhigh"',"test"],{env:{...process.env,CODEX_HOME:home,CODEX_MULTI_AUTH_REAL_CODEX_BIN:binary,CODEX_MULTI_AUTH_SKIP_UPDATE_CHECK:"1",CODEX_MULTI_AUTH_FORCE_ACCOUNT:"",CODEX_MULTI_AUTH_FORCE_FILE_AUTH_STORE:"1"}});
+  const {stdout}=await promisify(execFile)(process.execPath,[join(home,"scripts/codex.js"),"exec","-c",'model_reasoning_effort="xhigh"',"test"],{env:{...process.env,CODEX_HOME:home,CODEX_MULTI_AUTH_REAL_CODEX_BIN:binary,CODEX_MULTI_AUTH_SKIP_UPDATE_CHECK:"1",CODEX_MULTI_AUTH_FORCE_ACCOUNT:"",CODEX_MULTI_AUTH_FORCE_FILE_AUTH_STORE:"1"}});
   const argv=JSON.parse(stdout.trim().split(/\r?\n/).at(-1) ?? "[]") as string[];
   expect(argv).toContain('cli_auth_credentials_store="file"');
   expect(argv).toContain('model_reasoning_effort="xhigh"');
+  expect(await readFile(join(home,"writer-called"),"utf8")).toBe("called");
   const persisted=await readFile(config,"utf8");
-  expect(persisted).toContain("# codex-multi-auth native provider begin");
-  if(!readOnly)expect(persisted).toMatch(/cli_auth_credentials_store\s*=\s*"file"/);
- } finally{await chmod(config,0o644).catch(()=>undefined);await rm(home,{recursive:true,force:true,maxRetries:5});}
+  if(failWrite)expect(persisted).toBe(original);
+  else expect(persisted).toContain('cli_auth_credentials_store = "file"');
+ } finally {await rm(home,{recursive:true,force:true,maxRetries:5});}
 });

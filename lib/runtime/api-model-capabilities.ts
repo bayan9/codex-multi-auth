@@ -248,12 +248,12 @@ export class ApiModelCapabilities {
 							}),
 						},
 					);
-					if ([401, 403, 429].includes(response.status))
+					if ([401, 429].includes(response.status))
 						credentialUnavailable = true;
-					if (response.status === 401 || response.status === 403) lostAccess = true;
+					if (response.status === 401) lostAccess = true;
 					// Probe bodies are tiny, but an upstream error must not grow local memory unboundedly.
 					const reader = response.body?.getReader();
-					if (!reader) return "unverified";
+					if (!reader) { if (response.status === 403) {credentialUnavailable = true; lostAccess = true;} return "unverified"; }
 					const chunks: Uint8Array[] = [];
 					let bytes = 0;
 					try {
@@ -271,8 +271,16 @@ export class ApiModelCapabilities {
 					try {
 						data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 					} catch {
+                        if (response.status === 403) {credentialUnavailable = true; lostAccess = true;}
 						return "unverified";
 					}
+                    if (response.status === 403) {
+                        const error = isRecord(data) && isRecord(data.error) ? data.error : null;
+                        const scoped = error && ["invalid_value", "unsupported_value", "unsupported_parameter"].includes(String(error.code)) &&
+                            (setting.effort && ["reasoning.effort", "reasoning"].includes(String(error.param)) || setting.tier && error.param === "service_tier" || setting.compatibility && ["tools", "tool_choice"].includes(String(error.param)));
+                        if (scoped) return "unsupported";
+                        credentialUnavailable = true; lostAccess = true;
+                    }
 					if (!response.ok) {
 						if (setting.compatibility) {
 							const error =

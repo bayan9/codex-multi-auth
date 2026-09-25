@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import {
 	delimiter,
+	posix,
 	win32,
 	dirname,
 	isAbsolute,
@@ -3178,7 +3179,7 @@ describe("codex bin wrapper", () => {
 		expect(output).toContain("SHADOW_PLUGINS_EXISTS:true");
 		expect(output).toContain("SHADOW_SKILLS_EXISTS:true");
 		expect(output).toContain("SHADOW_MEMORY_EXISTS:true");
-		expect(output).toContain("APP_SERVER_SHIM_STATUS:0");
+		expect(output, output).toContain("APP_SERVER_SHIM_STATUS:0");
 		expect(output).toContain(
 			"APP_SERVER_SHIM_STDOUT:APP_SERVER_FORWARDED:app-server --shim-probe",
 		);
@@ -4610,7 +4611,7 @@ describe("codex bin wrapper", () => {
 		expect(output).toContain("TUI_HAS_WIRE_OVERRIDE:true");
 		expect(output).toContain("TUI_HAS_STORAGE_OVERRIDE:true");
 		expect(output).toContain("TUI_KEY_IN_ARGS:false");
-		expect(output).toContain("TUI_SHIM_STATUS:0");
+		expect(output, output).toContain("TUI_SHIM_STATUS:0");
 		expect(output).toContain(
 			"APP_SERVER_FORWARDED:app-server --canonical-shim",
 		);
@@ -7281,7 +7282,7 @@ describe("codex bin wrapper", () => {
 	});
 
 	it("skips self-referential codex wrapper entries on PATH before native binaries", () => {
-		const wrapperScriptPath = join(
+		const wrapperScriptPath = posix.join(
 			"/test-root",
 			"npm",
 			"lib",
@@ -7290,11 +7291,11 @@ describe("codex bin wrapper", () => {
 			"scripts",
 			"codex.js",
 		);
-		const wrapperBinPath = join("/test-root", "npm", "bin", "codex");
-		const nativeCodexPath = join("/test-root", "native", "bin", "codex");
+		const wrapperBinPath = posix.join("/test-root", "npm", "bin", "codex");
+		const nativeCodexPath = posix.join("/test-root", "native", "bin", "codex");
 		const resolved = resolveRealCodexBin({
 			env: {
-				PATH: [join("/test-root", "npm", "bin"), join("/test-root", "native", "bin")].join(delimiter),
+				PATH: [posix.join("/test-root", "npm", "bin"), posix.join("/test-root", "native", "bin")].join(":"),
 			},
 			argv: [process.execPath, wrapperScriptPath],
 			platform: "linux",

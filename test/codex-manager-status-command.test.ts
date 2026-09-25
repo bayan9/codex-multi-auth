@@ -636,3 +636,8 @@ it("continues subscription status with a visible warning if API configuration ca
  expect(await runStatusCommand(deps)).toBe(0);
  expect(JSON.stringify(vi.mocked(deps.logInfo).mock.calls)).toMatch(/API.*unavailable/);
 });
+it("keeps status readable when an injected policy loader fails",async()=>{
+ const deps=createStatusDeps({json:true,loadAccountPolicies:vi.fn().mockRejectedValue(Error("fixture permission"))});
+ await expect(runStatusCommand(deps)).resolves.toBe(0);
+ expect(JSON.parse(vi.mocked(deps.logInfo!).mock.calls.at(-1)![0]).accounts[0].priority).toBe(1);
+});

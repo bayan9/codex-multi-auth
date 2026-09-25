@@ -649,7 +649,7 @@ function spawnRouter(state: AppBindState): void {
  * Only "refused" is proof that no router serves it; a timeout or an unusable
  * address is "unknown".
  */
-async function probeRouterAddress(baseUrl: string | null | undefined, timeoutMs = 1000): Promise<"refused" | "listening" | "unknown"> {
+export async function probeRouterAddress(baseUrl: string | null | undefined, platform: NodeJS.Platform = process.platform, timeoutMs = platform === "win32" ? WINDOWS_PROCESS_IDENTITY_PROBE_TIMEOUT_MS : 1000): Promise<"refused" | "listening" | "unknown"> {
 	let url: URL;
 	try { url = new URL(baseUrl ?? ""); } catch { return "unknown"; }
 	const port = Number(url.port);
@@ -1463,7 +1463,7 @@ async function bindCodexAppRuntimeRotationLocked(
 			// A failed identity check is not proof: a slow or failing process probe
 			// (common on Windows) also returns false for a live router. Treat the pid
 			// as recycled only when nothing answers at the recorded router address.
-			const address = await probeRouterAddress(router.baseUrl ?? existingState.baseUrl);
+			const address = await probeRouterAddress(router.baseUrl ?? existingState.baseUrl, options.platform ?? process.platform);
 			if (address !== "refused") {
 				throw new Error(
 					`Could not confirm that the app router recorded as pid ${router.pid} has stopped (its address ${address === "listening" ? "still accepts connections" : "could not be checked"}). Stop it before changing provider mode.`,

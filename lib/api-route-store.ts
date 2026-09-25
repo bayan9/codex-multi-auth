@@ -60,16 +60,18 @@ export async function loadApiRoutes(
 ): Promise<ApiRouteCredential[]> {
 	let raw: string;
 	try {
+        raw = await withRetry(async () => {
 		const handle = await fs.open(path, "r");
 		try {
 			const buffer = Buffer.alloc(1024 * 1024 + 1);
 			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
 			if (bytesRead > 1024 * 1024)
 				throw new Error("Invalid API route configuration");
-			raw = buffer.subarray(0, bytesRead).toString("utf8");
+			return buffer.subarray(0, bytesRead).toString("utf8");
 		} finally {
 			await handle.close();
 		}
+        }, {maxAttempts:6,backoffMs:25});
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
 		throw new Error("Unable to read API route configuration");

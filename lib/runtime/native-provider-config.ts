@@ -1,5 +1,4 @@
 import { tomlStringLiteral } from "./config-toml.js";
-import { CODEX_BASE_URL } from "../constants.js";
 
 import {
 	NATIVE_PROVIDER_BEGIN as BEGIN,
@@ -43,17 +42,10 @@ export function rewriteNativeProviderConfig(
 	)
 		throw new Error("Native provider requires a loopback proxy origin");
 	const lines = rootLines(withoutNativeBlock(content), false);
-	const root = lines.slice(0, lines.findIndex(line => /^\s*\[/.test(line)) < 0 ? lines.length : lines.findIndex(line => /^\s*\[/.test(line))).join("\n");
-	const voiceOverrides = ["experimental_realtime_webrtc_call_base_url", "experimental_realtime_ws_base_url"]
-		.filter(key => !new RegExp(`^\\s*${key}\\s*=`, "m").test(root))
-		.map(key => `${key} = ${tomlStringLiteral(`${CODEX_BASE_URL}/codex`)}`);
 	return [
 		BEGIN,
 		'model_provider = "openai"',
 		`openai_base_url = ${tomlStringLiteral(baseUrl)}`,
-		// Voice has a distinct call shape and WebSocket transport. Let the native
-		// client retain both its desktop credential and backend protocol there.
-		...voiceOverrides,
 		END,
 		...lines,
 	].join("\n");

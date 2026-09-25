@@ -551,7 +551,7 @@ it("does not fall back to HTTP for a ChatGPT workspace whose handshake is refuse
 	expect(posts).toHaveLength(0);
 });
 
-it("retries once on a fresh socket when a reused upstream socket closes before accepting", async () => {
+it("does not replay a sent create when a reused socket closes before its first event", async () => {
 	const upstream = createServer();
 	const wss = new WebSocketServer({ server: upstream });
 	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
@@ -568,9 +568,9 @@ it("retries once on a fresh socket when a reused upstream socket closes before a
 	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
 	const ws = await g.connect();
 	await turn(ws, { model: "shared", input: [] });
-	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
-	expect(connections).toBe(2);
-	expect(messages).toBe(3);
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "error" });
+	expect(connections).toBe(1);
+	expect(messages).toBe(2);
 });
 
 it("keeps loopback hops off an environment HTTP proxy", async () => {

@@ -27,8 +27,10 @@ export async function runResetsCommand(args:string[]):Promise<number>{
   const pending=command==='redeem'?await service.status().then(s=>s.pending??null,()=>({key:undefined})):null;
   // The pending record can belong to another account (a redeem is refused while
   // any result is pending); point at the account that actually needs the retry.
-  const owner=pending?.key?(storage?.accounts??[]).findIndex(a=>resetTargetForStoredAccount(a)?.key===pending.key):-1;
-  const retry=pending?.key&&owner<0?'check it there (the pending account was removed)':owner>=0&&owner!==Number(value)-1?`retry account ${owner+1}, which holds the pending result`:'retry the same account';
+  const owner=pending?.key?(storage?.accounts??[]).findIndex(a=>resetTargetForStoredAccount({...a,enabled:true,workspaces:undefined})?.key===pending.key):-1;
+  const pendingAccount=owner>=0?storage?.accounts[owner]:undefined;
+  const disabled=pendingAccount?resetTargetForStoredAccount(pendingAccount)===null:false;
+  const retry=disabled?`account ${owner+1} or its workspace is disabled; re-enable it before retrying the pending result`:pending?.key&&owner<0?'check it there (the pending account was removed)':owner>=0&&owner!==Number(value)-1?`retry account ${owner+1}, which holds the pending result`:'retry the same account';
   console.error(command==='list'?'Reset-credit availability could not be refreshed. No credits were redeemed.':command==='auto'?'Reset-credit settings could not be updated.':pending?`Reset operation could not be confirmed. No new automatic redemption will be attempted while a result is pending; use resets list and ${retry}.`:'No reset credit was redeemed. Availability could not be confirmed or a reset was just redeemed; run resets list --refresh and try again.');return 1;}
  finally{await manager.flushPendingSave();}
  });

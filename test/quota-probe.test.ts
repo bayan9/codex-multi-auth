@@ -68,6 +68,12 @@ describe("quota-probe", () => {
 		vi.useRealTimers();
 	});
 
+	it("does not start or retry a quota probe after cancellation",async()=>{
+      const controller=new AbortController();controller.abort();const fetchMock=vi.fn();vi.stubGlobal("fetch",fetchMock);
+      await expect(fetchCodexQuotaSnapshot({accountId:"fixture",accessToken:"fixture",signal:controller.signal})).rejects.toMatchObject({name:"AbortError"});
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
 	it("finishes one tiny check probe when a subscription reports zero usage", async () => {
 		const headers = makeQuotaHeaders({"x-codex-primary-used-percent":"0", "x-codex-secondary-used-percent":"0", "x-codex-primary-reset-after-seconds":"18000","x-codex-secondary-reset-after-seconds":"604800", "x-codex-plan-type":"prolite", "content-type":"text/event-stream"});
 		const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {status:200,headers}));

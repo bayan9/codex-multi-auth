@@ -34,11 +34,10 @@ describe("native provider binding", () => {
 	});
 });
 
-it("keeps voice signaling and its websocket on native desktop authentication",()=>{
+it("does not enable experimental voice endpoints in the text release",()=>{
  const original='model = "fixture-model"\n';
  const bound=rewriteNativeProviderConfig(original,"http://127.0.0.1:43210");
- expect(bound).toContain('experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"');
- expect(bound).toContain('experimental_realtime_ws_base_url = "https://chatgpt.com/backend-api/codex"');
+ expect(bound).not.toContain("experimental_realtime_");
  expect(restoreNativeProviderConfig(bound,original)).not.toContain("experimental_realtime_");
 });
 it("preserves explicit voice endpoint overrides through bind and unbind",()=>{

@@ -398,3 +398,67 @@ it("keeps a journaled rotated token live when a native request re-reads the unch
  expect(manager.getAccountByIndex(0)?.access).toBe("fixture-fresh");
  await manager.flushPendingSave();
 });
+
+ it("journals a spent rotation when the primary write fails with EACCES", async () => {
+ const {vi}=await import("vitest"); const {promises:fs}=await import("node:fs");
+ const manager = await setup();
+ const path = getStoragePath();
+ const original = fs.rename.bind(fs);
+ const rename = vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+  if (String(to) === path) throw Object.assign(new Error("denied"), {code:"EACCES"});
+  return original(from, to);
+ });
+ try {
+  const result = await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!, {type:"oauth",access:"fixture-fresh",refresh:"fixture-rotated",expires:Date.now()+3600000});
+  expect(result?.refreshToken).toBe("fixture-rotated");
+  expect(new AccountManager(undefined,await loadAccounts()).getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated");
+ } finally {rename.mockRestore();await manager.flushPendingSave();}
+});
+
+it("saves the first account from a synthetic missing-store load",async()=>{
+ const dir=await mkdtemp(join(tmpdir(),"fresh-pool-"));dirs.push(dir);setStoragePathDirect(join(dir,"accounts.json"));
+ const storage=(await loadAccounts())!;
+ expect(storage.accounts).toEqual([]);
+ storage.accounts.push({accountId:"first",refreshToken:"fixture-first",addedAt:1,lastUsed:1});
+ await saveAccounts(storage);
+ expect((await loadAccounts())?.accounts).toHaveLength(1);
+});
+it("persists runtime blockers during debounced saves while conflicting user edits remain pending",async()=>{
+ const manager=await setup();const live=manager.getAccountByIndex(0)!;
+ live.accountLabel="Local";
+ const external=(await loadAccounts())!;external.accounts[0]!.accountLabel="External";await saveAccounts(external);
+ const until=Date.now()+60000;
+ live.rateLimitResetTimes={codex:until};live.coolingDownUntil=until;live.cooldownReason="rate-limit";
+ manager.saveToDiskDebounced();await manager.flushPendingSave();
+ expect((await loadAccounts())?.accounts[0]).toMatchObject({accountLabel:"External",rateLimitResetTimes:{codex:until},coolingDownUntil:until,cooldownReason:"rate-limit"});
+ expect(live.accountLabel).toBe("Local");
+ live.rateLimitResetTimes.codex=until+1000;manager.saveToDiskDebounced();await manager.flushPendingSave();
+ expect((await loadAccounts())?.accounts[0]?.rateLimitResetTimes?.codex).toBe(until+1000);
+ await expect(manager.saveToDisk()).rejects.toMatchObject({code:"ESTALE"});
+});
+it("journals a spent rotation after account lock acquisition times out",async()=>{
+ const {vi}=await import("vitest");const locks=await import("../lib/storage/file-lock.js");
+ const manager=await setup(),path=getStoragePath(),original=locks.withFileTransactionLock;
+ const lock=vi.spyOn(locks,"withFileTransactionLock").mockImplementation((target,action,options)=>{
+  if(target===path)throw Object.assign(Error("busy"),{code:"ELOCKED"});
+  return original(target,action,options);
+ });
+ try {expect(await manager.commitRefreshedAuth(manager.getAccountByIndex(0)!,{type:"oauth",access:"fixture-new",refresh:"fixture-rotated",expires:Date.now()+3600000})).toMatchObject({refreshToken:"fixture-rotated"});}
+ finally {lock.mockRestore();}
+ expect(new AccountManager(undefined,await loadAccounts()).getAccountByIndex(0)?.refreshToken).toBe("fixture-rotated");
+ await manager.flushPendingSave();
+});
+it("preserves a live network cooldown while rescuing a journaled rotation",async()=>{
+ const {vi}=await import("vitest");const locks=await import("../lib/storage/file-lock.js");
+ const manager=await setup(),path=getStoragePath(),original=locks.withFileTransactionLock;
+ const live=manager.getAccountByIndex(0)!,until=Date.now()+60000;
+ live.coolingDownUntil=until;live.cooldownReason="network-error";
+ const lock=vi.spyOn(locks,"withFileTransactionLock").mockImplementation((target,action,options)=>{
+  if(target===path)throw Object.assign(Error("busy"),{code:"ELOCKED"});
+  return original(target,action,options);
+ });
+ try {
+  await manager.commitRefreshedAuth(live,{type:"oauth",access:"fixture-new",refresh:"fixture-rotated",expires:Date.now()+3600000});
+  expect(live).toMatchObject({coolingDownUntil:until,cooldownReason:"network-error"});
+ } finally {lock.mockRestore();await manager.flushPendingSave();}
+});
