@@ -1,9 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 import { runApiLoginMenu } from "../lib/codex-manager/api-login-menu.js";
 import type { ApiRouteCredential } from "../lib/api-route-store.js";
+/** A real menu can only return a value it offered; fail loudly if a fixture drifts. */
+function offered(items: { value?: string }[], choice: string | null | undefined): string | null {
+	if (choice == null) return null;
+	if (!items.some((item) => item.value === choice)) throw new Error(`fixture chose unoffered value ${choice}`);
+	return choice;
+}
 describe("API credential setup", () => {
 	it("requires explicit model choices and keeps credentials out of menu labels", async () => {
-		const choices = ["add", "zdr", "0", "toggle:exclusive", "save", "back"];
+		const choices = ["add", "zdr", "9", "toggle:exclusive", "save", "back"];
 		const labels: string[] = [];
 		const saved: ApiRouteCredential[][] = [];
 		const result = await runApiLoginMenu({
@@ -13,7 +19,7 @@ describe("API credential setup", () => {
 			},
 			select: async (items) => {
 				labels.push(...items.map((i) => i.label));
-				return choices.shift() ?? null;
+				return offered(items, choices.shift());
 			},
 			text: async () => "Private pool",
 			secret: async () => "fixture-api-secret",
@@ -25,17 +31,17 @@ describe("API credential setup", () => {
 		expect(saved[0]?.[0]).toMatchObject({
 			kind: "zdr",
 			visibleModels: ["exclusive"],
-			priority: 0,
+			priority: 9,
 		});
 		expect(labels.join(" ")).not.toContain("fixture-api-secret");
 	});
 	it("does not save a partial credential when model selection is cancelled", async () => {
-		const choices = ["add", "api", "0", null, "back"];
+		const choices = ["add", "api", "9", null, "back"];
 		const save = vi.fn();
 		await runApiLoginMenu({
 			load: async () => [],
 			save,
-			select: async () => choices.shift() ?? null,
+			select: async (items) => offered(items, choices.shift()),
 			text: async () => "Test",
 			secret: async () => "fixture-secret",
 			discover: async () => ["exclusive"],
@@ -124,4 +130,12 @@ it("keeps a route in place when its visible models are edited",async()=>{
  await runApiLoginMenu({load:async()=>[route("first"),route("second")],save,log:vi.fn(),discover:async()=>["model"],select:async()=>choices.shift()??null});
  expect(save.mock.calls[0]?.[0]?.map((r:ApiRouteCredential)=>r.id)).toEqual(["first","second"]);
  expect(save.mock.calls[0]?.[0]?.[0]?.visibleModels).toEqual(["model"]);
+});
+
+it("rejects a selection the menu did not offer instead of saving it", async () => {
+ const route:ApiRouteCredential={id:"fixture",label:"Fixture",kind:"api",apiKey:"fixture",priority:9,enabled:true,visibleModels:[]};
+ const choices=["fixture","priority","0","back"];const save=vi.fn();
+ await runApiLoginMenu({load:async()=>[route],save,log:vi.fn(),select:async()=>choices.shift()??null});
+ // Tier 0 is reserved for subscriptions and never offered to API credentials.
+ expect(save).not.toHaveBeenCalled();
 });

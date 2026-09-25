@@ -116,7 +116,15 @@ async function chooseModels(
 export async function runApiLoginMenu(
 	overrides: Partial<MenuDeps> = {},
 ): Promise<number> {
-	const d = { ...defaults, ...overrides };
+	const merged = { ...defaults, ...overrides };
+	// Treat any value the menu did not offer (e.g. a reserved tier 0) as a cancel.
+	const d: MenuDeps = {
+		...merged,
+		select: async (items, message) => {
+			const choice = await merged.select(items, message);
+			return choice !== null && items.some((item) => item.value === choice) ? choice : null;
+		},
+	};
 	if (!overrides.select && !process.stdin.isTTY) {
 		d.log("Run login --api in an interactive terminal.");
 		return 1;
