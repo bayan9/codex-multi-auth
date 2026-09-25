@@ -26,6 +26,8 @@ it('check capabilities refreshes only model discovery through the CLI dispatcher
  const {runCodexMultiAuthCli}=await import('../lib/codex-manager.js');
  expect(await runCodexMultiAuthCli(['check','capabilities'])).toBe(0);
  expect(f.capabilities).toHaveBeenCalledTimes(1);
+ // Only this explicit command may bypass the 15-minute paid-probe cache.
+ expect(f.capabilities).toHaveBeenCalledWith(expect.any(Function), { forceProbes: true });
  expect(f.refresh).not.toHaveBeenCalled(); expect(f.redeem).not.toHaveBeenCalled();
 });
 

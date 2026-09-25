@@ -45,7 +45,7 @@ export function parseApiReasoningDocumentation(
 		return [];
 	return [...new Set(values)];
 }
-type ProbeResult = {
+export type ProbeResult = {
 	at: number;
 	levels: string[];
 	tiers: string[];
@@ -94,6 +94,16 @@ export class ApiModelCapabilities {
 		private readonly fetchImpl: typeof fetch = fetch,
 		private readonly now: () => number = Date.now,
 	) {}
+	/** Probe results keyed by an opaque hash, for a fresh CLI process to honour the 15-minute cache. */
+	exportProbes(): Array<[string, ProbeResult]> {
+		return [...this.probes];
+	}
+	importProbes(entries: Array<[string, ProbeResult]>): void {
+		for (const [key, value] of entries.slice(-1000)) {
+			if (this.probes.has(key) || value.at > this.now()) continue;
+			this.probes.set(key, value);
+		}
+	}
 	async reasoning(id: string, refresh = false): Promise<string[]> {
 		return (await this.documentation(id, refresh)).levels;
 	}

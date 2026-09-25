@@ -1713,7 +1713,9 @@ async function handleRequestInner(
                 }) ?? [];
 				if (!apiConfigurationUnavailable && state.status.lastError === "api_configuration_unavailable") state.status.lastError = null;
                 state.catalogApiRoutes = configuredRoutes;
-				const apiRefresh = apiRuntime.catalogs(configuredRoutes, forceCatalogRefresh, forceCatalogRefresh, forceCatalogRefresh);
+				// Paid API probes respect the 15-minute cache unless `check capabilities` forces them.
+				const forceProbes = forceCatalogRefresh && incomingUrl.searchParams.get("force_probes") === "1";
+				const apiRefresh = apiRuntime.catalogs(configuredRoutes, forceCatalogRefresh, forceProbes, forceCatalogRefresh);
 				const pickerSnapshot = () => [
 					...modelCatalog.cachedList(routableKeys).filter(model => !/^(api|zdr)\//.test(model.slug)),
 					...buildVisibleModelUnion(apiRuntime.cachedCatalogs().flatMap(catalog => {

@@ -580,7 +580,7 @@ const CLI_COMMAND_HANDLERS: ReadonlyMap<string, CliCommandHandler> = new Map<
 	["check", (rest) => runCheckCommand({
   runHealthCheck,
   runResetCheck: () => runResetsCommand(["list", "--refresh"]),
-  runCapabilityCheck: () => refreshAndPrintModelInventory(console.log),
+  runCapabilityCheck: () => refreshAndPrintModelInventory(console.log, { forceProbes: true }),
  }, rest)],
 	[
 		"features",
