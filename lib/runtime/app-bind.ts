@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import process from "node:process";
@@ -641,6 +642,25 @@ function spawnRouter(state: AppBindState): void {
 	} finally {
 		closeSync(logFd);
 	}
+}
+
+/**
+ * Whether anything still accepts connections at a recorded router address.
+ * Only "refused" is proof that no router serves it; a timeout or an unusable
+ * address is "unknown".
+ */
+async function probeRouterAddress(baseUrl: string | null | undefined, timeoutMs = 1000): Promise<"refused" | "listening" | "unknown"> {
+	let url: URL;
+	try { url = new URL(baseUrl ?? ""); } catch { return "unknown"; }
+	const port = Number(url.port);
+	if (!Number.isInteger(port) || port <= 0) return "unknown";
+	return new Promise((resolve) => {
+		const socket = connect({ host: url.hostname.replace(/^\[|\]$/g, ""), port });
+		const done = (result: "refused" | "listening" | "unknown") => { clearTimeout(timer); socket.destroy(); resolve(result); };
+		const timer = setTimeout(() => done("unknown"), timeoutMs);
+		socket.once("connect", () => done("listening"));
+		socket.once("error", (error: NodeJS.ErrnoException) => done(error.code === "ECONNREFUSED" ? "refused" : "unknown"));
+	});
 }
 
 async function maybeStartRouter(state: AppBindState, options: AppBindOptions): Promise<boolean> {
@@ -1440,6 +1460,15 @@ async function bindCodexAppRuntimeRotationLocked(
 		// mode changes forever (unbind treats the same case as a warning).
 		if (router?.pid && isProcessAlive(router.pid)) {
 			if (ownRouter) throw new Error("Stop the existing app router before changing provider mode");
+			// A failed identity check is not proof: a slow or failing process probe
+			// (common on Windows) also returns false for a live router. Treat the pid
+			// as recycled only when nothing answers at the recorded router address.
+			const address = await probeRouterAddress(router.baseUrl ?? existingState.baseUrl);
+			if (address !== "refused") {
+				throw new Error(
+					`Could not confirm that the app router recorded as pid ${router.pid} has stopped (its address ${address === "listening" ? "still accepts connections" : "could not be checked"}). Stop it before changing provider mode.`,
+				);
+			}
 			options.log?.(`Warning: recorded router pid ${router.pid} is not the app router; continuing`);
 			// The record describes a router that no longer exists. Drop it so
 			// maybeStartRouter starts a replacement instead of trusting the live
