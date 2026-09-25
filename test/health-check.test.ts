@@ -242,7 +242,7 @@ describe("runHealthCheck live probe", () => {
 		await runHealthCheck({ liveProbe: true });
 
 		expect(fetchCodexQuotaSnapshotMock).toHaveBeenCalledExactlyOnceWith({
-			primeUnusedSubscription: true,
+			primeUnusedSubscription: false,
 			accountId: "acc_a",
 			accessToken: "access-a",
 			model: inspectRequestedModel(DEFAULT_LIVE_PROBE_MODEL).normalized,
@@ -338,6 +338,10 @@ it("checks usable accounts concurrently while committing results in account orde
  expect(logged()).toContain("Checking account probes");
  const rows=[...logged().matchAll(/(?:one|two|three|four)@example\.com/g)].map(match=>match[0]);
  expect(rows).toEqual(["one@example.com","two@example.com","three@example.com","four@example.com"]);
+ // Priming is opt-in (`check --prime`); a plain or scheduled check never starts quota windows.
+ expect(fetchCodexQuotaSnapshotMock.mock.calls.every(([options])=>options.primeUnusedSubscription===false)).toBe(true);
+ fetchCodexQuotaSnapshotMock.mockClear();
+ await runHealthCheck({liveProbe:true,primeUnusedSubscription:true});
  expect(fetchCodexQuotaSnapshotMock.mock.calls.every(([options])=>options.primeUnusedSubscription===true)).toBe(true);
 
 });
