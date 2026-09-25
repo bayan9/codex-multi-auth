@@ -619,7 +619,7 @@ Usage:
 codex-multi-auth rotation enable
 codex-multi-auth rotation disable
 codex-multi-auth rotation status
-codex-multi-auth rotation bind-app
+codex-multi-auth rotation bind-app [--native [--catalog-account <idx>] | --custom-provider]
 codex-multi-auth rotation unbind-app
 codex-multi-auth rotation reset-rate-limits [--all | --account <idx>] [--dry-run] [--json]
 codex-multi-auth rotation reset-runtime [--json]
@@ -641,6 +641,45 @@ When enabled, the wrapper starts a `127.0.0.1` proxy on a random port with a cus
 If every managed account is temporarily unavailable, the proxy returns `codex_runtime_rotation_pool_exhausted` with a retry hint pointing back to `codex-multi-auth rotation status`.
 
 Packaged desktop app support uses a reversible bind instead of patching app files. It backs up the real Codex `config.toml`, writes the same custom provider to the real Codex home, starts a localhost-only router, and installs a user login startup entry: a Startup `.cmd` on Windows or a LaunchAgent on macOS. The provider uses a local app-bind client token and `requires_openai_auth=false`, which keeps the selected multi-auth account out of the runtime composer while preserving router last-account telemetry for codex-multi-auth status and quota views. Package install/update runs the same bind by default when runtime rotation is enabled and a Codex desktop app is detected; set `CODEX_MULTI_AUTH_APP_BIND_INSTALL=0` to skip that self-heal or `CODEX_MULTI_AUTH_APP_BIND_INSTALL=1` to force it. Global install/update also routes supported user-level app launchers by default; set `CODEX_MULTI_AUTH_APP_LAUNCHER_INSTALL=0` to skip launcher routing. Installed wrappers may perform a best-effort daily npm version check during normal forwarded Codex startup; if a newer release exists, they only print `npm install -g codex-multi-auth@latest` and never mutate the package install.
+
+### Native provider binding (opt-in)
+
+`codex-multi-auth rotation bind-app --native` keeps the built-in OpenAI provider
+and the real desktop login, while routing inference through the local account
+pool. This preserves the native authentication path used by Remote Control
+pairing and other account-dependent desktop features; pairing still requires a
+supported native app and its normal account setup. `codex-multi-auth switch <index>` pins the inference account; it does not
+change the desktop login in this mode. Sign out/in using the desktop app to
+change its real login. An auth-sync warning after a CLI switch can reflect this
+intentional separation; check `rotation status` for the routing state.
+
+Use `--native --catalog-account <index>` to discover models and their metadata
+from one enabled reference account, independently of the inference pin. The
+reference is stored by identity, not list position. Without a reference, the
+proxy combines eligible catalogs, preserving the first complete record for each
+model. Requests are sent only to eligible accounts advertising the requested
+model; a reference catalog does not grant another account access. Catalogs refresh
+on demand after 60 seconds (failed discovery retries after 5 seconds), using the
+native client's version. No model IDs or reasoning settings are hardcoded.
+
+Native mode currently requires file-backed desktop credentials
+(`cli_auth_credentials_store = "file"`) in the same Codex home as the router.
+Configure that setting and sign in through the native app before using this mode;
+keyring-only credentials are not supported. The proxy authenticates the exact,
+unexpired local desktop token or a current enabled managed-account token. It does
+not modify the app binary or add UI controls. Desktop profile and quota displays
+can still describe the desktop login; use multi-auth status for inference routing.
+WebSocket attempts receive an authenticated HTTP 426 response so compatible
+native clients fall back to HTTP streaming.
+
+**Upgrade notes:** Existing binds keep their recorded provider mode on upgrade and
+on `reset-runtime`. Legacy binds without a recorded mode remain on the custom provider.
+New binds default to custom unless `CODEX_MULTI_AUTH_NATIVE_OPENAI=1` opts into native mode.
+To explicitly opt in, run `codex-multi-auth rotation bind-app --native`.
+`reset-runtime` preserves native mode and its reference account. Use
+`bind-app --custom-provider` to return to the custom provider, or `unbind-app` to
+restore the previous routing configuration. Restart the desktop app after changing
+provider modes.
 
 Because packaged app bind changes the real Codex `model_provider` to `codex-multi-auth-runtime-proxy`, current Codex Desktop builds can hide older local threads that were indexed under the original provider. This is a visibility/provider-filtering limitation, not expected data loss: rollout files, `session_index.jsonl`, and Codex SQLite state normally remain under `~/.codex`. If you need to browse old Desktop history, run `codex-multi-auth rotation unbind-app` or `codex-multi-auth rotation disable`, reopen Codex, and re-bind when you want app-level rotation again.
 

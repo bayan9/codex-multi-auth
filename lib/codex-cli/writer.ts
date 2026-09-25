@@ -1,3 +1,5 @@
+import { withNativeBindingLock } from "../runtime/native-binding-lock.js";
+import { hasNativeProviderConfig } from "../runtime-constants.js";
 import { existsSync, promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { createLogger } from "../logger.js";
@@ -541,8 +543,14 @@ async function enqueueActiveSelectionWrite<T>(task: () => Promise<T>): Promise<T
 export async function setCodexCliActiveSelection(
 	selection: ActiveSelection,
 ): Promise<boolean> {
-	return enqueueActiveSelectionWrite(async () => {
+	return enqueueActiveSelectionWrite(() => withNativeBindingLock(getCodexCliConfigPath(), async () => {
 		if (!isCodexCliSyncEnabled()) return false;
+		// Native app binding deliberately separates desktop identity from inference selection.
+		try {
+			if (hasNativeProviderConfig(await fs.readFile(getCodexCliConfigPath(), "utf8"))) return false;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+		}
 
 		incrementCodexCliMetric("writeAttempts");
 		const accountsPath = getCodexCliAccountsPath();
@@ -736,7 +744,14 @@ export async function setCodexCliActiveSelection(
 			});
 			return false;
 		}
-	});
+	}).catch((error: unknown) => {
+        incrementCodexCliMetric("writeFailures");
+        log.warn("Failed to persist Codex CLI active selection", {
+            operation: "write-active-selection", outcome: "native-bind-lock-unavailable",
+            code: (error as NodeJS.ErrnoException)?.code ?? "unknown",
+        });
+        return false;
+    }));
 }
 
 export function getLastCodexCliSelectionWriteTimestamp(): number {

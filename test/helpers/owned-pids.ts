@@ -78,6 +78,8 @@ async function waitForExit(child: ChildProcess): Promise<void> {
  * `waitForExit` still settles such a child on its `error` event.
  */
 function killChild(child: ChildProcess): void {
+    // A failed spawn can retain a native handle with pid 0; never signal a process group.
+    if (!Number.isInteger(child.pid) || (child.pid ?? 0) <= 0) return;
 	try {
 		child.kill("SIGKILL");
 	} catch {

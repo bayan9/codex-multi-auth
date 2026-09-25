@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, realpathSync, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getConfigDir, getProjectStorageKey } from "../lib/storage/paths.js";
 import {
 	getStoragePathState,
@@ -42,6 +42,12 @@ import {
 	withAccountStorageTransaction,
 	withFlaggedStorageTransaction,
 } from "../lib/storage.js";
+
+// macOS exposes its temporary root through /var -> /private/var. The export
+// symlink defense requires a canonical fixture and an identically scoped root.
+const originalTmpdir = process.env.TMPDIR;
+beforeAll(() => { if (process.platform !== "win32") process.env.TMPDIR = realpathSync(tmpdir()); });
+afterAll(() => { if (originalTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = originalTmpdir; });
 
 describe("storage", () => {
 	const _origCODEX_HOME = process.env.CODEX_HOME;
@@ -110,7 +116,7 @@ describe("storage", () => {
 		let storagePath: string;
 
 		beforeEach(async () => {
-			storageDir = await fs.mkdtemp(join(tmpdir(), "codex-acct-dirmode-"));
+			storageDir = await fs.mkdtemp(join(realpathSync(tmpdir()), "codex-acct-dirmode-"));
 			storagePath = join(storageDir, "openai-codex-accounts.json");
 			setStoragePathDirect(storagePath);
 		});
@@ -550,7 +556,7 @@ describe("storage", () => {
 
 	describe("import/export (TDD)", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-test-" + Math.random().toString(36).slice(2),
 		);
 		const exportPath = join(testWorkDir, "export.json");
@@ -2755,7 +2761,7 @@ describe("storage", () => {
 
 	describe("loadAccounts", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-load-test-" + Math.random().toString(36).slice(2),
 		);
 		let testStoragePath: string;
@@ -2865,7 +2871,7 @@ describe("storage", () => {
 
 	describe("saveAccounts", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-save-test-" + Math.random().toString(36).slice(2),
 		);
 		let testStoragePath: string;
@@ -2915,7 +2921,7 @@ describe("storage", () => {
 
 	describe("clearAccounts", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-clear-test-" + Math.random().toString(36).slice(2),
 		);
 		let testStoragePath: string;
@@ -2970,7 +2976,7 @@ describe("storage", () => {
 
 		it("uses the same storage path for main repo and linked worktree", async () => {
 			const testWorkDir = join(
-				tmpdir(),
+				realpathSync(tmpdir()),
 				"codex-worktree-key-" + Math.random().toString(36).slice(2),
 			);
 			const fakeHome = join(testWorkDir, "home");
@@ -3077,7 +3083,7 @@ describe("storage", () => {
 
 	describe("clearAccounts error handling", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-clear-err-" + Math.random().toString(36).slice(2),
 		);
 		let testStoragePath: string;
@@ -3184,7 +3190,7 @@ describe("storage", () => {
 
 	describe("ensureGitignore edge cases", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-gitignore-" + Math.random().toString(36).slice(2),
 		);
 		const originalHome = process.env.HOME;
@@ -3306,7 +3312,7 @@ describe("storage", () => {
 
 	describe("legacy project storage migration", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-legacy-migration-" + Math.random().toString(36).slice(2),
 		);
 		const originalHome = process.env.HOME;
@@ -3367,7 +3373,7 @@ describe("storage", () => {
 
 	describe("worktree-scoped storage migration", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-worktree-migration-" + Math.random().toString(36).slice(2),
 		);
 		const originalHome = process.env.HOME;
@@ -3775,7 +3781,7 @@ describe("storage", () => {
 
 	describe("saveAccounts EPERM/EBUSY retry logic", () => {
 		const testWorkDir = join(
-			tmpdir(),
+			realpathSync(tmpdir()),
 			"codex-retry-" + Math.random().toString(36).slice(2),
 		);
 		let testStoragePath: string;
@@ -3806,6 +3812,7 @@ describe("storage", () => {
 			const renameSpy = vi
 				.spyOn(fs, "rename")
 				.mockImplementation(async (oldPath, newPath) => {
+					if (String(newPath) !== testStoragePath) return originalRename(oldPath, newPath);
 					attemptCount++;
 					if (attemptCount === 1) {
 						const err = new Error("EPERM error") as NodeJS.ErrnoException;
@@ -3835,6 +3842,7 @@ describe("storage", () => {
 			const renameSpy = vi
 				.spyOn(fs, "rename")
 				.mockImplementation(async (oldPath, newPath) => {
+					if (String(newPath) !== testStoragePath) return originalRename(oldPath, newPath);
 					attemptCount++;
 					if (attemptCount <= 2) {
 						const err = new Error("EBUSY error") as NodeJS.ErrnoException;
@@ -3859,9 +3867,11 @@ describe("storage", () => {
 				accounts: [{ refreshToken: "token", addedAt: now, lastUsed: now }],
 			};
 
+			const originalRename = fs.rename.bind(fs);
 			let attemptCount = 0;
-			const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async () => {
-				attemptCount++;
+			const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (oldPath, newPath) => {
+				if (String(newPath) !== testStoragePath) return originalRename(oldPath, newPath);
+					attemptCount++;
 				const err = new Error("EPERM error") as NodeJS.ErrnoException;
 				err.code = "EPERM";
 				throw err;
@@ -3883,9 +3893,11 @@ describe("storage", () => {
 				accounts: [{ refreshToken: "token", addedAt: now, lastUsed: now }],
 			};
 
+			const originalRename = fs.rename.bind(fs);
 			let attemptCount = 0;
-			const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async () => {
-				attemptCount++;
+			const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (oldPath, newPath) => {
+				if (String(newPath) !== testStoragePath) return originalRename(oldPath, newPath);
+					attemptCount++;
 				const err = new Error("EACCES error") as NodeJS.ErrnoException;
 				err.code = "EACCES";
 				throw err;
@@ -4379,11 +4391,13 @@ describe("storage", () => {
 		});
 
 		it("logs error for non-ENOENT errors during clear", async () => {
+			const originalUnlink = fs.unlink.bind(fs);
 			const unlinkSpy = vi
 				.spyOn(fs, "unlink")
-				.mockRejectedValue(
-					Object.assign(new Error("EACCES error"), { code: "EACCES" }),
-				);
+				.mockImplementation(async path => {
+					if (String(path).includes(".write-lock")) return originalUnlink(path);
+					throw Object.assign(new Error("EACCES error"), {code: "EACCES"});
+				});
 
 			await expect(clearAccounts()).rejects.toMatchObject({ code: "EACCES" });
 

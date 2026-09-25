@@ -1,3 +1,8 @@
+import { createNativeAccountStorageReader } from "./runtime/native-account-storage.js";
+import { mapWithConcurrency } from "./concurrency.js";
+import { syncNativeAccountCredentials } from "./runtime/native-account-sync.js";
+import { isNativeClientToken } from "./runtime/native-client-auth.js";
+import { CatalogRetryError, AccountModelCatalog } from "./runtime/account-model-catalog.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -423,6 +428,10 @@ function createOutboundHeaders(
 	return headers;
 }
 
+function catalogAccountKey(account: ManagedAccount): string {
+	return `${account.index}:${account.accountId ?? ""}:${account.email ?? ""}`;
+}
+
 function isAuthorizedClient(headers: Headers, clientApiKey: string): boolean {
 	const authorization = headers.get("authorization") ?? "";
 	const bearerMatch = authorization.match(/^Bearer\s+(.+)$/i);
@@ -484,6 +493,7 @@ async function persistRuntimeActiveAccount(
 	family: ModelFamily,
 	isPinned: boolean,
 	schedulingStrategy: string,
+	preserveDesktopLogin = false,
 ): Promise<void> {
 	if (isPinned) {
 		// When the user has manually pinned an account, the proxy MUST NOT
@@ -523,7 +533,7 @@ async function persistRuntimeActiveAccount(
 			await accountManager.markSwitchedLocked(account, "rotation", family);
 		}
 		accountManager.saveToDiskDebounced();
-		await accountManager.syncCodexCliActiveSelectionForIndex(account.index);
+		if (!preserveDesktopLogin) await accountManager.syncCodexCliActiveSelectionForIndex(account.index);
 	} catch {
 		// Runtime forwarding must not fail after a valid upstream response just
 		// because the local status mirrors are temporarily locked.
@@ -981,6 +991,9 @@ export async function startRuntimeRotationProxy(
 	const lastObservedAffinityGeneration =
 		readStorageMetaFromDisk().affinityGeneration;
 	const state = createRotationProxyState({
+		nativeOpenai: options.nativeOpenai === true,
+		readNativeAccountStorage: options.readNativeAccountStorage || !options.accountManager ? createNativeAccountStorageReader(options.readNativeAccountStorage) : undefined,
+		catalogAccount: options.catalogAccount,
 		activeAccountManager,
 		routingMutexMode,
 		schedulingStrategy,
@@ -1090,8 +1103,104 @@ async function handleRequestInner(
 		// unauthorized). Authorized callers still fall through to the 404 below
 		// when they hit an unsupported path/method.
 		const incomingHeaders = headersFromIncoming(req);
-		if (!isAuthorizedClient(incomingHeaders, state.clientApiKey)) {
+		const bearer = incomingHeaders.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+		const apiKeyClient = isAuthorizedClient(incomingHeaders, state.clientApiKey);
+		const isLiveManagedToken = (access: string | undefined, expires: number | undefined, enabled: boolean | undefined, invalidatedAt: number | undefined): boolean =>
+			!!bearer && enabled !== false && !invalidatedAt && !!access && (expires ?? 0) > state.now() && safeEqual(bearer, access);
+		const managedOAuthFor = (manager: AccountManager): boolean => state.nativeOpenai === true && manager.getAccountsSnapshot().some(account =>
+			isLiveManagedToken(account.access, account.expires, account.enabled, account.authInvalidatedAt));
+		let managedStorageVerified = true;
+        let nativeOAuthResult: boolean | undefined;
+		const nativeOAuth = async (): Promise<boolean> =>
+			(nativeOAuthResult ??= !!(state.nativeOpenai && bearer && await isNativeClientToken(bearer, state.now())));
+		if (state.nativeOpenai && state.readNativeAccountStorage) {
+			// Screen the caller before account storage can reshape the manager: a
+			// request with no credential never reads disk, and a bearer that matches
+			// nothing we hold (in memory or on disk) is refused before any credential
+			// sync or manager swap.
+			if (!apiKeyClient && !bearer) {
+				writeUnauthorized(res);
+				return;
+			}
+			const snapshot = await state.readNativeAccountStorage();
+            const disk = snapshot.storage;
+            managedStorageVerified = snapshot.verified;
+            // A concurrent request may have replaced the manager while this read waited.
+            accountManager = state.activeAccountManager;
+			const presentsKnownCredential = apiKeyClient || managedOAuthFor(accountManager) ||
+				!!disk?.accounts.some(a => isLiveManagedToken(a.accessToken, a.expiresAt, a.enabled, a.authInvalidatedAt)) ||
+				await nativeOAuth();
+			if (!presentsKnownCredential) {
+				writeUnauthorized(res);
+				return;
+			}
+			if (!disk) {
+				// Managed tokens died with the store, but the API key and the desktop's
+				// own login still identify the client. A 401 would tell the native
+				// client its login is bad when the store is what is missing.
+				if (apiKeyClient || await nativeOAuth()) {
+					writeJson(res, HTTP_STATUS.SERVICE_UNAVAILABLE, {
+						error: {
+							message: "Account storage is unavailable. Run codex-multi-auth login or check the account store.",
+							code: "native_account_storage_unavailable",
+						},
+					});
+				} else {
+					writeUnauthorized(res);
+				}
+				return;
+			}
+            if (snapshot.verified) {
+			const accounts = accountManager.getAccountsSnapshot();
+			const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
+			if (!sameInventory) {
+				accountManager = new AccountManager(undefined, disk);
+				accountManager.setRoutingMutexMode(state.routingMutexMode);
+                // Preserve independently learned limits by identity, never by the old index.
+                for (const previous of accounts) {
+                    const current = accountManager.getAccountsSnapshot().find(a => a.accountId === previous.accountId && a.email === previous.email);
+                    const live = current && accountManager.getAccountByIndex(current.index);
+                    if (!live) continue;
+                    for (const [key, until] of Object.entries(previous.rateLimitResetTimes)) {
+                        if (typeof until === "number" && until > state.now()) live.rateLimitResetTimes[key] = Math.max(live.rateLimitResetTimes[key] ?? 0, until);
+                    }
+                    if (previous.access === live.access && (previous.coolingDownUntil ?? 0) > (live.coolingDownUntil ?? 0)) {
+                        live.coolingDownUntil = previous.coolingDownUntil; live.cooldownReason = previous.cooldownReason;
+                    }
+                }
+                // Reorders change index-based pins/affinity, so they deliberately reload too.
+                const generation = disk.affinityGeneration ?? 0;
+                if (generation <= state.lastObservedAffinityGeneration) state.sessionAffinityStore?.clearAll();
+                state.activeAccountManager = accountManager;
+				state.knownAccountManagers.add(accountManager);
+				state.modelCatalog = undefined;
+                state.catalogsByVersion?.clear();
+			} else if (syncNativeAccountCredentials(accountManager, disk)) {
+				state.modelCatalog = undefined;
+                state.catalogsByVersion?.clear();
+			}
+            }
+		}
+		// Decide against the synced manager, so a credential revoked or disabled on
+		// disk is refused even though it passed the screen above.
+		if (!apiKeyClient && !(managedStorageVerified && managedOAuthFor(accountManager)) && !(await nativeOAuth())) {
 			writeUnauthorized(res);
+			return;
+		}
+
+		// The native client treats 426 as a signal to retry over HTTP/SSE.
+		// Authenticate first; never forward an unsupported WebSocket handshake.
+		if (
+			req.method === "GET" && isResponsesPath(incomingUrl.pathname) &&
+			incomingHeaders.get("upgrade")?.toLowerCase() === "websocket"
+		) {
+			res.setHeader("connection", "close");
+			writeJson(res, 426, {
+				error: {
+					message: "Use HTTP streaming for Responses API requests.",
+					code: "runtime_rotation_proxy_http_required",
+				},
+			});
 			return;
 		}
 
@@ -1245,6 +1354,12 @@ async function handleRequestInner(
 			context.upstreamPath,
 		);
 		const attemptedIndexes = new Set<number>();
+		let catalogEligibleKeys: Set<string> | undefined;
+		const catalogExcludedIndexes = (): number[] => {
+			const eligibleKeys = catalogEligibleKeys;
+			if (!eligibleKeys) return [];
+			return accountManager.getAccountsSnapshot().filter(account => !eligibleKeys.has(catalogAccountKey(account))).map(account => account.index);
+		};
 		let exhaustionReason: ExhaustionReason = "no-account";
 		let accountCount = accountManager.getAccountCount();
 		let transientAttemptLimit = Math.max(
@@ -1322,6 +1437,81 @@ async function handleRequestInner(
 		// applies unchanged because it all keys off `pinnedIndex` / `isPinned`.
 		const pinnedIndex = state.forcedAccountIndex ?? storageMeta.pinnedAccountIndex;
 		const isPinned = typeof pinnedIndex === "number";
+		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
+			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
+			// Unversioned requests use the stable unversioned catalog, never the last
+			// client's version: interleaved clients must not choose each other's catalog.
+			const clientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : undefined;
+            const versionKey = clientVersion ?? "";
+            const versions = state.catalogsByVersion ??= new Map();
+            const backoff = state.catalogBackoff ??= new Map();
+            state.modelCatalog = versions.get(versionKey);
+			state.modelCatalog ??= new AccountModelCatalog(async (key) => {
+				const retryAt = backoff.get(key) ?? 0;
+                if (retryAt > state.now()) throw new CatalogRetryError(retryAt - state.now());
+                backoff.delete(key);
+                const snapshot = state.activeAccountManager.getAccountsSnapshot().find(a => catalogAccountKey(a) === key);
+                const account = snapshot && state.activeAccountManager.getAccountByIndex(snapshot.index);
+                if (!account || account.enabled === false || account.authInvalidatedAt ||
+                    (account.cooldownReason === "auth-failure" && (account.coolingDownUntil ?? 0) > state.now())) throw new Error("Account unavailable");
+				const fresh = await ensureFreshAccessToken({					accountManager: state.activeAccountManager, account,
+					family: "codex", model: null, now: state.now(), tokenRefreshSkewMs: state.tokenRefreshSkewMs,
+					tokenInvalidationCooldownMs: state.tokenInvalidationCooldownMs				});
+				if (!fresh.ok) throw new Error("Account authentication unavailable");
+				const accountId = resolveAccountId(fresh.account, fresh.accessToken);
+				if (!accountId) throw new Error("Account identity unavailable");
+				const url = new URL(state.upstreamBaseUrl);
+				url.pathname = url.pathname.replace(/\/+$/, "") + "/codex/models";
+				if (clientVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(clientVersion)) url.searchParams.set("client_version", clientVersion);
+				const response = await state.fetchImpl(url.toString(), {					method: "GET", redirect: "error",
+					headers: createOutboundHeaders(new Headers(), fresh.account, fresh.accessToken, accountId),
+					signal: AbortSignal.timeout(Math.min(state.fetchTimeoutMs, 15_000))				});
+				if (!response.ok) {
+                    await response.body?.cancel();
+                    if (response.status === 429) {
+                        const retryMs = Math.max(60_000, parseRetryAfterHeaderMs(response.headers, state.now()) ?? 60_000);
+                        if (backoff.size >= 100) backoff.delete(backoff.keys().next().value ?? "");
+                        backoff.set(key, state.now() + retryMs);
+                        throw new CatalogRetryError(retryMs);
+                    }
+                    throw new Error("Catalog unavailable");
+                }
+				// Bound remote bytes, not just the advertised content length.
+				const reader = response.body?.getReader(); if (!reader) throw new Error("Empty catalog");
+				const chunks: Uint8Array[] = []; let size = 0;
+				try {					for (;;) {						const part = await reader.read(); if (part.done) break; size += part.value.byteLength;
+						if (size > 8 * 1024 * 1024) throw new Error("Catalog too large"); chunks.push(part.value);					}				}
+				finally { await reader.cancel(); }
+				return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+			}, state.now);
+            if (!versions.has(versionKey)) {
+                if (versions.size >= 4) versions.delete(versions.keys().next().value ?? "");
+                versions.set(versionKey, state.modelCatalog);
+            }
+			const eligible = accountManager.getAccountsSnapshot().filter(a => a.enabled !== false &&
+				(!isPinned || a.index === pinnedIndex) && !policyDecision?.blockedAccountIndexes.has(a.index));
+			if (isModelsRequest) {
+				const reference = state.catalogAccount;
+				const discovery = reference ? accountManager.getAccountsSnapshot().filter(a => a.enabled !== false && a.email === reference.email && a.accountId === reference.accountId) : eligible;
+				const catalog = state.modelCatalog;
+				const models = reference && discovery[0] ? await catalog.list(eligible.map(catalogAccountKey), catalogAccountKey(discovery[0])) : reference ? [] : await catalog.list(eligible.map(catalogAccountKey));
+				writeJson(res, models.length ? 200 : 503, models.length ? { models } : { error: { code: "account_catalog_unavailable", message: "No eligible account catalog is available." } });
+				return;
+			}
+			const requestedModel = context.model;
+			if (!requestedModel) throw new Error("Missing requested model");
+			// Concurrent: each cold catalog fetch may take up to 15s.
+			const catalog = state.modelCatalog;
+			const requestedSettings: unknown = JSON.parse(context.body.toString("utf8"));
+            const effort = isRecord(requestedSettings) && isRecord(requestedSettings.reasoning) && typeof requestedSettings.reasoning.effort === "string" ? requestedSettings.reasoning.effort : undefined;
+            const tier = isRecord(requestedSettings) && typeof requestedSettings.service_tier === "string" ? requestedSettings.service_tier : undefined;
+            const support = await mapWithConcurrency(eligible, 3, account => catalog.supports(catalogAccountKey(account), requestedModel, effort, tier));
+			catalogEligibleKeys = new Set(eligible.filter((_account, index) => support[index]).map(catalogAccountKey));
+			if (!support.some(Boolean)) {
+				writeJson(res, 403, { error: { code: "model_not_available_in_account_catalog", message: "Selected model is not advertised by an eligible account. Refresh account access or change the pin." } }); return;
+			}
+		}
+
 		// The token bucket spreads load across a selectable pool. A pin has no
 		// alternative account, so exhausting that local heuristic can only reject a
 		// request that the pinned account could serve. Keep circuit-breaker admission
@@ -1464,7 +1654,7 @@ async function handleRequestInner(
 					sessionKey: context.sessionKey,
 					family: context.family,
 					model: context.model,
-					attemptedIndexes,
+					attemptedIndexes: new Set([...attemptedIndexes, ...catalogExcludedIndexes()]),
 					now: state.now(),
 					policy: policyDecision,
 					pinnedIndex,
@@ -1506,6 +1696,7 @@ async function handleRequestInner(
 							return candidate;
 						})
 					: selectAccount();
+            for (const index of catalogExcludedIndexes()) accountSkipReasons.set(index, "model-not-supported");
 			if (!selected) {
 				if (
 					!reloadedAfterNoAccount &&
@@ -2100,6 +2291,7 @@ async function handleRequestInner(
 				context.family,
 				isPinned && refreshed.account.index === pinnedIndex,
 				state.schedulingStrategy,
+				state.nativeOpenai,
 			);
 
 			// Recover the upstream token counts as the body streams past. Without

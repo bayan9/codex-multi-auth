@@ -465,3 +465,12 @@ MIT License. See [LICENSE](LICENSE).
 - You assume responsibility for your own usage and compliance.
 
 </details>
+
+### Optional native desktop binding
+
+Native desktop features such as Remote Control pairing need the real desktop
+account identity. Use `codex-multi-auth rotation bind-app --native` to preserve
+that login while routing inference through managed accounts. Add
+`--catalog-account <index>` to use one account's live model catalog. This mode
+requires file-backed desktop credentials; see the [rotation command reference](docs/reference/commands.md#native-provider-binding-opt-in)
+for setup, limitations, and rollback.

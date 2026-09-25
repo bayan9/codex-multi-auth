@@ -257,3 +257,10 @@ codex-multi-auth check
 - [configuration.md](configuration.md)
 - [troubleshooting.md](troubleshooting.md)
 - [reference/commands.md](reference/commands.md)
+
+## Native desktop login with app binding
+
+Optional `rotation bind-app --native` preserves the real desktop authentication
+path used by Remote Control pairing and other account-dependent features while
+routing inference through managed accounts. See [native provider binding](reference/commands.md#native-provider-binding-opt-in)
+for file-backed credential setup, live catalog selection, and rollback.
