@@ -8,6 +8,7 @@ import { request } from "node:http";
 import { gzipSync, brotliCompressSync, deflateSync } from "node:zlib";
 import * as zlib from "node:zlib";
 import { AccountManager, getRuntimeTrackerKey } from "../lib/accounts.js";
+import { getModelFamily } from "../lib/prompts/codex.js";
 import { CodexValidationError } from "../lib/errors.js";
 import { HTTP_STATUS, OPENAI_HEADERS } from "../lib/constants.js";
 import {
@@ -5206,6 +5207,50 @@ it("keeps session affinity when the client disconnects mid-stream",async()=>{
  expect(forget).not.toHaveBeenCalled();
  expect(failure).not.toHaveBeenCalled();
  forget.mockRestore();
+});
+
+describe("learned limits across a native inventory rebuild",()=>{
+ const tokenFor=(workspace:string)=>{
+  const part=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${part({alg:"none"})}.${part({"https://api.openai.com/auth":{chatgpt_account_id:workspace}})}.sig`;
+ };
+ it("keeps a 429 window on the account that earned it when identity-less rows are reordered",async()=>{
+  const storage=createStorage(Date.now(),2);
+  storage.accounts.forEach((account,index)=>{delete account.accountId;delete account.email;account.accessToken=tokenFor(`ws_${index+1}`);});
+  const manager=new AccountManager(undefined,structuredClone(storage));
+  manager.markRateLimited(manager.getAccountByIndex(0)!,10*60_000,getModelFamily("common"),"common");
+  const disk=structuredClone(storage);disk.accounts.reverse();
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(disk)}});
+  const response=await postResponses(proxy,{model:"common",input:"fixture"});
+  expect(response.status).toBe(200);await response.text();
+  expect(calls.filter(c=>c.url.endsWith("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["ws_2"]);
+ });
+ it("carries a 429 window by stored record id when the email changes",async()=>{
+  const storage=createStorage(Date.now(),2);storage.accounts.forEach((account,index)=>{account.recordId=`record-${index+1}`;});
+  const manager=new AccountManager(undefined,structuredClone(storage));
+  manager.markRateLimited(manager.getAccountByIndex(0)!,10*60_000,getModelFamily("common"),"common");
+  // Renamed in place plus a new login appended: the inventory changes, the record does not.
+  const disk=structuredClone(storage);disk.accounts[0]!.email="renamed@example.com";
+  disk.accounts.push({...structuredClone(storage.accounts[1]!),recordId:"record-3",accountId:"acc_3",email:"account-3@example.com",refreshToken:"refresh-3",accessToken:"access-3"});
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(disk)}});
+  for(let i=0;i<4;i++){const response=await postResponses(proxy,{model:"common",input:"fixture"});expect(response.status).toBe(200);await response.text();}
+  expect(calls.filter(c=>c.url.endsWith("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).not.toContain("acc_1");
+ });
+ it("carries a 429 window across a re-login that changes the refresh token",async()=>{
+  const storage=createStorage(Date.now(),2);
+  const manager=new AccountManager(undefined,structuredClone(storage));
+  manager.markRateLimited(manager.getAccountByIndex(0)!,10*60_000,getModelFamily("common"),"common");
+  const disk=structuredClone(storage);
+  disk.accounts[0]!.refreshToken="refresh-after-relogin";disk.accounts[0]!.accessToken="access-after-relogin";
+  disk.accounts.reverse();
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(disk)}});
+  const response=await postResponses(proxy,{model:"common",input:"fixture"});
+  expect(response.status).toBe(200);await response.text();
+  expect(calls.filter(c=>c.url.endsWith("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_2"]);
+ });
 });
 
 describe("pre-dispatch eligibility re-read",()=>{

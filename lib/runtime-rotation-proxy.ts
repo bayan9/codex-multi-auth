@@ -1250,8 +1250,25 @@ async function handleRequestInner(
 				accountManager = new AccountManager(undefined, disk);
 				accountManager.setRoutingMutexMode(state.routingMutexMode);
                 // Preserve independently learned limits by identity, never by the old index.
+                // A record id survives an email change; the account identity survives a
+                // re-login that re-derives an unstored record id. Rows with neither an
+                // accountId nor an email share no identity and match only by refresh token.
+                const rebuilt = accountManager.getAccountsSnapshot();
+                const claimed = new Set<number>();
+                const identityOf = (a: { accountId?: string; email?: string; refreshToken?: string }) => {
+                    const id = a.accountId?.trim(), email = sanitizeEmail(a.email);
+                    return id || email ? JSON.stringify([id ?? null, email ?? null]) : a.refreshToken?.trim() ? `refresh:${a.refreshToken.trim()}` : null;
+                };
+                const carryTarget = (previous: (typeof accounts)[number]) => {
+                    const unclaimed = rebuilt.filter(a => !claimed.has(a.index));
+                    const identity = identityOf(previous);
+                    const found = unclaimed.find(a => a.recordId && a.recordId === previous.recordId)
+                        ?? (identity === null ? undefined : unclaimed.find(a => identityOf(a) === identity));
+                    if (found) claimed.add(found.index);
+                    return found;
+                };
                 for (const previous of accounts) {
-                    const current = accountManager.getAccountsSnapshot().find(a => a.accountId === previous.accountId && a.email === previous.email);
+                    const current = carryTarget(previous);
                     const live = current && accountManager.getAccountByIndex(current.index);
                     if (!live) continue;
                     for (const [key, until] of Object.entries(previous.rateLimitResetTimes)) {
