@@ -33,6 +33,7 @@ import {
 	printUsage,
 } from "./help.js";
 import { runActionPanel } from "./login-action-panel.js";
+import { clearCredentialSidecars } from "../storage/credential-sidecars.js";
 import {
 	handleManageAction,
 	promptBackupRestoreMode,
@@ -115,6 +116,7 @@ const log = createLogger("codex-manager");
 
 async function clearAccountsAndReset(): Promise<void> {
 	await clearAccounts();
+	await clearCredentialSidecars();
 }
 
 /** @internal */
@@ -335,7 +337,7 @@ async function runLoginDashboardLoop(
 				async () => {
 					await clearAccountsAndReset();
 					console.log(
-						"Cleared saved accounts from active storage. Recovery snapshots remain available.",
+						"Cleared saved accounts and API credentials. Account recovery snapshots remain available.",
 					);
 				},
 				displaySettings,

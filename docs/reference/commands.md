@@ -245,7 +245,7 @@ fail with exit code 1 without reading account storage or quota cache.
 | `--all` | verify | Run both `--paths` and `--flagged` together |
 | `--now`, `-n` | why-selected | Recompute the current selection from live state (default). Note: on fix/doctor/verify-flagged, `-n` means `--dry-run` instead |
 | `--last`, `-l` | why-selected | Recompute selection from current state and attach the last persisted runtime snapshot |
-| `--clear-accounts` | uninstall | Also remove stored account credentials (irreversible) |
+| `--clear-accounts` | uninstall | Also remove stored account credentials and API keys (irreversible) |
 | `--stdout` | init-config | Force template output to stdout even when other write modes are considered |
 | `--remove` / `--dry-run` | `codex-multi-auth-app-launcher` | Remove managed launcher routing, or preview install/remove without writing |
 
@@ -819,6 +819,8 @@ failure.
 - New commands include `login --api`, `resets list|redeem|auto`, and
   `account priority <index> <0..9>`. API credentials and reset state live in the
   new local files `api-routes.json` (mode 0600) and `reset-credits.json`.
+  `uninstall --clear-accounts` and the dashboard's delete-all reset remove both,
+  along with `api-capability-probes.json` and `inference-activity/`.
 - This routing release adds no npm scripts and requires no manual storage migration.
 
 - `codex-multi-auth login --org <org_id>` binds the login to one ChatGPT workspace.
