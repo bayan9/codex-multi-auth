@@ -44,7 +44,7 @@ it("gives native-specific remediation for an invocation account selector",async(
  } finally{await rm(home,{recursive:true,force:true,maxRetries:5});}
 });
 
-it.each([false,true])("forwards native launches even when auth-store persistence fails=%s",async failWrite=>{
+it.each([null,"EPERM","EBUSY"])("forwards native launches even when auth-store persistence fails with %s",async failCode=>{
  const home=await mkdtemp(join(tmpdir(),"native-auth-store-"));
  const config=join(home,"config.toml");
  try {
@@ -59,7 +59,7 @@ it.each([false,true])("forwards native launches even when auth-store persistence
    import {writeFile,appendFile} from "node:fs/promises";
    export async function ensureCodexCliFileAuthStore(){
     await writeFile(${JSON.stringify(join(home,"writer-called"))},"called");
-    if(${failWrite})throw Object.assign(Error("fixture denied"),{code:"EACCES"});
+    if(${JSON.stringify(failCode)})throw Object.assign(Error("fixture denied"),{code:${JSON.stringify(failCode)}});
     await appendFile(${JSON.stringify(config)},'cli_auth_credentials_store = "file"\\n');
    }
   `);
@@ -70,7 +70,7 @@ it.each([false,true])("forwards native launches even when auth-store persistence
   expect(argv).toContain('model_reasoning_effort="xhigh"');
   expect(await readFile(join(home,"writer-called"),"utf8")).toBe("called");
   const persisted=await readFile(config,"utf8");
-  if(failWrite)expect(persisted).toBe(original);
+  if(failCode)expect(persisted).toBe(original);
   else expect(persisted).toContain('cli_auth_credentials_store = "file"');
  } finally {await rm(home,{recursive:true,force:true,maxRetries:5});}
 });
