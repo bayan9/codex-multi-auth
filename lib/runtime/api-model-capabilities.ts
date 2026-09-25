@@ -189,12 +189,14 @@ export class ApiModelCapabilities {
 			status: {} as Record<string, string>,
 		};
 		let credentialUnavailable = false;
-		// An inconclusive attempt (throttle, auth, bad body) is not a revocation:
-		// keep what an earlier probe verified. Only "unsupported" or "downgraded"
-		// removes an effort or speed tier.
+		// 401/403 means this credential lost access: nothing it verified before
+		// may still be advertised. A throttle (429) or transport failure is only
+		// inconclusive and keeps what an earlier probe verified. Only
+		// "unsupported" or "downgraded" removes a setting otherwise.
+		let lostAccess = false;
 		const previous = this.probes.get(key);
 		const keep = (name: string, status: string): string =>
-			status === "unverified" && previous?.status[name] === "verified" ? "verified" : status;
+			status === "unverified" && !lostAccess && previous?.status[name] === "verified" ? "verified" : status;
 		const attempt = async (setting: {
 			effort?: string;
 			tier?: string;
@@ -248,6 +250,7 @@ export class ApiModelCapabilities {
 					);
 					if ([401, 403, 429].includes(response.status))
 						credentialUnavailable = true;
+					if (response.status === 401 || response.status === 403) lostAccess = true;
 					// Probe bodies are tiny, but an upstream error must not grow local memory unboundedly.
 					const reader = response.body?.getReader();
 					if (!reader) return "unverified";

@@ -448,3 +448,25 @@ it("keeps verified efforts and speed tiers through a throttled re-probe and retr
 	await efforts();
 	expect(posts).toBeGreaterThan(afterThrottle);
 });
+
+it("stops advertising a credential's verified settings once it loses access", async () => {
+	let now = 1;
+	let revoked = false;
+	const fetcher = vi.fn(async (_u: unknown, init?: RequestInit) => {
+		if (init?.method !== "POST") return new Response("missing", { status: 404 });
+		if (revoked) return Response.json({ error: { code: "invalid_api_key" } }, { status: 401 });
+		const body = JSON.parse(String(init.body));
+		if (body.tools) return Response.json({ output: [{ type: "function_call", name: "capability_probe" }] });
+		if (body.service_tier === "priority") return Response.json({ service_tier: "priority" });
+		if (body.service_tier) return Response.json({ service_tier: "default" });
+		return Response.json({ service_tier: "default", reasoning: body.reasoning });
+	});
+	const reader = new ApiModelCapabilities(fetcher as typeof fetch, () => now);
+	const enrich = async () => (await reader.enrich([{ slug: "fixture" }], false, route))[0];
+	expect((await enrich())?.service_tiers).toEqual([expect.objectContaining({ id: "priority" })]);
+	revoked = true;
+	now += 900_001;
+	const after = await enrich();
+	expect(after?.service_tiers).toEqual([]);
+	expect(after?.supported_reasoning_levels ?? []).not.toEqual(expect.arrayContaining([expect.objectContaining({ effort: "xhigh" })]));
+});
