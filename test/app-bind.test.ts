@@ -2140,6 +2140,35 @@ describe("reviewed provider transitions",()=>{
   await bindCodexAppRuntimeRotation({...options,nativeOpenai:true,verifyProcessIdentity});
   expect((await getAppBindStatus(options)).state?.nativeOpenai).toBe(true);
  });
+ it("starts a replacement router when the recorded router pid was recycled",async()=>{
+  const root=await createTempRoot("bind-recycled-router-");const codexHome=join(root,"codex-home");
+  const env={CODEX_MULTI_AUTH_DIR:join(root,"multi-auth"),CODEX_MULTI_AUTH_APP_BIND_CODEX_HOME:codexHome};
+  await mkdir(codexHome,{recursive:true});await writeFile(join(codexHome,"config.toml"),'model="example"\n');
+  const routerScriptPath=join(root,"fake-router.mjs");
+  await writeFile(routerScriptPath,[
+   "import { mkdirSync, writeFileSync } from 'node:fs';",
+   "import { dirname } from 'node:path';",
+   "const args = process.argv.slice(2);",
+   "const statusPath = args[args.indexOf('--status') + 1];",
+   "mkdirSync(dirname(statusPath), { recursive: true });",
+   "writeFileSync(statusPath, JSON.stringify({ version: 1, state: 'running', pid: process.pid, startedAt: Date.now(), baseUrl: 'http://127.0.0.1:54323', updatedAt: Date.now() }) + '\\n', 'utf8');",
+   "process.on('SIGTERM', () => process.exit(0));",
+   "setInterval(() => undefined, 1000);",
+   "",
+  ].join("\n"),"utf8");
+  const options={platform:"linux" as const,home:root,env,nodePath:process.execPath,routerScriptPath};
+  await seedExistingAppBindState({...options,port:43210,baseUrl:"http://127.0.0.1:43210"});
+  // The recorded router is gone and its pid now belongs to an unrelated live process.
+  await writeFile(resolveAppBindPaths(options).statusPath,JSON.stringify({version:1,state:"running",pid:process.pid,baseUrl:"http://127.0.0.1:43210",port:43210,startedAt:1,updatedAt:1}));
+  try {
+   const result=await bindCodexAppRuntimeRotation({...options,nativeOpenai:true,verifyProcessIdentity:async()=>false});
+   expect(result.status.state?.nativeOpenai).toBe(true);
+   expect(result.status.state?.baseUrl).toBe("http://127.0.0.1:54323");
+   expect(result.status.router?.pid).not.toBe(process.pid);
+  } finally {
+   await unbindCodexAppRuntimeRotation({platform:process.platform,home:root,env});
+  }
+ },20_000);
  it("allows a mode change with a dead recorded router",async()=>{
   const options=await fixture();
   await withDeadPid(async pid=>{

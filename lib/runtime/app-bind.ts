@@ -1441,6 +1441,10 @@ async function bindCodexAppRuntimeRotationLocked(
 		if (router?.pid && isProcessAlive(router.pid)) {
 			if (ownRouter) throw new Error("Stop the existing app router before changing provider mode");
 			options.log?.(`Warning: recorded router pid ${router.pid} is not the app router; continuing`);
+			// The record describes a router that no longer exists. Drop it so
+			// maybeStartRouter starts a replacement instead of trusting the live
+			// (recycled) pid and leaving the new mode pointed at a dead address.
+			await unlinkIfExists(paths.statusPath);
 		}
 	}
 
