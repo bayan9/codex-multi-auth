@@ -2301,9 +2301,14 @@ async function handleRequestInner(
                     : undefined;
 				const disk = latest?.accounts.find(item => item.recordId && item.recordId === refreshed.account.recordId)
 					?? latest?.accounts.find(item => item.accountId === refreshed.account.accountId && sanitizeEmail(item.email) === sanitizeEmail(refreshed.account.email)) ?? retained;
-				const workspace = disk?.workspaces?.find(item => item.id === accountId);
+				const workspace = disk?.workspaces?.find(item => item.id.trim() === accountId);
+				// Derive the stored binding exactly as workspaceModelScopes does: trimmed,
+				// falling back to the token's workspace claim when no id was stored.
+				// A stored record carries accessToken; the transient-grace fallback is a live account (access).
+				const diskToken = (disk as { accessToken?: string } | undefined)?.accessToken ?? (disk as { access?: string } | undefined)?.access;
+				const diskBoundId = disk ? disk.accountId?.trim() || extractAccountId(diskToken)?.trim() : undefined;
 				const stillEligible = disk && disk.enabled !== false && !disk.authInvalidatedAt &&
-					(workspace ? workspace.enabled !== false : accountId === disk.accountId);
+					(workspace ? workspace.enabled !== false : accountId === diskBoundId);
 				if (!stillEligible) {
 					writeJson(res, 503, {error:{code:"routing_configuration_changed",message:"Routing eligibility changed while preparing the request. Retry with the current configuration."}});
 					return;

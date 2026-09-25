@@ -5208,6 +5208,28 @@ it("keeps session affinity when the client disconnects mid-stream",async()=>{
  forget.mockRestore();
 });
 
+describe("pre-dispatch eligibility re-read",()=>{
+ const tokenFor=(workspace:string)=>{
+  const part=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${part({alg:"none"})}.${part({"https://api.openai.com/auth":{chatgpt_account_id:workspace}})}.sig`;
+ };
+ it.each([["no stored account id",undefined],["a padded account id"," acc_token "]])("routes an account with %s through Responses and images",async(_label,stored)=>{
+  const storage=createStorage(Date.now(),1);const account=storage.accounts[0]!;
+  account.accessToken=tokenFor("acc_token");
+  if(stored===undefined)delete account.accountId;else account.accountId=stored;
+  const manager=new AccountManager(undefined,structuredClone(storage));
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):call.url.includes("/images/")?Response.json({data:[]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(storage)}});
+  const responses=await postResponses(proxy,{model:"common",input:"fixture"});
+  expect(responses.status).toBe(200);await responses.text();
+  const image=await postResponses(proxy,{model:"gpt-image-2",prompt:"fixture"},"/images/generations");
+  expect(image.status).toBe(200);await image.text();
+  const dispatched=calls.filter(c=>!c.url.includes("/models"));
+  expect(dispatched).toHaveLength(2);
+  expect(dispatched.every(c=>c.headers.get("chatgpt-account-id")==="acc_token")).toBe(true);
+ });
+});
+
 describe("request-level capability rejections",()=>{
  const reject=()=>Response.json({error:{code:"invalid_value",param:"reasoning.effort",message:"Unsupported effort fixture"}},{status:400});
  const catalog=()=>Response.json({models:[{slug:"common",supported_reasoning_levels:[{effort:"ultra"}]}]});
