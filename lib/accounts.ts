@@ -1,3 +1,4 @@
+import { mergeAccountCooldown, mergeAccountSnapshot } from "./storage/snapshot-merge.js";
 import type { Auth } from "@codex-ai/sdk";
 import { createHash } from "node:crypto";
 import { saveAccountsWithRetry } from "./storage/save-retry.js";
@@ -14,7 +15,7 @@ import {
 	withAccountStorageTransaction,
 } from "./storage.js";
 import type { AccountIdSource, OAuthAuthDetails } from "./types.js";
-import type { Workspace } from "./storage/public-types.js";
+import type { CodexCliMirror, Workspace } from "./storage/public-types.js";
 import { MODEL_FAMILIES, type ModelFamily } from "./request/helpers/model-map.js";
 import {
 	getHealthTracker,
@@ -84,6 +85,7 @@ export {
 } from "./codex-cli/state.js";
 
 import {
+	codexCliAccountIdFor,
 	extractAccountId,
 	extractAccountEmail,
 	shouldUpdateAccountIdFromToken,
@@ -327,9 +329,11 @@ export interface ManagedAccount {
 	consecutiveAuthFailures?: number;
 	workspaces?: Workspace[];
 	currentWorkspaceIndex?: number;
+	codexCliMirror?: CodexCliMirror;
 }
 
 export class AccountManager {
+	private persistenceBaseline: AccountStorageV3 | null = null;
 	private accounts: ManagedAccount[] = [];
 	private cursorByFamily: Record<ModelFamily, number> = initFamilyState(0);
 	private currentAccountIndexByFamily: Record<ModelFamily, number> =
@@ -567,7 +571,7 @@ export class AccountManager {
 					return {
 						index,
 						recordId: resolveAccountRecordId(
-							{ ...account, refreshToken },
+							account,
 						),
 						accountId: matchesFallback
 							? (fallbackAccountId ?? account.accountId)
@@ -597,6 +601,7 @@ export class AccountManager {
 						authInvalidationErrorCode: account.authInvalidationErrorCode,
 						workspaces: account.workspaces,
 						currentWorkspaceIndex: account.currentWorkspaceIndex,
+						codexCliMirror: account.codexCliMirror,
 					};
 				})
 				.filter((account): account is ManagedAccount => account !== null);
@@ -642,6 +647,7 @@ export class AccountManager {
 					this.cursorByFamily[family] = nextIndex;
 				}
 			}
+			this.persistenceBaseline = stored ? structuredClone(stored) : null;
 			return;
 		}
 
@@ -676,6 +682,7 @@ export class AccountManager {
 				this.cursorByFamily[family] = 0;
 			}
 		}
+		this.persistenceBaseline = stored ? structuredClone(stored) : null;
 	}
 
 	getAccountCount(): number {
@@ -874,7 +881,7 @@ export class AccountManager {
 		const account = this.accounts[index];
 		if (!account) return;
 		await setCodexCliActiveSelection({
-			accountId: account.accountId,
+			accountId: codexCliAccountIdFor(account, account.access),
 			email: account.email,
 			accessToken: account.access,
 			refreshToken: account.refreshToken,
@@ -1704,6 +1711,7 @@ export class AccountManager {
 						: undefined,
 					workspaces: account.workspaces,
 					currentWorkspaceIndex: account.currentWorkspaceIndex,
+					codexCliMirror: account.codexCliMirror,
 				};
 			}),
 			activeIndex,
@@ -1736,7 +1744,7 @@ export class AccountManager {
 				// pair here would clobber a `switch` that landed since the last save.
 				this.reconcileSelectionFromDisk();
 				const nextStorage = structuredClone(
-					this.buildStorageSnapshot(),
+                    this.reconcileTokensFromDisk(this.buildStorageSnapshot(), _current),
 				) as AccountStorageV3;
 				const storageIndex = findAccountIndexByIdentity(
 					nextStorage.accounts,
@@ -1801,7 +1809,7 @@ export class AccountManager {
 					this.clearAuthFailures(liveAccount);
 
 					try {
-						await persist(nextStorage);
+						await this.persistSnapshot(_current, nextStorage, persist, storedAccount);
 					} catch (error) {
 						liveAccount.access = previousLiveAccountState.access;
 						liveAccount.refreshToken = previousLiveAccountState.refreshToken;
@@ -1845,7 +1853,7 @@ export class AccountManager {
 					return liveAccount;
 				}
 
-				await persist(nextStorage);
+				await this.persistSnapshot(_current, nextStorage, persist, storedAccount);
 				log.warn("Unable to resolve refreshed live account after persistence", {
 					sourceIndex: source.index,
 				});
@@ -2145,6 +2153,64 @@ export class AccountManager {
 		return account;
 	}
 
+ private async persistSnapshot(current: AccountStorageV3 | null, proposed: AccountStorageV3, persist: (storage: AccountStorageV3) => Promise<void>, refreshed?: AccountStorageV3["accounts"][number]): Promise<void> {
+  const missingStore = current && "restoreReason" in current && current.restoreReason === "missing-storage" && current.accounts.length === 0;
+  // Preserve initial/missing-store creation. An intentionally cleared store has
+  // distinct metadata and must still win over this manager's stale inventory.
+  let merged: AccountStorageV3;
+  let rescuedBaseline: AccountStorageV3 | undefined;
+  try {
+   merged = current && !missingStore ? mergeAccountSnapshot(this.persistenceBaseline, current, proposed) : proposed;
+  } catch (error) {
+   if ((error as NodeJS.ErrnoException).code !== "ESTALE" || !refreshed?.recordId || !current) throw error;
+   // A rotated credential must not be discarded because an unrelated user edit
+   // conflicts. Persist only its auth delta under this same transaction lock.
+   const matches = (row: AccountStorageV3["accounts"][number]) => resolveAccountRecordId(row) === refreshed.recordId;
+   const prior = this.persistenceBaseline?.accounts.find(matches);
+   const index = current.accounts.findIndex(matches);
+   const disk = current.accounts[index];
+   if (!prior || !disk || disk.refreshToken !== prior.refreshToken || disk.enabled === false || disk.authInvalidatedAt) throw error;
+   merged = structuredClone(current);
+   const row = merged.accounts[index];
+   if (!row || !this.persistenceBaseline) throw error;
+   rescuedBaseline = structuredClone(this.persistenceBaseline);
+   const baselineRow = rescuedBaseline.accounts.find(matches);
+   if (!baselineRow) throw error;
+   const cooldown = mergeAccountCooldown(prior, disk, refreshed);
+   // Persist the stable identity before rotating a legacy row's identity material.
+   row.recordId = refreshed.recordId;
+   baselineRow.recordId = refreshed.recordId;
+   // Only authentication was committed. Pending additions, removals and user
+   // edits must still differ from their old baseline on the next save. The
+   // refresh can also move the identity and clears auth blockers; a restart
+   // must not bring the old identity or cooldown back.
+   for (const field of ["accessToken", "refreshToken", "expiresAt", "accountId", "accountIdSource", "email", "authInvalidatedAt", "authInvalidationErrorCode", "coolingDownUntil", "cooldownReason"] as const) {
+    const value = refreshed[field];
+    if (value === undefined) {delete row[field];delete baselineRow[field];}
+    else {Object.assign(row, { [field]: value });Object.assign(baselineRow, { [field]: value });}
+   }
+   Object.assign(row, cooldown);
+  }
+  await persist(merged);
+  if (refreshed) {
+   const saved = merged.accounts.find(row => row.recordId === refreshed.recordId);
+   const live = this.accounts.find(row => row.recordId === refreshed.recordId);
+   // A successful refresh must retain blockers learned by another request,
+   // including an observation made while the storage write was pending.
+   if (saved && live) Object.assign(live, mergeAccountCooldown(refreshed, saved, live));
+  }
+  // Keep the baseline in this manager's inventory/intent space. Adopting added
+  // disk records here would misread their absence in the next save as deletion.
+  this.persistenceBaseline = rescuedBaseline ?? structuredClone(proposed);
+  if (refreshed) {
+   const saved = merged.accounts.find(row => row.recordId === refreshed.recordId);
+   const baseline = this.persistenceBaseline.accounts.find(row => row.recordId === refreshed.recordId);
+   // The adopted blocker is now known persisted state, so a later explicit
+   // clear must compare against it rather than the pre-refresh clear.
+   if (saved && baseline) Object.assign(baseline, { coolingDownUntil: saved.coolingDownUntil, cooldownReason: saved.cooldownReason });
+  }
+ }
+
 	async saveToDisk(): Promise<void> {
 		await runWithStoragePathState(this.storagePathState, async () => {
 			await withAccountStorageTransaction(async (current, persist) => {
@@ -2152,9 +2218,7 @@ export class AccountManager {
 				// routine save does not clobber a token another process just rotated
 				// (stress audit H3) or a pin the CLI just wrote (#474).
 				this.reconcileSelectionFromDisk();
-				await persist(
-					this.reconcileTokensFromDisk(this.buildStorageSnapshot(), current),
-				);
+				await this.persistSnapshot(current, this.reconcileTokensFromDisk(this.buildStorageSnapshot(), current), persist);
 			});
 		});
 	}

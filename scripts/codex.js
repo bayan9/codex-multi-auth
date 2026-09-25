@@ -3599,7 +3599,16 @@ function parseRuntimeRotationProxyEnv(value) {
 	return undefined;
 }
 
+function hasNativeAppBinding(env = process.env) {
+	try {
+		const config = readFileSync(join(resolveCodexHomeDir(env), "config.toml"), "utf8");
+		return config.includes("# codex-multi-auth native provider begin") &&
+			extractConfigAssignmentValue(config, "model_provider") === "openai";
+	} catch { return false; }
+}
+
 async function isRuntimeRotationProxyEnabled(rawArgs, baseEnv = process.env) {
+	if (hasNativeAppBinding(baseEnv)) return false;
 	if ((baseEnv.CODEX_MULTI_AUTH_BYPASS ?? "").trim() === "1") {
 		return false;
 	}
@@ -6555,6 +6564,16 @@ async function main() {
 		return 1;
 	}
 	const forwardArgs = [...forcedAccount.forwardArgs];
+	if (hasNativeAppBinding(process.env)) {
+		if (process.env.CODEX_MULTI_AUTH_FORCE_ACCOUNT_INDEX) {
+			console.error("Native app binding uses the persistent inference selection. Use codex-multi-auth switch instead of --account.");
+			return 1;
+		}
+		// Preserve native model IDs, reasoning settings, account/read and desktop login.
+		const result = await forwardToRealCodexOnce(realCodexBin, forwardArgs, process.env);
+		return result.exitCode;
+	}
+
 	if (process.stdin.isTTY && process.stdout.isTTY && !bypass) {
 		const pickerRequest = getResumePickerRequest(forwardArgs);
 		if (pickerRequest && await isRuntimeRotationProxyEnabled(forwardArgs)) {
@@ -6587,6 +6606,7 @@ async function main() {
 // lib/request/helpers/model-map.ts (see test/codex-model-resolution.test.ts,
 // which asserts wrapper<->lib parity).
 export {
+	isRuntimeRotationProxyEnabled,
 	normalizeRequestedModel,
 	coerceReasoningEffortForModel,
 	resolveModelFamilyForStatus,

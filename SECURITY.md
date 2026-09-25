@@ -21,6 +21,7 @@ Key controls:
 - Local storage under `~/.codex/multi-auth` (or `CODEX_MULTI_AUTH_DIR`).
 - Refresh-token lifecycle management and account health isolation.
 - Runtime rotation proxy is loopback-only, enabled by default, and authenticated with a local client key. Users can opt out with `codex-multi-auth rotation disable` or `CODEX_MULTI_AUTH_RUNTIME_ROTATION_PROXY=0`.
+- Opt-in native app binding also accepts the exact unexpired desktop token from the local file auth store, or an unexpired enabled managed-account token. These credentials authorize access to the configured local inference pool. Native binding preserves the desktop login; it does not grant upstream model entitlements.
 - Packaged Codex app bind is reversible and stores backup/router metadata under `~/.codex/multi-auth/app-bind/`.
 - No project-owned telemetry backend.
 

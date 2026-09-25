@@ -992,3 +992,53 @@ describe("runReportCommand", () => {
 		).toBe(false);
 	});
 });
+
+describe("runReportCommand refresh keeps explicit bindings", () => {
+	const jwt = (claims: Record<string, unknown>) =>
+		`h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+
+	it("keeps a manual id and source when the refreshed token names another workspace", async () => {
+		const storage = createStorage([
+			{
+				email: "one@example.com",
+				accountId: "ws-team",
+				accountIdSource: "manual",
+				refreshToken: "refresh-token-1",
+				accessToken: "access-token-1",
+				expiresAt: 10,
+				addedAt: 1,
+				lastUsed: 1,
+				enabled: true,
+			},
+		]);
+		const refreshedAccess = jwt({
+			"https://api.openai.com/auth": { chatgpt_account_id: "ws-token-claim" },
+		});
+		const deps = createDeps({
+			loadAccounts: vi.fn(async () => structuredClone(storage)),
+			queuedRefresh: vi.fn(async () => ({
+				type: "success",
+				access: refreshedAccess,
+				refresh: "refresh-token-updated",
+				expires: 500,
+			})),
+		});
+
+		expect(await runReportCommand(["--live", "--json"], deps)).toBe(0);
+
+		expect(deps.saveAccounts).toHaveBeenCalledWith(
+			expect.objectContaining({
+				accounts: [
+					expect.objectContaining({
+						accessToken: refreshedAccess,
+						accountId: "ws-team",
+						accountIdSource: "manual",
+					}),
+				],
+			}),
+		);
+		expect(deps.fetchCodexQuotaSnapshot).toHaveBeenCalledWith(
+			expect.objectContaining({ accountId: "ws-team" }),
+		);
+	});
+});

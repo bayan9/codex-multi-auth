@@ -319,3 +319,23 @@ describe("runHealthCheck live probe", () => {
 		expect(logged()).toContain("1 Codex available");
 	});
 });
+
+describe("runHealthCheck with a Codex CLI mirror", () => {
+	it("syncs the active account's mirror id, not the saved explicit id", async () => {
+		loadAccountsMock.mockResolvedValue(
+			storageWith([
+				account("a", {
+					accountId: "ws-team",
+					accountIdSource: "manual",
+					codexCliMirror: { forAccountId: "ws-team", accountId: "ws-authorized" },
+				}),
+			]),
+		);
+
+		await runHealthCheck();
+
+		expect(setCodexCliActiveSelectionMock).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ accountId: "ws-authorized" }),
+		);
+	});
+});

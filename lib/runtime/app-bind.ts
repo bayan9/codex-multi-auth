@@ -1,3 +1,6 @@
+import { withNativeBindingLock } from "./native-binding-lock.js";
+import { isRecord } from "../utils.js";
+import { hasNativeProviderConfig, rewriteNativeProviderConfig, restoreNativeProviderConfig } from "./native-provider-config.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
@@ -59,6 +62,8 @@ interface AppBindBackup {
 }
 
 export interface AppBindState {
+	nativeOpenai?: boolean;
+	catalogAccount?: { email: string; accountId: string; };
 	version: 1;
 	platform: NodeJS.Platform;
 	host: string;
@@ -128,6 +133,8 @@ export type ProcessIdentityVerifier = (
 ) => boolean | Promise<boolean>;
 
 export interface AppBindOptions {
+	nativeOpenai?: boolean;
+	catalogAccount?: { email: string; accountId: string; };
 	env?: NodeJS.ProcessEnv;
 	platform?: NodeJS.Platform;
 	home?: string;
@@ -203,7 +210,9 @@ export function rewriteConfigTomlForAppBind(
 	rawConfig: string,
 	baseUrl: string,
 	clientApiKey = "",
+	nativeOpenai = false,
 ): string {
+	if (nativeOpenai) return rewriteNativeProviderConfig(rawConfig, baseUrl);
 	return rewriteConfigTomlForRuntimeRotationProvider(
 		rawConfig,
 		baseUrl,
@@ -213,7 +222,7 @@ export function rewriteConfigTomlForAppBind(
 
 export function restoreConfigTomlFromAppBind(currentConfig: string, originalConfig: string): string {
 	return restoreConfigTomlFromRuntimeRotationProvider(
-		currentConfig,
+		restoreNativeProviderConfig(currentConfig, originalConfig),
 		originalConfig,
 	);
 }
@@ -356,6 +365,8 @@ function readAppBindStateRecord(record: Record<string, unknown>): AppBindState |
 		nodePath,
 		routerScriptPath,
 		clientApiKey,
+		nativeOpenai: record.nativeOpenai === true,
+		catalogAccount: isRecord(record.catalogAccount) && typeof record.catalogAccount.email === "string" && typeof record.catalogAccount.accountId === "string" ? { email: record.catalogAccount.email, accountId: record.catalogAccount.accountId } : undefined,
 		identityToken: identityToken ?? undefined,
 		startupPath: readString(record, "startupPath"),
 		launchAgentPath: readString(record, "launchAgentPath"),
@@ -1383,7 +1394,7 @@ export async function getAppBindStatus(options: AppBindOptions = {}): Promise<Ap
 	if (state === null) {
 		const current = await readConfigIfExists(paths.configPath);
 		unmanagedBind =
-			current.existed && configHasRuntimeRotationProvider(current.content);
+			current.existed && (configHasRuntimeRotationProvider(current.content) || hasNativeProviderConfig(current.content));
 	}
 	return {
 		bound: state !== null || unmanagedBind,
@@ -1400,7 +1411,7 @@ export async function bindCodexAppRuntimeRotation(
 ): Promise<AppBindResult> {
 	const paths = resolveAppBindPaths(options);
 	return withAppBindLock(paths.bindDir, () =>
-		bindCodexAppRuntimeRotationLocked(options, paths),
+		withNativeBindingLock(paths.configPath, () => bindCodexAppRuntimeRotationLocked(options, paths)),
 	);
 }
 
@@ -1411,6 +1422,16 @@ async function bindCodexAppRuntimeRotationLocked(
 	const platform = options.platform ?? process.platform;
 	const now = options.now?.() ?? Date.now();
 	const existingState = await readAppBindState(paths.statePath);
+	const nativeOpenai = options.nativeOpenai ?? existingState?.nativeOpenai ??
+		((options.env ?? process.env).CODEX_MULTI_AUTH_NATIVE_OPENAI === "1");
+	const catalogAccount = options.nativeOpenai === false ? undefined : options.catalogAccount ?? existingState?.catalogAccount;
+	if (existingState && (!!existingState.nativeOpenai !== nativeOpenai || JSON.stringify(catalogAccount) !== JSON.stringify(existingState.catalogAccount))) {
+		const router = await readRouterStatus(paths.statusPath);
+		await stopRouter(router, platform, existingState.routerScriptPath, {
+			log: options.log, identityToken: existingState.identityToken, verifyProcessIdentity: options.verifyProcessIdentity		});
+		if (router?.pid && isProcessAlive(router.pid)) throw new Error("Stop the existing app router before changing provider mode");
+	}
+
 	const host = existingState?.host ?? "127.0.0.1";
 	let port = existingState && existingState.port > 0 ? existingState.port : 0;
 	let baseUrl = existingState?.baseUrl ?? formatBaseUrl(host, port);
@@ -1426,8 +1447,13 @@ async function bindCodexAppRuntimeRotationLocked(
 		content,
 		createdAt: now,
 	};
-	let boundConfig = rewriteConfigTomlForAppBind(content, baseUrl, clientApiKey);
+	const bindingContent = nativeOpenai
+		? restoreConfigTomlFromAppBind(content, backup.content)
+		: restoreNativeProviderConfig(content, backup.content);
+	let boundConfig = rewriteConfigTomlForAppBind(bindingContent, baseUrl, clientApiKey, nativeOpenai);
 	let state: AppBindState = {
+		nativeOpenai,
+		catalogAccount,
 		version: 1,
 		platform,
 		host,
@@ -1499,7 +1525,7 @@ async function bindCodexAppRuntimeRotationLocked(
 			"Codex app bind could not resolve a runtime router port; refusing to write config.toml with port=0.",
 		);
 	}
-	boundConfig = rewriteConfigTomlForAppBind(content, baseUrl, clientApiKey);
+	boundConfig = rewriteConfigTomlForAppBind(bindingContent, baseUrl, clientApiKey, nativeOpenai);
 	state = {
 		...state,
 		port,
@@ -1525,7 +1551,7 @@ export async function unbindCodexAppRuntimeRotation(
 ): Promise<AppBindResult> {
 	const paths = resolveAppBindPaths(options);
 	return withAppBindLock(paths.bindDir, () =>
-		unbindCodexAppRuntimeRotationLocked(options, paths),
+		withNativeBindingLock(paths.configPath, () => unbindCodexAppRuntimeRotationLocked(options, paths)),
 	);
 }
 
@@ -1741,11 +1767,11 @@ async function unbindCodexAppRuntimeRotationLocked(
 		// above can't see this, so consult the config directly and self-heal it
 		// back to a working provider when it is bound.
 		const current = await readConfigIfExists(paths.configPath);
-		if (current.existed && configHasRuntimeRotationProvider(current.content)) {
+		if (current.existed && (configHasRuntimeRotationProvider(current.content) || hasNativeProviderConfig(current.content))) {
 			await atomicWriteFile(
 				paths.configPath,
 				restoreConfigTomlFromRuntimeRotationProviderWithoutBackup(
-					current.content,
+					restoreNativeProviderConfig(current.content, ""),
 				),
 			);
 			selfHealed = true;
@@ -1811,6 +1837,7 @@ export function formatAppBindStatus(status: AppBindStatus): string {
 	} else if (status.router?.lastAccountIndex !== null && status.router?.lastAccountIndex !== undefined) {
 		parts.push(`lastAccount=Account ${status.router.lastAccountIndex + 1}`);
 	}
+	if (status.state.nativeOpenai) return `Codex app bind: ${parts.join(", ")}, native OpenAI, live account catalogs`;
 	return [
 		`Codex app bind: ${parts.join(", ")}`,
 		[

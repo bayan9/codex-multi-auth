@@ -200,7 +200,7 @@ fail with exit code 1 without reading account storage or quota cache.
 | `--json` | limits, verify-flagged, verify, why-selected, best, forecast, report, usage, budget, models, monitor, integrations, fix, doctor, config explain, debug bundle, history | Print machine-readable output |
 | `--csv` | usage | Print or write CSV bucket output |
 | `--explain` | forecast, report | Include reasoning details (forecast text/JSON, report text) |
-| `--live` | best, forecast, report, fix | Use live probe before decisions/output |
+| `--live` | best, forecast, report, fix | Use live probe before decisions/output. On `fix`, this also rebinds an org-sourced account id that the backend's `wham/accounts/check` no longer authorizes and syncs a rebound active account into `~/.codex/auth.json` (see [the workspace note](#codex-multi-auth-workspace)) |
 | `--no-runtime-overlay` | forecast | Score from stored account state only; skip runtime observability overlay |
 | `--max-accounts <n>` | report | Cap how many accounts a live report walk inspects |
 | `--max-probes <n>` | report | Cap live probes during report |
@@ -326,6 +326,35 @@ With only an account index, prints the workspaces that account can rotate
 between (for example a personal Plus seat and a business/team seat under the
 same email, issue #491). With a workspace index too, persists that workspace
 as the account's active selection.
+
+> Authorization vs membership: an account's tracked workspaces come from the
+> token's own claims, which advertise **membership**. Codex CLI 0.156.0 and newer
+> additionally checks `GET /backend-api/wham/accounts/check` before every request
+> and refuses to run when the selected account is absent from that answer
+> (`selected workspace missing from routing discovery`). A fresh `login` without
+> `--org` now asks the same question and, when the automatically chosen workspace
+> is not authorized, falls back to the account the backend reports as default and
+> prints a warning. The check fails open: any error leaves the selection as-is.
+> An explicit `login --org` (or `CODEX_AUTH_ACCOUNT_ID`) binding is saved as
+> chosen, but when the backend does not authorize it, `~/.codex/auth.json` gets
+> the backend's default account instead and the login prints a warning. The
+> account remembers that substitute id, so `switch`, `best`, `check`, `doctor`,
+> rotation and the login dashboard keep writing it rather than the refused id.
+> It is dropped when the account is bound to a different id, and `fix --live`
+> re-checks it: removed once the explicit id is authorized, set again while it
+> is not.
+> `login --account` is left untouched: it is identity-checked before the write.
+>
+> **Already-saved accounts**: `login` only guards new selections. An org-sourced
+> id saved before this check existed (or set by `codex-multi-auth workspace
+> <account> <workspace>`, which has no live check of its own) is migrated by
+> `codex-multi-auth fix --live` instead: it runs the same authorization check
+> per account and, when the saved id is not authorized, rebinds it to the
+> backend's default and reports `rebound-unauthorized-workspace` for that
+> account. When the rebound account is the active one, `fix --live` also
+> rewrites `~/.codex/auth.json` and reports the result as `codexActiveSynced`
+> in `--json` output (`null` when no sync was needed). `fix` without `--live`
+> does not check this (it makes no network calls).
 
 ---
 
@@ -590,7 +619,7 @@ Usage:
 codex-multi-auth rotation enable
 codex-multi-auth rotation disable
 codex-multi-auth rotation status
-codex-multi-auth rotation bind-app
+codex-multi-auth rotation bind-app [--native [--catalog-account <idx>] | --custom-provider]
 codex-multi-auth rotation unbind-app
 codex-multi-auth rotation reset-rate-limits [--all | --account <idx>] [--dry-run] [--json]
 codex-multi-auth rotation reset-runtime [--json]
@@ -612,6 +641,45 @@ When enabled, the wrapper starts a `127.0.0.1` proxy on a random port with a cus
 If every managed account is temporarily unavailable, the proxy returns `codex_runtime_rotation_pool_exhausted` with a retry hint pointing back to `codex-multi-auth rotation status`.
 
 Packaged desktop app support uses a reversible bind instead of patching app files. It backs up the real Codex `config.toml`, writes the same custom provider to the real Codex home, starts a localhost-only router, and installs a user login startup entry: a Startup `.cmd` on Windows or a LaunchAgent on macOS. The provider uses a local app-bind client token and `requires_openai_auth=false`, which keeps the selected multi-auth account out of the runtime composer while preserving router last-account telemetry for codex-multi-auth status and quota views. Package install/update runs the same bind by default when runtime rotation is enabled and a Codex desktop app is detected; set `CODEX_MULTI_AUTH_APP_BIND_INSTALL=0` to skip that self-heal or `CODEX_MULTI_AUTH_APP_BIND_INSTALL=1` to force it. Global install/update also routes supported user-level app launchers by default; set `CODEX_MULTI_AUTH_APP_LAUNCHER_INSTALL=0` to skip launcher routing. Installed wrappers may perform a best-effort daily npm version check during normal forwarded Codex startup; if a newer release exists, they only print `npm install -g codex-multi-auth@latest` and never mutate the package install.
+
+### Native provider binding (opt-in)
+
+`codex-multi-auth rotation bind-app --native` keeps the built-in OpenAI provider
+and the real desktop login, while routing inference through the local account
+pool. This preserves the native authentication path used by Remote Control
+pairing and other account-dependent desktop features; pairing still requires a
+supported native app and its normal account setup. `codex-multi-auth switch <index>` pins the inference account; it does not
+change the desktop login in this mode. Sign out/in using the desktop app to
+change its real login. An auth-sync warning after a CLI switch can reflect this
+intentional separation; check `rotation status` for the routing state.
+
+Use `--native --catalog-account <index>` to discover models and their metadata
+from one enabled reference account, independently of the inference pin. The
+reference is stored by identity, not list position. Without a reference, the
+proxy combines eligible catalogs, preserving the first complete record for each
+model. Requests are sent only to eligible accounts advertising the requested
+model; a reference catalog does not grant another account access. Catalogs refresh
+on demand after 60 seconds (failed discovery retries after 5 seconds), using the
+native client's version. No model IDs or reasoning settings are hardcoded.
+
+Native mode currently requires file-backed desktop credentials
+(`cli_auth_credentials_store = "file"`) in the same Codex home as the router.
+Configure that setting and sign in through the native app before using this mode;
+keyring-only credentials are not supported. The proxy authenticates the exact,
+unexpired local desktop token or a current enabled managed-account token. It does
+not modify the app binary or add UI controls. Desktop profile and quota displays
+can still describe the desktop login; use multi-auth status for inference routing.
+WebSocket attempts receive an authenticated HTTP 426 response so compatible
+native clients fall back to HTTP streaming.
+
+**Upgrade notes:** Existing binds keep their recorded provider mode on upgrade and
+on `reset-runtime`. Legacy binds without a recorded mode remain on the custom provider.
+New binds default to custom unless `CODEX_MULTI_AUTH_NATIVE_OPENAI=1` opts into native mode.
+To explicitly opt in, run `codex-multi-auth rotation bind-app --native`.
+`reset-runtime` preserves native mode and its reference account. Use
+`bind-app --custom-provider` to return to the custom provider, or `unbind-app` to
+restore the previous routing configuration. Restart the desktop app after changing
+provider modes.
 
 Because packaged app bind changes the real Codex `model_provider` to `codex-multi-auth-runtime-proxy`, current Codex Desktop builds can hide older local threads that were indexed under the original provider. This is a visibility/provider-filtering limitation, not expected data loss: rollout files, `session_index.jsonl`, and Codex SQLite state normally remain under `~/.codex`. If you need to browse old Desktop history, run `codex-multi-auth rotation unbind-app` or `codex-multi-auth rotation disable`, reopen Codex, and re-bind when you want app-level rotation again.
 

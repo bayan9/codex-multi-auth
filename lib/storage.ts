@@ -144,8 +144,16 @@ import {
 	isStorageLockHeld,
 	runInTransactionSnapshotContext,
 	withAccountStorageTransaction as runWithAccountStorageTransaction,
-	withStorageLock,
+	withStorageLock as withProcessStorageLock,
 } from "./storage/transactions.js";
+import { withFileTransactionLock } from "./storage/file-lock.js";
+import { mergeAccountSnapshot } from "./storage/snapshot-merge.js";
+const loadedAccountSnapshots = new WeakMap<AccountStorageV3, AccountStorageV3>();
+
+function withStorageLock<T>(action: () => Promise<T>): Promise<T> {
+	const path = getStoragePath();
+	return withProcessStorageLock(() => withFileTransactionLock(path, action));
+}
 
 export type {
 	StorageHealthSummary,
@@ -1479,7 +1487,9 @@ export function readPinAndGenFromDisk(
  * @returns AccountStorageV3 if file exists and is valid, null otherwise
  */
 export async function loadAccounts(): Promise<AccountStorageV3 | null> {
-	return loadAccountsInternal(saveAccounts);
+	const storage = await loadAccountsInternal(saveAccounts);
+	if (storage) loadedAccountSnapshots.set(storage, structuredClone(storage));
+	return storage;
 }
 
 export async function getBackupMetadata(): Promise<BackupMetadata> {
@@ -2069,7 +2079,8 @@ export async function withAccountAndFlaggedStorageTransaction<T>(
 			const previousAccounts = cloneAccountStorageForPersistence(
 				state.snapshot,
 			);
-			const nextAccounts = cloneAccountStorageForPersistence(accountStorage);
+			const baseline = loadedAccountSnapshots.get(accountStorage);
+			const nextAccounts = cloneAccountStorageForPersistence(baseline ? mergeAccountSnapshot(baseline, state.snapshot, accountStorage) : accountStorage);
 			const nextFlagged = cloneFlaggedStorageForPersistence(flaggedStorage);
 			await saveAccountsUnlocked(nextAccounts);
 			try {
@@ -2149,11 +2160,28 @@ export async function withFlaggedStorageTransaction<T>(
  * @param storage - Account storage data to save
  * @throws StorageError with platform-aware hints on failure
  */
+/** Clone a loaded working snapshot without losing its optimistic-concurrency baseline. */
+export function cloneTrackedAccountStorage(storage: AccountStorageV3): AccountStorageV3 {
+ const clone = structuredClone(storage);
+ const baseline = loadedAccountSnapshots.get(storage);
+ if (baseline) loadedAccountSnapshots.set(clone, structuredClone(baseline));
+ return clone;
+}
+
 export async function saveAccounts(storage: AccountStorageV3): Promise<void> {
 	return saveAccountsEntry({
 		storage,
 		withStorageLock,
-		saveUnlocked: saveAccountsUnlocked,
+		saveUnlocked: async proposed => {
+			const baseline = loadedAccountSnapshots.get(proposed);
+			const snapshot = baseline ? mergeAccountSnapshot(baseline, await loadAccountsInternal(saveAccountsUnlocked), proposed) : proposed;
+			await saveAccountsUnlocked(snapshot);
+			if (baseline) {
+				for (const key of Object.keys(proposed)) Reflect.deleteProperty(proposed, key);
+				Object.assign(proposed, structuredClone(snapshot));
+				loadedAccountSnapshots.set(proposed, structuredClone(snapshot));
+			}
+		},
 	});
 }
 

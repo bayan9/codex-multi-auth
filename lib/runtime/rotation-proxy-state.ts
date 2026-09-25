@@ -1,3 +1,5 @@
+import type { NativeAccountSnapshot } from "./native-account-storage.js";
+import type { AccountModelCatalog } from "./account-model-catalog.js";
 import { AccountManager } from "../accounts.js";
 import type { ContextBudgetGuard } from "../context-budget-guard.js";
 import type { PreemptiveQuotaScheduler } from "../preemptive-quota-scheduler.js";
@@ -16,6 +18,9 @@ import type { SessionAffinityStore } from "../session-affinity.js";
  * @internal
  */
 export interface RotationProxyStateInit {
+	nativeOpenai?: boolean;
+	readNativeAccountStorage?: () => Promise<NativeAccountSnapshot>;
+	catalogAccount?: { email: string; accountId: string; };
 	activeAccountManager: AccountManager;
 	routingMutexMode: "enabled" | "legacy";
 	schedulingStrategy: "hybrid" | "sequential";
@@ -64,6 +69,9 @@ export interface RotationProxyStateInit {
 export interface RotationProxyState extends RotationProxyStateInit {
 	readonly knownAccountManagers: Set<AccountManager>;
 	readonly status: RuntimeRotationProxyStatus;
+	modelCatalog?: AccountModelCatalog;
+    catalogsByVersion?: Map<string, AccountModelCatalog>;
+    catalogBackoff?: Map<string, number>;
 	readonly threadGoalFallbacks: Map<string, string | null>;
 	lastGlobalAccountIndex: number | null;
 	lastGlobalSwitchAt: number;
