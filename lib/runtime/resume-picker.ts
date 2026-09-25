@@ -93,7 +93,8 @@ export function createResumeCatalog(options: ResumePickerOptions) {
 				limit: 50, cursor, sortKey: "updated_at", archived: false,
 				// An empty list explicitly disables the server's current-provider filter.
 				modelProviders: [],
-				sourceKinds: options.includeNonInteractive ? [] : ["cli", "vscode"],
+				// Omitted or empty means interactive-only, so name the resumable non-interactive kinds (as Codex does).
+				sourceKinds: options.includeNonInteractive ? ["cli", "vscode", "exec", "appServer"] : ["cli", "vscode"],
 				...(options.showAll ? {} : { cwd: options.cwd }),
 			});
 			if (!result || typeof result !== "object" || !("data" in result) || !Array.isArray(result.data)) {
@@ -136,7 +137,11 @@ export async function pickResumeThread(
 	const catalog = deps.createCatalog(options);
 	const pages: ResumePage[] = [];
 	let pageIndex = 0;
-	const onInterrupt = () => catalog.close();
+	let interrupted = false;
+	const onInterrupt = () => {
+		interrupted = true;
+		catalog.close();
+	};
 	process.once("SIGINT", onInterrupt);
 	process.once("SIGTERM", onInterrupt);
 	try {
@@ -151,6 +156,11 @@ export async function pickResumeThread(
 			}));
 			if (pageIndex > 0) items.push({ label: "Previous page", value: { kind: "previous" } });
 			if (page.nextCursor) items.push({ label: "Next page", value: { kind: "next" } });
+			// select() returns a sole choice without rendering, so an empty list would exit silently.
+			if (items.length === 0) {
+				process.stdout.write("No saved Codex sessions found.\n");
+				return null;
+			}
 			// Also prevents the shared select UI from auto-opening a single session.
 			items.push({ label: "Cancel", value: { kind: "cancel" } });
 			const choice = await deps.select(items, {
@@ -164,6 +174,10 @@ export async function pickResumeThread(
 			if (!pages[pageIndex + 1]) pages.push(await catalog.page(page.nextCursor));
 			pageIndex += 1;
 		}
+	} catch (error) {
+		// Closing the catalog on Ctrl+C rejects the pending request; that is a cancel, not a failure.
+		if (interrupted) return null;
+		throw error;
 	} finally {
 		process.removeListener("SIGINT", onInterrupt);
 		process.removeListener("SIGTERM", onInterrupt);

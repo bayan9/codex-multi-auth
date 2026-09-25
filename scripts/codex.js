@@ -6564,8 +6564,8 @@ async function main() {
 				if (!id) return 0;
 				forwardArgs.splice(pickerRequest.commandIndex + 1, 0, id);
 			} catch (error) {
+				// Discovery is optional: fall back to native `codex resume` with the original args.
 				console.error(`Could not list saved Codex sessions: ${error instanceof Error ? error.message : String(error)}`);
-				return 1;
 			}
 		}
 	}

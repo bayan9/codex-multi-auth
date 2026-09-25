@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createResumeCatalog, pickResumeThread, type ResumePickerOptions } from "../lib/runtime/resume-picker.js";
 
@@ -19,11 +20,11 @@ describe("cross-provider resume arguments", () => {
  });
  it("preserves config values and resolves project scope", () => {
   expect(getResumePickerRequest(["-c", "--last", "resume", "--all", "--cd", "child"], "/project"))
-   .toMatchObject({ commandIndex: 2, cwd: "/project/child", showAll: true, configArgs: ["-c", "--last"] });
+   .toMatchObject({ commandIndex: 2, cwd: resolve("/project", "child"), showAll: true, configArgs: ["-c", "--last"] });
  });
  it("recognizes attached directory and config options", () => {
   expect(getResumePickerRequest(["resume", "-C/project", "--config=x=1"]))
-   .toMatchObject({ cwd: "/project", configArgs: ["--config=x=1"] });
+   .toMatchObject({ cwd: resolve("/project"), configArgs: ["--config=x=1"] });
  });
 });
 
@@ -46,6 +47,11 @@ describe("resume catalog protocol", () => {
    expect(page.nextCursor).toBe("page2");
    expect(JSON.parse(page.data[0].name!)).toMatchObject({modelProviders:[],cwd:options.cwd,sourceKinds:["cli","vscode"],cursor:"cursor1"});
   } finally { catalog.close(); }
+ });
+ it("names the resumable non-interactive sources, since an empty list means interactive-only", async () => {
+  const catalog = createResumeCatalog({...options, includeNonInteractive:true, configArgs:["-e",server,"--"]});
+  try { expect(JSON.parse((await catalog.page()).data[0].name!).sourceKinds).toEqual(["cli","vscode","exec","appServer"]); }
+  finally { catalog.close(); }
  });
  it("removes cwd filtering for --all", async () => {
   const catalog = createResumeCatalog({...options, showAll:true, configArgs:["-e",server,"--"]});
@@ -82,6 +88,30 @@ describe("resume selection", () => {
   expect(await pickResumeThread(options,{createCatalog:()=>({page:async()=>({data:[{id:"one",cwd:"/p"}]}),close}),select})).toBeNull();
   expect(select.mock.calls[0][0]).toHaveLength(2);
   expect(close).toHaveBeenCalledOnce();
+ });
+ it("reports an empty catalog instead of letting select auto-pick Cancel silently", async () => {
+  const close = vi.fn();
+  const select = vi.fn();
+  const log = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  try {
+   expect(await pickResumeThread(options,{createCatalog:()=>({page:async()=>({data:[]}),close}),select})).toBeNull();
+   expect(select).not.toHaveBeenCalled();
+   expect(log).toHaveBeenCalledWith("No saved Codex sessions found.\n");
+  } finally { log.mockRestore(); }
+  expect(close).toHaveBeenCalledOnce();
+ });
+ it("treats an interrupt during discovery as cancellation", async () => {
+  const before = new Set(process.listeners("SIGINT"));
+  let rejectPage: (error: Error) => void = () => {};
+  const close = vi.fn(() => rejectPage(new Error("Session catalog is closed.")));
+  const page = () => new Promise<never>((_, reject) => {
+   rejectPage = reject;
+   const onInterrupt = process.listeners("SIGINT").find((listener) => !before.has(listener));
+   (onInterrupt as () => void)();
+  });
+  expect(await pickResumeThread(options,{createCatalog:()=>({page,close}),select:vi.fn()})).toBeNull();
+  expect(close).toHaveBeenCalled();
+  expect(process.listeners("SIGINT").filter((listener) => !before.has(listener))).toEqual([]);
  });
  it("closes discovery after a listing error", async () => {
   const close = vi.fn();
