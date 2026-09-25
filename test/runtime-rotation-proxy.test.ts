@@ -5171,6 +5171,15 @@ it("returns a warm picker cache immediately while expired workspace data refresh
  }finally{release();}
 });
 
+it("keeps the live manager and its catalogs when stored emails differ only in case",async()=>{
+ const disk=createStorage(Date.now(),1);disk.accounts[0]!.email="Account-1@Example.com";
+ const manager=new AccountManager(undefined,disk);let catalogReads=0;
+ const {fetchImpl}=createRecordingFetch(call=>{if(call.url.includes("/models")){catalogReads++;return Response.json({models:[{slug:"common"}]});}return textEventStream();});
+ const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(disk)}});
+ for(let i=0;i<2;i++){const response=await postResponses(proxy,{model:"common",input:"fixture"});expect(response.status).toBe(200);await response.text();}
+ expect(catalogReads).toBe(1);
+});
+
 it("reads the subscription quota cache at most once per second across native requests",async()=>{
  const manager=new AccountManager(undefined,createStorage(Date.now()));
  const readSubscriptionQuota=vi.fn(async()=>null);

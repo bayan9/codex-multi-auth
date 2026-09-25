@@ -17,7 +17,8 @@ import { saveModelInventory } from "./runtime/model-discovery-status.js";
 import { loadApiRoutes, updateApiModelDiscovery } from "./api-route-store.js";
 import { ApiModelRuntime } from "./runtime/api-model-runtime.js";
 import { buildVisibleModelUnion, parseModelRoute, canonicalServiceTier, type RouteModel } from "./model-route-policy.js";
-import { syncNativeAccountCredentials } from "./runtime/native-account-sync.js";
+import { isSameNativeAccount, syncNativeAccountCredentials } from "./runtime/native-account-sync.js";
+import { sanitizeEmail } from "./auth/token-utils.js";
 import { isNativeClientToken } from "./runtime/native-client-auth.js";
 import { CatalogRetryError, AccountModelCatalog, clampCatalogRetryMs } from "./runtime/account-model-catalog.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -1244,7 +1245,7 @@ async function handleRequestInner(
             nativeStorageMissing = snapshot.storage === null && !snapshot.transientFailure;
             if (snapshot.verified && snapshot.storage !== null) {
 			const accounts = accountManager.getAccountsSnapshot();
-			const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
+			const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => isSameNativeAccount(a, disk.accounts[i]));
 			if (!sameInventory) {
 				accountManager = new AccountManager(undefined, disk);
 				accountManager.setRoutingMutexMode(state.routingMutexMode);
@@ -2268,7 +2269,7 @@ async function handleRequestInner(
                     ? state.activeAccountManager.getAccountsSnapshot().find(item => item.recordId === refreshed.account.recordId)
                     : undefined;
 				const disk = latest?.accounts.find(item => item.recordId && item.recordId === refreshed.account.recordId)
-					?? latest?.accounts.find(item => item.accountId === refreshed.account.accountId && item.email === refreshed.account.email) ?? retained;
+					?? latest?.accounts.find(item => item.accountId === refreshed.account.accountId && sanitizeEmail(item.email) === sanitizeEmail(refreshed.account.email)) ?? retained;
 				const workspace = disk?.workspaces?.find(item => item.id === accountId);
 				const stillEligible = disk && disk.enabled !== false && !disk.authInvalidatedAt &&
 					(workspace ? workspace.enabled !== false : accountId === disk.accountId);

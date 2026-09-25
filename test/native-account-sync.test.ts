@@ -139,3 +139,13 @@ it("matches preferences by account identity and workspace ID despite reordered l
  expect(manager.getAccountByIndex(0)?.workspaces?.[0]?.enabled).toBe(false);
  expect(manager.getAccountByIndex(1)?.currentWorkspaceIndex).toBe(0);
 });
+
+describe("native account identity", () => {
+	it("matches a stored email that differs only in case and leaves the account alone", () => {
+		const storage = fixture();
+		storage.accounts[0]!.email = "A@Example.test";
+		const manager = new AccountManager(undefined, storage);
+		expect(syncNativeAccountCredentials(manager, structuredClone(storage))).toBe(false);
+		expect(manager.getAccountByIndex(0)?.enabled).not.toBe(false);
+	});
+});

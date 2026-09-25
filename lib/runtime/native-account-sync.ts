@@ -1,5 +1,19 @@
 import type { AccountManager } from "../accounts.js";
+import { sanitizeEmail } from "../auth/token-utils.js";
 import type { AccountStorageV3 } from "../storage.js";
+
+type Identity = { recordId?: string; accountId?: string; email?: string };
+/**
+ * The manager stores sanitized (lower-cased) emails while storage keeps the raw
+ * value, so match a stored record ID first and otherwise the canonical identity.
+ */
+export function isSameNativeAccount(account: Identity, disk: Identity | undefined): boolean {
+	if (!disk) return false;
+	const left = account.recordId?.trim();
+	const right = disk.recordId?.trim();
+	if (left && right) return left === right;
+	return account.accountId === disk.accountId && sanitizeEmail(account.email) === sanitizeEmail(disk.email);
+}
 
 /** Adopt credentials from a re-login without resetting independent quota state. */
 export function syncNativeAccountCredentials(
@@ -10,9 +24,7 @@ export function syncNativeAccountCredentials(
 	for (const snapshot of manager.getAccountsSnapshot()) {
 		const account = manager.getAccountByIndex(snapshot.index);
 		if (!account) continue;
-		const disk = storage.accounts.find(
-			(a) => a.accountId === account.accountId && a.email === account.email,
-		);
+		const disk = storage.accounts.find((a) => isSameNativeAccount(account, a));
 		if (!disk) {
 			account.enabled = false;
 			changed = true;
