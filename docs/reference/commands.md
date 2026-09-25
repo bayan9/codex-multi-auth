@@ -825,6 +825,9 @@ failure.
   new local files `api-routes.json` (mode 0600) and `reset-credits.json`.
   `uninstall --clear-accounts` and the dashboard's delete-all reset remove both,
   along with `api-capability-probes.json` and `inference-activity/`.
+- Subscription accounts default to priority tier 1 (`account priority` accepts
+  0-9; lower is tried first). API/ZDR credentials choose a tier from 1 to 9
+  when added, with 9 recommended; tier 0 stays reserved for subscriptions.
 - This routing release adds no npm scripts and requires no manual storage migration.
 
 - `codex-multi-auth login --org <org_id>` binds the login to one ChatGPT workspace.

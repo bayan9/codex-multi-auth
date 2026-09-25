@@ -42,7 +42,8 @@ does not deploy changes.
 Run `codex-multi-auth login --api`, or select **API credentials and models** in
 `codex-multi-auth login`. Add a credential with a private label and
 explicitly choose API or ZDR (approval is not detected from the key),
-enter the key into the hidden prompt, set a failover priority (lower first; recommended tier 9), and toggle
+enter the key into the hidden prompt, set a failover priority from 1 to 9 (lower
+first; 9 recommended; subscription accounts default to tier 1), and toggle
 only the models to expose. Save applies the selection. Escape cancels without
 saving. Existing credentials support model reselection, priority changes, and
 enabling/disabling. API keys are stored in `api-routes.json` with mode 0600.
