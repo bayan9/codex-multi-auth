@@ -302,21 +302,16 @@ describe("cli output contracts", () => {
 
 			expect(result.exitCode).toBe(0);
 			const payload = parseSingleJsonObject(result);
-			expect(sortedKeys(payload)).toEqual([
-				"accountCount",
-				"accounts",
-				"activeIndex",
-				"pinnedAccountIndex",
-				"recommendationReason",
-				"recommendedIndex",
-				"runtimeInUseIndex",
-				"storageHealth",
-				"storagePath",
-			]);
+			expect(sortedKeys(payload)).toEqual(["accountCount", "accounts", "activeIndex", "apiAccounts", "lastRequestedWorkspace", "modelInventory", "pinnedAccountIndex", "recommendationReason", "recommendedIndex", "runtimeInUseIndex", "selectionMode", "storageHealth", "storagePath", "totalAccountCount"]);
 
 			expect(payload.storagePath).toBe(MOCK_STORAGE_PATH);
 			expect(payload.storageHealth).toBe("healthy");
 			expect(payload.accountCount).toBe(2);
+			expect(payload.apiAccounts).toEqual([]);
+			expect(payload.totalAccountCount).toBe(2);
+			expect(payload.selectionMode).toBe("legacy-pin");
+			expect(payload.modelInventory).toBeNull();
+			expect(payload.lastRequestedWorkspace).toBeNull();
 			expect(payload.activeIndex).toBe(0);
 			expect(payload.pinnedAccountIndex).toBeNull();
 			expect(payload.recommendedIndex).toBe(0);
@@ -327,15 +322,10 @@ describe("cli output contracts", () => {
 			expect(Array.isArray(accounts)).toBe(true);
 			expect(accounts).toHaveLength(2);
 			for (const account of accounts) {
-				expect(sortedKeys(account)).toEqual([
-					"current",
-					"enabled",
-					"index",
-					"label",
-					"lastUsed",
-					"markers",
-					"reason",
-				]);
+				expect(sortedKeys(account)).toEqual(["automaticOrder", "current", "enabled", "forecastQuotaUpdatedAt", "forecastRiskLevel", "forecastRiskScore", "index", "label", "lastInferenceRequestAt", "lastUsed", "markers", "priority", "quotaDrainPerHour", "quotaResetAt", "reason", "resetCreditsAvailable", "resetCreditsCheckedAt", "selectionPreference", "subscriptionPrimingCandidate", "subscriptionReserve"]);
+				expect(account.priority).toBeTypeOf("number");
+				expect(account.subscriptionReserve).toBeTypeOf("boolean");
+				expect(account.subscriptionPrimingCandidate).toBeTypeOf("boolean");
 				expect(account.index).toBeTypeOf("number");
 				expect(account.label).toBeTypeOf("string");
 				expect(account.enabled).toBeTypeOf("boolean");

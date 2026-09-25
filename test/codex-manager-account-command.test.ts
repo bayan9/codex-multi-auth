@@ -106,3 +106,17 @@ describe("account command", () => {
 	});
 });
 
+
+ it("sets and reports an account priority tier",async()=>{
+  const store:AccountPolicyStore={version:1,accounts:{}};const deps=makeDeps(store);
+  expect(await runAccountCommand(["priority","1","2"],deps)).toBe(0);
+  const key=getAccountPolicyKey(makeStorage().accounts[0]!,0);
+  expect(store.accounts[key]?.priority).toBe(2);
+  deps.logInfo.mockClear();await runAccountCommand(["policy","list","--json"],deps);
+  expect(JSON.parse(String(deps.logInfo.mock.calls[0]?.[0])).accounts[0].priority).toBe(2);
+ });
+ it.each(["-1","10","1.5","2junk",""])("rejects invalid priority %s",async(value)=>{
+  const deps=makeDeps({version:1,accounts:{}});
+  expect(await runAccountCommand(["priority","1",value],deps)).toBe(1);
+  expect(deps.savePolicyStore).not.toHaveBeenCalled();
+ });

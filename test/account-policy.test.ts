@@ -50,6 +50,7 @@ describe("account policy store", () => {
 		upsertAccountPolicy(store, accountKey, (policy) => {
 			policy.tags.push("Team A");
 			policy.weight = 2;
+			policy.priority = 3;
 			policy.paused = true;
 			policy.note = "local note";
 		}, 123);
@@ -64,6 +65,7 @@ describe("account policy store", () => {
 		expect(loaded.accounts[accountKey]).toMatchObject({
 			tags: ["team-a"],
 			weight: 2,
+			priority: 3,
 			paused: true,
 			note: "local note",
 			updatedAt: 123,

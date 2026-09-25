@@ -33,3 +33,17 @@ describe("native provider binding", () => {
 		).toThrow();
 	});
 });
+
+it("keeps voice signaling and its websocket on native desktop authentication",()=>{
+ const original='model = "fixture-model"\n';
+ const bound=rewriteNativeProviderConfig(original,"http://127.0.0.1:43210");
+ expect(bound).toContain('experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"');
+ expect(bound).toContain('experimental_realtime_ws_base_url = "https://chatgpt.com/backend-api/codex"');
+ expect(restoreNativeProviderConfig(bound,original)).not.toContain("experimental_realtime_");
+});
+it("preserves explicit voice endpoint overrides through bind and unbind",()=>{
+ const original='experimental_realtime_ws_base_url = "https://example.test/voice"\n';
+ const bound=rewriteNativeProviderConfig(original,"http://127.0.0.1:43210");
+ expect(bound.match(/experimental_realtime_ws_base_url/g)).toHaveLength(1);
+ expect(restoreNativeProviderConfig(bound,original)).toContain(original.trim());
+});

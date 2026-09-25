@@ -20,6 +20,8 @@ vi.mock("node:fs", () => ({
 	},
 }));
 
+vi.mock("../lib/logger.js", () => ({createLogger:()=>({warn:vi.fn()})}));
+
 vi.mock("../lib/runtime-paths.js", () => ({
 	getCodexMultiAuthDir: () => "/mock/.codex/multi-auth",
 }));

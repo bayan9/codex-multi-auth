@@ -6,7 +6,7 @@ export function syncNativeAccountCredentials(
 	manager: AccountManager,
 	storage: AccountStorageV3,
 ): boolean {
-	let changed = false;
+	let changed = manager.syncWorkspaceSelections(storage);
 	for (const snapshot of manager.getAccountsSnapshot()) {
 		const account = manager.getAccountByIndex(snapshot.index);
 		if (!account) continue;

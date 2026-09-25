@@ -317,7 +317,7 @@ describe("forwardStreamingResponse", () => {
 
 		await expect(
 			forwardStreamingResponse(upstream, res.asServerResponse(), status, vi.fn(), 5_000),
-		).resolves.toBe(true);
+		).resolves.toBe(false);
 		expect(Buffer.concat(res.chunks).toString("utf8")).toBe("data: a\n\n");
 	});
 

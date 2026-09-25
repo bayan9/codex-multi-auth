@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import {
 	delimiter,
+	win32,
 	dirname,
 	isAbsolute,
 	join,
@@ -7236,8 +7237,8 @@ describe("codex bin wrapper", () => {
 	});
 
 	it("accepts Windows native codex paths without an .exe suffix", () => {
-		const pathEntry = join("C:", "custom", "bin");
-		const nativeCodexPath = join(pathEntry, "codex");
+		const pathEntry = win32.join("C:\\", "custom", "bin");
+		const nativeCodexPath = win32.join(pathEntry, "codex");
 		const resolved = resolveRealCodexBin({
 			env: {
 				PATH: pathEntry,
@@ -7257,9 +7258,9 @@ describe("codex bin wrapper", () => {
 	});
 
 	it("prefers Windows codex.exe over extensionless codex when both exist", () => {
-		const pathEntry = join("C:", "custom", "bin");
-		const nativeCodexExePath = join(pathEntry, "codex.exe");
-		const nativeCodexPath = join(pathEntry, "codex");
+		const pathEntry = win32.join("C:\\", "custom", "bin");
+		const nativeCodexExePath = win32.join(pathEntry, "codex.exe");
+		const nativeCodexPath = win32.join(pathEntry, "codex");
 		const resolved = resolveRealCodexBin({
 			env: {
 				PATH: pathEntry,
@@ -7281,7 +7282,7 @@ describe("codex bin wrapper", () => {
 
 	it("skips self-referential codex wrapper entries on PATH before native binaries", () => {
 		const wrapperScriptPath = join(
-			"C:\\test-root",
+			"/test-root",
 			"npm",
 			"lib",
 			"node_modules",
@@ -7289,11 +7290,11 @@ describe("codex bin wrapper", () => {
 			"scripts",
 			"codex.js",
 		);
-		const wrapperBinPath = join("C:\\test-root", "npm", "bin", "codex");
-		const nativeCodexPath = join("C:\\test-root", "native", "bin", "codex");
+		const wrapperBinPath = join("/test-root", "npm", "bin", "codex");
+		const nativeCodexPath = join("/test-root", "native", "bin", "codex");
 		const resolved = resolveRealCodexBin({
 			env: {
-				PATH: [join("C:\\test-root", "npm", "bin"), join("C:\\test-root", "native", "bin")].join(delimiter),
+				PATH: [join("/test-root", "npm", "bin"), join("/test-root", "native", "bin")].join(delimiter),
 			},
 			argv: [process.execPath, wrapperScriptPath],
 			platform: "linux",
@@ -8457,7 +8458,7 @@ describe("codex bin wrapper", () => {
 				CODEX_MULTI_AUTH_APP_ROTATION_DETACHED_IDLE_MS: "0",
 				OPENAI_API_KEY: undefined,
 			});
-			expect(probe.status).toBe(0);
+			expect(probe.status, `${probe.stdout}\n${probe.stderr}`).toBe(0);
 			const probeCounts = countHelperMetadata(multiAuthDir);
 			expect(probeCounts.status).toBeGreaterThan(0);
 			expect(probeCounts.owner).toBeGreaterThan(0);

@@ -125,7 +125,7 @@ describe("readPinAndGenFromDisk strict mode", () => {
 		// Nothing on disk can be clobbered by the write that follows, and
 		// throwing here would mean storage could never be recreated: the
 		// recreation goes through the same save path. See the regression at
-		// "recreates storage that was deleted after a switch" below.
+		// "does not restore stale account state after an intentional clear" below.
 		const path = join(makeTmpDir("missing"), "accounts.json");
 		expect(readPinAndGenFromDisk(path, { strict: true })).toEqual({
 			pinnedAccountIndex: undefined,
@@ -307,6 +307,18 @@ describe("AccountManager save resilience", () => {
 		};
 		expect(onDisk.affinityGeneration).toBe(5);
 		expect(onDisk.pinnedAccountIndex).toBe(1);
+	});
+
+	it("does not restore stale account state after an intentional clear", async () => {
+		const path = makeTmpStoragePath();
+		const storage = createStorage(2, {pinnedAccountIndex: 1, affinityGeneration: 5});
+		writeStorageFile(path, storage);
+		setStoragePathDirect(path);
+		const manager = new AccountManager(undefined, storage);
+		const { clearAccounts, loadAccounts } = await import("../lib/storage.js");
+		await clearAccounts();
+		await manager.saveToDisk();
+		expect((await loadAccounts())?.accounts ?? []).toEqual([]);
 	});
 
 	it("re-arms a debounced save that failed instead of dropping it", async () => {

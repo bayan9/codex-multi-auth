@@ -1,3 +1,7 @@
+import { refreshAndPrintResetCredits } from "../runtime/account-reset-credits.js";
+import { mapWithConcurrency } from "../concurrency.js";
+import { withCheckProgress } from "../ui/check-progress.js";
+import { refreshAndPrintModelInventory } from "../runtime/model-discovery-status.js";
 import {
 	AUTH_INVALIDATION_MARKER,
 	extractAccountEmail,
@@ -59,6 +63,7 @@ function appendAuthInvalidationMarker(
  */
 export interface HealthCheckOptions {
 	forceRefresh?: boolean;
+	discoverModels?: boolean;
 	liveProbe?: boolean;
 	model?: string;
 	display?: DashboardDisplaySettings;
@@ -79,6 +84,7 @@ export async function runHealthCheck(
 	const storage = await loadAccounts();
 	if (!storage || storage.accounts.length === 0) {
 		console.log("No accounts configured.");
+		if (options.discoverModels) await refreshAndPrintModelInventory(console.log);
 		return;
 	}
 	let quotaEmailFallbackState =
@@ -111,6 +117,27 @@ export async function runHealthCheck(
 			),
 		);
 	}
+ type ProbeOutcome = { ok: true; value: Awaited<ReturnType<typeof fetchCodexQuotaSnapshot>> } | { ok: false; error: unknown };
+ const quickProbes = new Map<number, ProbeOutcome>();
+ if (liveProbe && !forceRefresh) {
+  const candidates = storage.accounts.flatMap((account, index) => {
+   const accountId = account.accountId ?? extractAccountId(account.accessToken);
+   return hasUsableAccessToken(account, now) && account.accessToken && accountId
+    ? [{index,accountId,accessToken:account.accessToken}] : [];
+  });
+  if(candidates.length){
+   let completed = 0;
+   await withCheckProgress(() => `Checking account probes: ${completed}/${candidates.length}`, async () => {
+    await mapWithConcurrency(candidates, 3, async candidate => {
+     try {
+      const value = await fetchCodexQuotaSnapshot({accountId:candidate.accountId,accessToken:candidate.accessToken,model:modelInspection.normalized});
+      quickProbes.set(candidate.index,{ok:true,value});
+     } catch(error) { quickProbes.set(candidate.index,{ok:false,error}); }
+     finally { completed++; }
+    });
+   }, console.log);
+  }
+ }
 	for (let i = 0; i < storage.accounts.length; i += 1) {
 		const account = storage.accounts[i];
 		if (!account) continue;
@@ -140,11 +167,13 @@ export async function runHealthCheck(
 						"signed in (live check skipped: missing account ID)";
 				} else {
 					try {
-						const snapshot = await fetchCodexQuotaSnapshot({
+						const priorProbe = quickProbes.get(i);
+      if(priorProbe && !priorProbe.ok) throw priorProbe.error;
+      const snapshot = priorProbe?.ok ? priorProbe.value : await withCheckProgress(`Account ${i + 1}/${storage.accounts.length}: live probe`, () => fetchCodexQuotaSnapshot({
 							accountId: probeAccountId,
 							accessToken: currentAccessToken,
 							model: modelInspection.normalized,
-						});
+						}), console.log);
 						if (workingQuotaCache) {
 							quotaCacheChanged =
 								updateQuotaCacheForAccount(
@@ -187,7 +216,7 @@ export async function runHealthCheck(
 			}
 			continue;
 		}
-		const result = await queuedRefresh(account.refreshToken);
+		const result = await withCheckProgress(`Account ${i + 1}/${storage.accounts.length}: refreshing sign-in`, () => queuedRefresh(account.refreshToken), console.log);
 		if (result.type === "success") {
 			const tokenAccountId = extractAccountId(result.access);
 			const nextEmail = sanitizeEmail(
@@ -257,11 +286,11 @@ export async function runHealthCheck(
 						"signed in (live check skipped: missing account ID)";
 				} else {
 					try {
-						const snapshot = await fetchCodexQuotaSnapshot({
+						const snapshot = await withCheckProgress(`Account ${i + 1}/${storage.accounts.length}: live probe`, () => fetchCodexQuotaSnapshot({
 							accountId: probeAccountId,
 							accessToken: result.access,
 							model: modelInspection.normalized,
-						});
+						}), console.log);
 						if (workingQuotaCache) {
 							quotaCacheChanged =
 								updateQuotaCacheForAccount(
@@ -398,4 +427,8 @@ export async function runHealthCheck(
 					],
 		),
 	);
+	if (options.discoverModels) {
+  await refreshAndPrintResetCredits(console.log);
+  await refreshAndPrintModelInventory(console.log);
+ }
 }

@@ -4,6 +4,7 @@ import { CodexValidationError } from "../lib/errors.js";
 import type { AccountMetadataV3, AccountStorageV3 } from "../lib/storage.js";
 
 const {
+	chooseLoginWorkspaceMock,
 	loadAccountsMock,
 	getNamedBackupsMock,
 	promptAddAnotherAccountMock,
@@ -14,6 +15,7 @@ const {
 	persistAccountPoolMock,
 	syncSelectionToCodexMock,
 } = vi.hoisted(() => ({
+	chooseLoginWorkspaceMock: vi.fn(),
 	loadAccountsMock: vi.fn(),
 	getNamedBackupsMock: vi.fn(),
 	promptAddAnotherAccountMock: vi.fn(),
@@ -24,6 +26,8 @@ const {
 	persistAccountPoolMock: vi.fn(),
 	syncSelectionToCodexMock: vi.fn(),
 }));
+
+vi.mock("../lib/codex-manager/login-workspace-choice.js", () => ({chooseLoginWorkspace:chooseLoginWorkspaceMock}));
 
 vi.mock("../lib/storage.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../lib/storage.js")>();
@@ -144,6 +148,7 @@ let warnSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	chooseLoginWorkspaceMock.mockResolvedValue(undefined);
 	accountsOnDisk = null;
 	loadAccountsMock.mockImplementation(async () => accountsOnDisk);
 	getNamedBackupsMock.mockResolvedValue([]);
@@ -373,6 +378,7 @@ describe("runAuthLogin explicit transports", () => {
 		// Issue #491: the org binding travels as an explicit argument, not via
 		// process.env mutation.
 		expect(process.env.CODEX_AUTH_ACCOUNT_ID).toBe(envOverrideBefore);
+		expect(chooseLoginWorkspaceMock).not.toHaveBeenCalled();
 		expect(resolveAccountSelectionMock).toHaveBeenCalledExactlyOnceWith(
 			TOKEN_SUCCESS,
 			"org_team",
@@ -480,4 +486,29 @@ describe("runAuthLogin onboarding without explicit flags", () => {
 		expect(await runAuthLogin([], deps())).toBe(0);
 		expect(warnSpy).not.toHaveBeenCalled();
 	});
+});
+
+
+describe("workspace choice before account persistence",()=>{
+ it("cancels without saving credentials or changing desktop auth",async()=>{
+  runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
+  chooseLoginWorkspaceMock.mockResolvedValue(null);
+  expect(await runAuthLogin(["--manual"],deps())).toBe(0);
+  expect(persistAccountPoolMock).not.toHaveBeenCalled();
+  expect(syncSelectionToCodexMock).not.toHaveBeenCalled();
+ });
+ it("persists the explicitly chosen workspace",async()=>{
+  runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
+  chooseLoginWorkspaceMock.mockResolvedValue("selected-workspace");
+  expect(await runAuthLogin(["--manual"],deps())).toBe(0);
+  expect(resolveAccountSelectionMock).toHaveBeenCalledWith(TOKEN_SUCCESS,"selected-workspace",undefined);
+  expect(persistAccountPoolMock).toHaveBeenCalledOnce();
+ });
+ it("refuses ambiguous noninteractive setup before writing",async()=>{
+  runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
+  chooseLoginWorkspaceMock.mockRejectedValue(new CodexValidationError("Workspace choice required"));
+  expect(await runAuthLogin(["--manual"],deps())).toBe(1);
+  expect(persistAccountPoolMock).not.toHaveBeenCalled();
+  expect(syncSelectionToCodexMock).not.toHaveBeenCalled();
+ });
 });

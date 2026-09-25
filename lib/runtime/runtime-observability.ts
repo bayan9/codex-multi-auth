@@ -1,3 +1,5 @@
+import { saveInferenceRequestTime } from "./inference-activity.js";
+import { createLogger } from "../logger.js";
 import { existsSync, readFileSync, promises as fs } from "node:fs";
 import { join } from "node:path";
 import { getCodexMultiAuthDir } from "../runtime-paths.js";
@@ -46,7 +48,11 @@ export interface RuntimeObservabilitySnapshot {
 	lastAccountLabel?: string | null;
 	lastAccountEmail?: string | null;
 	lastAccountId?: string | null;
+	/** Outgoing request scope, not proof of the upstream billing plan. */
+	lastRequestedWorkspaceId?: string | null;
 	lastAccountUpdatedAt?: number | null;
+	/** Actual inference dispatches, keyed by hashed credential identity (not selection or health checks). */
+	lastInferenceRequestAtByAccount?: Record<string, number>;
 	lastPoolExhaustionReason?: string | null;
 	lastPoolExhaustionRetryAfterMs?: number | null;
 	lastPoolExhaustionSkipReasons?: Record<string, string>;
@@ -86,7 +92,9 @@ function createDefaultSnapshot(): RuntimeObservabilitySnapshot {
 		lastAccountLabel: null,
 		lastAccountEmail: null,
 		lastAccountId: null,
+		lastRequestedWorkspaceId: null,
 		lastAccountUpdatedAt: null,
+		lastInferenceRequestAtByAccount: {},
 		lastPoolExhaustionReason: null,
 		lastPoolExhaustionRetryAfterMs: null,
 		lastPoolExhaustionSkipReasons: {},
@@ -130,6 +138,27 @@ function createDefaultSnapshot(): RuntimeObservabilitySnapshot {
 	};
 }
 
+function normalizeInferenceTimes(value: unknown): Record<string, number> {
+ if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+ return Object.fromEntries(Object.entries(value)
+  .filter((entry): entry is [string, number] => /^sha256:[a-f0-9]{64}$/.test(entry[0]) && typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] > 0)
+  .sort((a,b)=>b[1]-a[1]).slice(0,1000));
+}
+
+export function recordRuntimeInferenceRequest(accountKey: string, at: number): void {
+ if (!/^sha256:[a-f0-9]{64}$/.test(accountKey) || !Number.isFinite(at) || at <= 0) return;
+ mutateRuntimeObservabilitySnapshot(snapshot => {
+  const times = normalizeInferenceTimes(snapshot.lastInferenceRequestAtByAccount);
+  times[accountKey] = Math.max(times[accountKey] ?? 0, at);
+  snapshot.lastInferenceRequestAtByAccount = normalizeInferenceTimes(times);
+ });
+ if (PERSIST_RUNTIME_SNAPSHOT) {
+  pendingWrite = (pendingWrite ?? Promise.resolve()).catch(()=>undefined)
+   .then(()=>saveInferenceRequestTime(accountKey, at))
+   .catch(()=>createLogger("runtime-observability").warn("Inference activity could not be saved"));
+ }
+}
+
 function normalizePersistedSnapshot(
 	parsed: Partial<RuntimeObservabilitySnapshot> | null,
 ): RuntimeObservabilitySnapshot | null {
@@ -147,6 +176,8 @@ function normalizePersistedSnapshot(
 		...base,
 		...parsed,
 		version: RUNTIME_OBSERVABILITY_SNAPSHOT_VERSION,
+		lastInferenceRequestAtByAccount: normalizeInferenceTimes(parsed.lastInferenceRequestAtByAccount),
+		lastRequestedWorkspaceId: typeof parsed.lastRequestedWorkspaceId === "string" && parsed.lastRequestedWorkspaceId.length <= 256 ? parsed.lastRequestedWorkspaceId : null,
 		runtimeMetrics: {
 			...base.runtimeMetrics,
 			...(parsed.runtimeMetrics ?? {}),
@@ -343,4 +374,3 @@ export async function loadPersistedRuntimeObservabilitySnapshot(): Promise<Runti
 		return null;
 	}
 }
-

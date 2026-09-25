@@ -1,0 +1,94 @@
+import { describe, it, expect, vi } from "vitest";
+import { runApiLoginMenu } from "../lib/codex-manager/api-login-menu.js";
+import type { ApiRouteCredential } from "../lib/api-route-store.js";
+describe("API credential setup", () => {
+	it("requires explicit model choices and keeps credentials out of menu labels", async () => {
+		const choices = ["add", "zdr", "0", "toggle:exclusive", "save", "back"];
+		const labels: string[] = [];
+		const saved: ApiRouteCredential[][] = [];
+		const result = await runApiLoginMenu({
+			load: async () => [],
+			save: async (r) => {
+				saved.push(structuredClone(r));
+			},
+			select: async (items) => {
+				labels.push(...items.map((i) => i.label));
+				return choices.shift() ?? null;
+			},
+			text: async () => "Private pool",
+			secret: async () => "fixture-api-secret",
+			discover: async () => ["exclusive", "hidden"],
+			log: vi.fn(),
+		});
+		expect(result).toBe(0);
+		expect(saved).toHaveLength(1);
+		expect(saved[0]?.[0]).toMatchObject({
+			kind: "zdr",
+			visibleModels: ["exclusive"],
+			priority: 0,
+		});
+		expect(labels.join(" ")).not.toContain("fixture-api-secret");
+	});
+	it("does not save a partial credential when model selection is cancelled", async () => {
+		const choices = ["add", "api", "0", null, "back"];
+		const save = vi.fn();
+		await runApiLoginMenu({
+			load: async () => [],
+			save,
+			select: async () => choices.shift() ?? null,
+			text: async () => "Test",
+			secret: async () => "fixture-secret",
+			discover: async () => ["exclusive"],
+			log: vi.fn(),
+		});
+		expect(save).not.toHaveBeenCalled();
+	});
+});
+
+it("lets the operator opt into billable capability probes per credential", async () => {
+	const route = {
+		id: "fixture",
+		label: "Fixture",
+		kind: "zdr" as const,
+		apiKey: "fixture-key",
+		priority: 0,
+		enabled: true,
+		visibleModels: ["fixture"],
+	};
+	const choices = ["fixture", "probes", "back"];
+	const save = vi.fn();
+	await runApiLoginMenu({
+		load: async () => [route],
+		save,
+		select: async () => choices.shift() ?? null,
+		log: vi.fn(),
+	});
+	expect(save.mock.calls[0]?.[0]?.[0]?.probeCapabilities).toBe(true);
+});
+
+it("offers a late API priority by default and reserves zero for subscription routing", async () => {
+ const choices=["add","api",null,"back"];
+ let priorities: {label:string;value?:string}[]=[];
+ await runApiLoginMenu({load:async()=>[],save:vi.fn(),text:async()=>"Fixture",secret:async()=>"fixture-secret",log:vi.fn(),select:async(items,message)=>{
+  if(message==="Failover priority")priorities=items;
+  return choices.shift()??null;
+ }});
+ expect(priorities[0]).toMatchObject({value:"9"});
+ expect(priorities.map(item=>item.value)).not.toContain("0");
+});
+
+
+it("requires operator-declared ZDR classification instead of inferring it from discovery", async () => {
+ const choices = ["add", "api", "9", "save", "back"];
+ const save = vi.fn();
+ const prompts: string[] = [];
+ const choicesOffered: string[] = [];
+ await runApiLoginMenu({
+  load: async () => [], save, text: async () => "Fixture", secret: async () => "fixture-secret", log: vi.fn(),
+  discover: async () => ["model-test"],
+  select: async (items, message) => { prompts.push(message); choicesOffered.push(...items.map(item => item.label)); return choices.shift() ?? null; },
+ });
+ expect(prompts.join(" ")).toContain("operator-declared");
+ expect(choicesOffered.join(" ")).toContain("not detected from the key");
+ expect(save.mock.calls[0]?.[0]?.[0]?.kind).toBe("api");
+});

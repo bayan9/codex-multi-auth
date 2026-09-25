@@ -11,6 +11,8 @@ export interface AccountPolicy {
 	accountKey: string;
 	tags: string[];
 	weight: number;
+	/** Lower tiers are tried first; absent legacy values use tier 1. */
+	priority?: number;
 	paused: boolean;
 	drained: boolean;
 	note: string | null;
@@ -59,6 +61,7 @@ function normalizePolicy(key: string, value: unknown): AccountPolicy {
 		accountKey: key,
 		tags,
 		weight: normalizeWeight(record.weight),
+		priority: typeof record.priority === "number" && Number.isInteger(record.priority) && record.priority >= 0 && record.priority <= 9 ? record.priority : 1,
 		paused: record.paused === true,
 		drained: record.drained === true,
 		note: note.length > 0 ? note.slice(0, 500) : null,
@@ -219,4 +222,3 @@ export function normalizeAccountPolicyTag(value: string): string | null {
 export function resetAccountPolicyWriteQueueForTests(): void {
 	writeQueue = Promise.resolve();
 }
-

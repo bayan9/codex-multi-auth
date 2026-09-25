@@ -91,6 +91,15 @@ describe("extractUsageTokenCounts", () => {
 });
 
 describe("createUsageStreamScanner", () => {
+	it("observes multiline terminal frames split across CRLF chunks exactly once", () => {
+		const events: unknown[] = [];
+		const scanner = createUsageStreamScanner({contentType: "text/event-stream", onEvent: event => events.push(event)});
+		const raw = 'event: response.completed\r\ndata: {"type":"response.completed",\r\ndata: "response":{"usage":{"input_tokens":7}}}\r\n\r\n';
+		for (const byte of encoder.encode(raw)) scanner.push(Uint8Array.of(byte));
+		expect(scanner.result()?.inputTokens).toBe(7);
+		expect(scanner.result()?.inputTokens).toBe(7);
+		expect(events).toEqual([{type:"response.completed",response:{usage:{input_tokens:7}}}]);
+	});
 	it("recovers the terminal usage from an SSE body", () => {
 		const scanner = createUsageStreamScanner({
 			contentType: "text/event-stream; charset=utf-8",

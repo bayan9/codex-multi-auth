@@ -229,9 +229,17 @@ function uniqueCandidates(candidates: AccountIdCandidate[]): AccountIdCandidate[
 	return result;
 }
 
+/** Explicit metadata wins over the conventional Personal display name. */
+export function isPersonalAccountCandidate(candidate: AccountIdCandidate): boolean {
+	return candidate.isPersonal === true ||
+		(candidate.isPersonal !== false && /^Personal(?:\s*\(|\s*\[|$)/i.test(candidate.label.trim()));
+}
+
 /**
  * Select the best workspace candidate for OAuth account binding.
- * Preference order:
+ * Prefer a uniquely identifiable Personal workspace. Ambiguous CLI logins
+ * require an explicit choice before reaching this fallback selector.
+ * Fallback order when no unique Personal candidate exists:
  * 1) org default that is not personal
  * 2) org default (any)
  * 3) id_token candidate
@@ -243,6 +251,8 @@ export function selectBestAccountCandidate(
 	candidates: AccountIdCandidate[],
 ): AccountIdCandidate | undefined {
 	if (candidates.length === 0) return undefined;
+	const personal = candidates.filter(isPersonalAccountCandidate);
+	if (personal.length === 1) return personal[0];
 
 	const orgDefaultNonPersonal = candidates.find(
 		(candidate) =>

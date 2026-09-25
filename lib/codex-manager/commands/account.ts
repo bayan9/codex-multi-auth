@@ -25,6 +25,7 @@ function printAccountUsage(logInfo: (message: string) => void): void {
 			"  codex-multi-auth account tag <index> <tag>",
 			"  codex-multi-auth account untag <index> <tag>",
 			"  codex-multi-auth account weight <index> <0..10>",
+			"  codex-multi-auth account priority <index> <0..9>",
 			"  codex-multi-auth account pause|unpause|drain|undrain <index>",
 			"  codex-multi-auth account note <index> <text>",
 			"  codex-multi-auth account policy list [--json]",
@@ -59,6 +60,7 @@ function policySummary(store: AccountPolicyStore, storage: AccountStorageV3 | nu
 			accountKey,
 			tags: policy?.tags ?? [],
 			weight: policy?.weight ?? 1,
+			priority: policy?.priority ?? 1,
 			paused: policy?.paused ?? false,
 			drained: policy?.drained ?? false,
 			note: policy?.note ?? null,
@@ -110,6 +112,7 @@ export async function runAccountCommand(
 		for (const entry of payload.accounts) {
 			const markers = [
 				`weight=${entry.weight}`,
+				`priority=${entry.priority}`,
 				entry.paused ? "paused" : null,
 				entry.drained ? "drained" : null,
 				entry.tags.length > 0 ? `tags=${entry.tags.join(",")}` : null,
@@ -150,6 +153,18 @@ export async function runAccountCommand(
 		logInfo(
 			`${command === "tag" ? "Tagged" : "Removed tag from"} account ${resolved.index + 1}: ${policy.tags.join(",") || "none"}`,
 		);
+		return 0;
+	}
+
+	if (command === "priority") {
+		if (!/^[0-9]$/.test(rest[1] ?? "") || rest.length !== 2) {
+			logError("priority requires an integer from 0 to 9 (0 first).");
+			return 1;
+		}
+		const priority = Number(rest[1]);
+		upsertAccountPolicy(store, accountKey, next => { next.priority = priority; }, now);
+		await saveStore(store);
+		logInfo(`Set account ${resolved.index + 1} priority to ${priority}.`);
 		return 0;
 	}
 

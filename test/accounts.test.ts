@@ -369,8 +369,8 @@ describe("AccountManager", () => {
 		expect(account.enabled).toBe(true);
 		expect(manager.hasEnabledWorkspaces(account)).toBe(true);
 		expect(manager.getEnabledWorkspaceCount(account)).toBe(2);
-		expect(account.currentWorkspaceIndex).toBe(0);
-		expect(manager.getCurrentWorkspace(account)?.id).toBe("workspace-1");
+		expect(account.currentWorkspaceIndex).toBe(1);
+		expect(manager.getCurrentWorkspace(account)?.id).toBe("workspace-2");
 		expect(account.workspaces).toEqual([
 			{
 				id: "workspace-1",
@@ -382,7 +382,7 @@ describe("AccountManager", () => {
 		]);
 	});
 
-	it("re-enabling an exhausted account without a default workspace resets to the first workspace", () => {
+	it("re-enabling an exhausted account without a default preserves the selected workspace", () => {
 		const now = Date.now();
 		const stored = {
 			version: 3 as const,
@@ -419,8 +419,8 @@ describe("AccountManager", () => {
 			throw new Error("account should exist");
 		}
 
-		expect(account.currentWorkspaceIndex).toBe(0);
-		expect(manager.getCurrentWorkspace(account)?.id).toBe("workspace-1");
+		expect(account.currentWorkspaceIndex).toBe(1);
+		expect(manager.getCurrentWorkspace(account)?.id).toBe("workspace-2");
 		expect(account.workspaces).toEqual([
 			{ id: "workspace-1", name: "Workspace 1", enabled: true },
 			{ id: "workspace-2", name: "Workspace 2", enabled: true },
@@ -5039,4 +5039,49 @@ describe("AccountManager", () => {
 			expect(afterUnblock?.index).toBe(1);
 		});
 	});
+});
+
+describe("workspace preference persistence", () => {
+	it("preserves external additions, deletions and workspace exclusions across repeated daemon saves", async () => {
+		const initial:AccountStorageV3={version:3,activeIndex:0,accounts:[{recordId:"first",accountId:"first",refreshToken:"fixture-first",addedAt:1,lastUsed:1,workspaces:[{id:"personal",enabled:true},{id:"business",enabled:true}]},{recordId:"removed",accountId:"removed",refreshToken:"fixture-removed",addedAt:2,lastUsed:2}]};
+		const manager=new AccountManager(undefined,initial);
+		let disk=structuredClone(initial);
+		disk.accounts[0]!.workspaces![1]!.enabled=false;
+		disk.accounts.splice(1,1,{recordId:"added",accountId:"added",refreshToken:"fixture-added",addedAt:3,lastUsed:3});
+		const {withAccountStorageTransaction}=await import("../lib/storage.js");
+		vi.mocked(withAccountStorageTransaction).mockImplementation(async handler=>handler(structuredClone(disk),async next=>{disk=structuredClone(next);}));
+		manager.getAccountByIndex(0)!.lastUsed=50;
+		await manager.saveToDisk();
+		await manager.saveToDisk();
+		expect(disk.accounts.map(a=>a.recordId)).toEqual(["first","added"]);
+		expect(disk.accounts[0]!.lastUsed).toBe(50);
+		expect(disk.accounts[0]!.workspaces![1]!.enabled).toBe(false);
+	});
+ it.each(["save", "refresh"])("keeps a newer CLI preference during %s", async mode => {
+  const initial:AccountStorageV3={version:3,activeIndex:0,accounts:[{accountId:"a",email:"test@example.test",refreshToken:"old",addedAt:1,lastUsed:1,currentWorkspaceIndex:0,workspaces:[{id:"business",enabled:true},{id:"personal",enabled:true}]}]};
+  const manager=new AccountManager(undefined,structuredClone(initial));
+  let disk=structuredClone(initial); disk.accounts[0]!.currentWorkspaceIndex=1;
+  const {withAccountStorageTransaction}=await import("../lib/storage.js");
+  vi.mocked(withAccountStorageTransaction).mockImplementation(async handler=>handler(structuredClone(disk),async next=>{disk=structuredClone(next);}));
+  const account=manager.getAccountByIndex(0)!;
+  manager.disableWorkspace(account,"business");
+  if(mode==="refresh") await manager.commitRefreshedAuth(account,{type:"oauth",access:"new",refresh:"new-refresh",expires:Date.now()+60_000});
+  else await manager.saveToDisk();
+  expect(disk.accounts[0]!.currentWorkspaceIndex).toBe(1);
+  expect(account.currentWorkspaceIndex).toBe(1);
+  expect(disk.accounts[0]!.workspaces?.[0]?.enabled).toBe(false);
+  await manager.saveToDisk();
+  expect(disk.accounts[0]!.currentWorkspaceIndex).toBe(1);
+ });
+ it("still persists local legacy workspace rotation when disk preference has not changed",async()=>{
+  let disk:AccountStorageV3={version:3,activeIndex:0,accounts:[{accountId:"a",refreshToken:"old",addedAt:1,lastUsed:1,currentWorkspaceIndex:0,workspaces:[{id:"one",enabled:true},{id:"two",enabled:true}]}]};
+  const manager=new AccountManager(undefined,structuredClone(disk));
+  const {withAccountStorageTransaction}=await import("../lib/storage.js");
+  vi.mocked(withAccountStorageTransaction).mockImplementation(async handler=>handler(structuredClone(disk),async next=>{disk=structuredClone(next);}));
+  manager.rotateToNextWorkspace(manager.getAccountByIndex(0)!);
+  await manager.saveToDisk();
+  expect(disk.accounts[0]!.currentWorkspaceIndex).toBe(1);
+  await manager.saveToDisk();
+  expect(disk.accounts[0]!.currentWorkspaceIndex).toBe(1);
+ });
 });

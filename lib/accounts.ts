@@ -1,6 +1,7 @@
 import { mergeAccountSnapshot } from "./storage/snapshot-merge.js";
 import type { Auth } from "@codex-ai/sdk";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { saveAccountsWithRetry } from "./storage/save-retry.js";
 import { createLogger } from "./logger.js";
 import {
@@ -128,7 +129,7 @@ function deriveAccountRecordId(
 	return `record:${createHash("sha256").update(seed).digest("hex")}`;
 }
 
-function resolveAccountRecordId(
+export function resolveAccountRecordId(
 	account: {
 		recordId?: string;
 		accountId?: string;
@@ -333,6 +334,9 @@ export interface ManagedAccount {
 export class AccountManager {
 	private persistenceBaseline: AccountStorageV3 | null = null;
 	private accounts: ManagedAccount[] = [];
+	private readonly persistedWorkspaceSelections = new WeakMap<ManagedAccount, string | undefined>();
+	private readonly persistedWorkspaces = new WeakMap<ManagedAccount, Workspace[] | undefined>();
+	private hadPersistedStorage = false;
 	private cursorByFamily: Record<ModelFamily, number> = initFamilyState(0);
 	private currentAccountIndexByFamily: Record<ModelFamily, number> =
 		initFamilyState(-1);
@@ -481,6 +485,7 @@ export class AccountManager {
 		stored?: AccountStorageV3 | null,
 	) {
 		this.storagePathState = { ...getStoragePathState() };
+		this.hadPersistedStorage = existsSync(this.resolveSelectionStoragePath());
 		const fallbackAccountId =
 			extractAccountId(authFallback?.access)?.trim() || undefined;
 		const fallbackAccountEmail = sanitizeEmail(
@@ -645,6 +650,7 @@ export class AccountManager {
 				}
 			}
 			this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
+			this.rememberWorkspaceSelections();
 			return;
 		}
 
@@ -680,6 +686,55 @@ export class AccountManager {
 			}
 		}
 		this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
+		this.rememberWorkspaceSelections();
+	}
+
+	/** Reconcile external workspace policy by ID, preserving health changes not superseded on disk. */
+	syncWorkspaceSelections(current: AccountStorageV3 | null): boolean {
+		if (!current) return false;
+		let changed = false;
+		for (const account of this.accounts) {
+			const matches = current.accounts.filter(disk => disk.recordId && disk.recordId === account.recordId);
+			const key = getAccountIdentityKey(account);
+			const candidates = matches.length ? matches : current.accounts.filter(disk => key && getAccountIdentityKey(disk) === key);
+			if (candidates.length !== 1) continue;
+			const disk = candidates[0];
+			if (!disk) continue;
+			const localSelectedId = account.workspaces?.[account.currentWorkspaceIndex ?? 0]?.id;
+			const baseline = this.persistedWorkspaces.get(account);
+			if (JSON.stringify(disk.workspaces) !== JSON.stringify(baseline)) {
+				account.workspaces = disk.workspaces?.map(workspace => {
+					const previous = baseline?.find(item => item.id === workspace.id);
+					const local = account.workspaces?.find(item => item.id === workspace.id);
+					return previous && local && workspace.enabled === previous.enabled && workspace.disabledAt === previous.disabledAt
+						? {...workspace, enabled: local.enabled, disabledAt: local.disabledAt}
+						: {...workspace};
+				});
+				this.persistedWorkspaces.set(account, structuredClone(disk.workspaces));
+				changed = true;
+			}
+			const selectedId = disk.workspaces?.[disk.currentWorkspaceIndex ?? 0]?.id;
+			const preferredId = selectedId !== this.persistedWorkspaceSelections.get(account) ? selectedId : localSelectedId;
+			let index = account.workspaces?.findIndex(workspace => workspace.id === preferredId) ?? -1;
+			if (index < 0) index = account.workspaces?.findIndex(workspace => workspace.id === selectedId) ?? -1;
+			if (index < 0) index = 0;
+			if (account.workspaces?.length && account.currentWorkspaceIndex !== index) {
+				account.currentWorkspaceIndex = index;
+				changed = true;
+			}
+			this.persistedWorkspaceSelections.set(account, selectedId);
+		}
+		return changed;
+	}
+
+	private rememberWorkspaceSelections(snapshot?: AccountStorageV3): void {
+		this.accounts.forEach(account => {
+			const saved = snapshot?.accounts.find(row => row.recordId === account.recordId || getAccountIdentityKey(row) === getAccountIdentityKey(account)) ?? account;
+			this.persistedWorkspaceSelections.set(account, saved.workspaces?.[saved.currentWorkspaceIndex ?? 0]?.id);
+			this.persistedWorkspaces.set(account, structuredClone(saved.workspaces));
+		});
+		this.persistenceBaseline = structuredClone(this.buildStorageSnapshot());
+		this.hadPersistedStorage ||= existsSync(this.resolveSelectionStoragePath());
 	}
 
 	getAccountCount(): number {
@@ -1733,6 +1788,8 @@ export class AccountManager {
 		const nextEmail = sanitizeEmail(extractAccountEmail(auth.access));
 		try {
 			return await withAccountStorageTransaction(async (_current, persist) => {
+				if (!_current && this.hadPersistedStorage) throw Object.assign(new Error("Account storage was removed; reload before saving."), {code:"ESTALE"});
+				this.syncWorkspaceSelections(_current);
 				// Snapshot the live in-memory pool under the storage lock so refresh
 				// persistence merges against the latest account state. Reconcile the
 				// selection first for the same reason `saveToDisk` does: this write
@@ -1806,6 +1863,7 @@ export class AccountManager {
 
 					try {
 						await this.persistSnapshot(_current, nextStorage, persist);
+						this.rememberWorkspaceSelections(nextStorage);
 					} catch (error) {
 						liveAccount.access = previousLiveAccountState.access;
 						liveAccount.refreshToken = previousLiveAccountState.refreshToken;
@@ -1850,6 +1908,7 @@ export class AccountManager {
 				}
 
 				await this.persistSnapshot(_current, nextStorage, persist);
+				this.rememberWorkspaceSelections(nextStorage);
 				log.warn("Unable to resolve refreshed live account after persistence", {
 					sourceIndex: source.index,
 				});
@@ -2163,11 +2222,15 @@ export class AccountManager {
 	async saveToDisk(): Promise<void> {
 		await runWithStoragePathState(this.storagePathState, async () => {
 			await withAccountStorageTransaction(async (current, persist) => {
+				if (!current && this.hadPersistedStorage) throw Object.assign(new Error("Account storage was removed; reload before saving."), {code:"ESTALE"});
 				// Reconcile against the disk state loaded under the storage lock so a
 				// routine save does not clobber a token another process just rotated
 				// (stress audit H3) or a pin the CLI just wrote (#474).
 				this.reconcileSelectionFromDisk();
-				await this.persistSnapshot(current, this.reconcileTokensFromDisk(this.buildStorageSnapshot(), current), persist);
+				this.syncWorkspaceSelections(current);
+				const snapshot = this.reconcileTokensFromDisk(this.buildStorageSnapshot(), current);
+				await this.persistSnapshot(current, snapshot, persist);
+				this.rememberWorkspaceSelections(snapshot);
 			});
 		});
 	}
@@ -2251,11 +2314,16 @@ export class AccountManager {
 		);
 
 		for (const workspace of account.workspaces) {
-			workspace.enabled = true;
-			delete workspace.disabledAt;
+			// Only undo runtime health disablement, never an explicit workspace exclusion.
+			if (workspace.disabledAt !== undefined) {
+				workspace.enabled = true;
+				delete workspace.disabledAt;
+			}
 		}
 
-		account.currentWorkspaceIndex = resetIndex >= 0 ? resetIndex : 0;
+		if (!account.workspaces[account.currentWorkspaceIndex ?? -1]) {
+			account.currentWorkspaceIndex = resetIndex >= 0 ? resetIndex : 0;
+		}
 	}
 
 	getCurrentWorkspace(account: ManagedAccount): Workspace | null {
@@ -2265,6 +2333,15 @@ export class AccountManager {
 		const idx = account.currentWorkspaceIndex ?? 0;
 		return account.workspaces[idx] ?? null;
 	}
+
+ /** Disable a specific request workspace without changing the interactive selection. */
+ disableWorkspace(account: ManagedAccount, workspaceId: string): boolean {
+  const workspace = account.workspaces?.find(item=>item.id===workspaceId);
+  if(!workspace || workspace.enabled===false) return false;
+  workspace.enabled=false;
+  workspace.disabledAt=nowMs();
+  return true;
+ }
 
 	disableCurrentWorkspace(
 		account: ManagedAccount,
@@ -2401,6 +2478,7 @@ export function formatWorkspaceLines(
 		| { workspaces?: Workspace[]; currentWorkspaceIndex?: number }
 		| undefined,
 	indent = "   ",
+	selectionLabel = "active",
 ): string[] {
 	const workspaces = account?.workspaces;
 	if (!workspaces || workspaces.length === 0) return [];
@@ -2411,7 +2489,7 @@ export function formatWorkspaceLines(
 		const id = workspace.id?.trim() ?? "";
 		const idSuffix = id.length > 6 ? id.slice(-6) : id;
 		const tags: string[] = [];
-		if (isActive) tags.push("active");
+		if (isActive) tags.push(selectionLabel);
 		if (workspace.enabled === false) tags.push("disabled");
 		const tagLabel = tags.length > 0 ? ` (${tags.join(", ")})` : "";
 		const idLabel = idSuffix ? ` id:${idSuffix}` : "";

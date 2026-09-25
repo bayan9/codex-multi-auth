@@ -620,12 +620,12 @@ describe("Token Utils Module", () => {
 			expect(selected?.accountId).toBe("business_org");
 		});
 
-		it("falls back to token, then first candidate", () => {
+		it("prefers explicit Personal metadata, retaining deterministic fallback for ambiguous internal callers", () => {
 			const tokenSelected = selectBestAccountCandidate([
 				{ accountId: "token_id", label: "Token", source: "token" },
 				{ accountId: "other", label: "Other", source: "org", isPersonal: true },
 			]);
-			expect(tokenSelected?.accountId).toBe("token_id");
+			expect(tokenSelected?.accountId).toBe("other");
 
 			const firstSelected = selectBestAccountCandidate([
 				{ accountId: "first", label: "First", source: "org", isPersonal: true },

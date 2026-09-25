@@ -1,3 +1,8 @@
+import { runResetsCommand } from "./codex-manager/commands/resets.js";
+import { loadResetCreditState } from "./runtime/account-reset-credits.js";
+import { loadApiRoutes } from "./api-route-store.js";
+import { loadInferenceRequestTimes } from "./runtime/inference-activity.js";
+import { loadModelInventory } from "./runtime/model-discovery-status.js";
 import {
 	AUTH_INVALIDATION_MARKER,
 	AccountManager,
@@ -486,6 +491,10 @@ type CliCommandHandler = (rest: string[]) => number | Promise<number>;
  */
 const runListOrStatusCommand: CliCommandHandler = (rest) =>
 	runStatusCommand({
+		loadApiRoutes,
+		loadResetCreditState,
+		loadInferenceRequestTimes,
+		loadModelInventory,
 		setStoragePath,
 		getStoragePath,
 		loadAccounts,
@@ -495,7 +504,7 @@ const runListOrStatusCommand: CliCommandHandler = (rest) =>
 		loadRuntimeObservabilitySnapshot: loadPersistedRuntimeObservabilitySnapshot,
 		loadAppBindStatus: async () =>
 			getAppBindStatus()
-				.then((status) => (status.running ? status.router : null))
+				.then((status) => (status.running && status.router ? { ...status.router, nativeOpenai: status.state?.nativeOpenai === true } : null))
 				.catch(() => null),
 		loadAppHelperStatus: readAppRuntimeHelperAccountSignal,
 		loadQuotaCache,
@@ -559,7 +568,7 @@ const CLI_COMMAND_HANDLERS: ReadonlyMap<string, CliCommandHandler> = new Map<
 				saveAccounts,
 			}),
 	],
-	["check", () => runCheckCommand({ runHealthCheck })],
+	["check", () => runCheckCommand({ runHealthCheck: options => runHealthCheck({ ...options, discoverModels: true }) })],
 	[
 		"features",
 		() => runFeaturesCommand({ implementedFeatures: IMPLEMENTED_FEATURES }),
@@ -619,6 +628,7 @@ const CLI_COMMAND_HANDLERS: ReadonlyMap<string, CliCommandHandler> = new Map<
 			}),
 	],
 	["usage", (rest) => runUsageCommand(rest)],
+	["resets", (rest) => runResetsCommand(rest)],
 	[
 		"rotation",
 		(rest) =>

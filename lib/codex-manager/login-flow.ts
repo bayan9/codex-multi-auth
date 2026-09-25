@@ -1,4 +1,7 @@
-﻿import { sanitizeEmail } from "../accounts.js";
+import { runApiLoginMenu } from "./api-login-menu.js";
+import { sanitizeEmail, getAccountIdCandidates } from "../accounts.js";
+import { resolveOrgOverride } from "../auth/org-override.js";
+import { chooseLoginWorkspace } from "./login-workspace-choice.js";
 import { isBrowserLaunchSuppressed } from "../auth/browser.js";
 import { promptAddAnotherAccount, promptLoginMode } from "../cli.js";
 import { ACCOUNT_LIMITS } from "../constants.js";
@@ -139,6 +142,7 @@ export async function runAuthLogin(
 	args: string[],
 	deps: LoginFlowDeps,
 ): Promise<number> {
+	if (args.length === 1 && args[0] === "--api") return runApiLoginMenu();
 	const parsedArgs = parseAuthLoginArgs(args);
 	if (!parsedArgs.ok) {
 		if (parsedArgs.reason === "error") {
@@ -255,7 +259,7 @@ async function runLoginDashboardLoop(
 				"Quick Check",
 				"Checking local session + live status",
 				async () => {
-					await runHealthCheck({ forceRefresh: false, liveProbe: true });
+					await runHealthCheck({ forceRefresh: false, liveProbe: true, discoverModels: true });
 				},
 				displaySettings,
 			);
@@ -267,7 +271,7 @@ async function runLoginDashboardLoop(
 				"Deep Check",
 				"Refreshing and testing all accounts",
 				async () => {
-					await runHealthCheck({ forceRefresh: true, liveProbe: true });
+					await runHealthCheck({ forceRefresh: true, liveProbe: true, discoverModels: true });
 				},
 				displaySettings,
 			);
@@ -295,6 +299,11 @@ async function runLoginDashboardLoop(
 				},
 				displaySettings,
 			);
+			continue;
+		}
+		if (menuResult.mode === "api-models") {
+			await drainPendingMenuQuotaRefresh(menuState);
+			await runApiLoginMenu();
 			continue;
 		}
 		if (menuResult.mode === "settings") {
@@ -585,13 +594,17 @@ async function runAuthLoginFlow(
 				return 1;
 			}
 
-			const resolved = resolveAccountSelection(
-				tokenResult,
-				loginOptions.org,
-				expectedAccount?.accountId,
-			);
+			let resolved: ReturnType<typeof resolveAccountSelection>;
 			let persistResult: Awaited<ReturnType<typeof persistAccountPool>>;
 			try {
+				const workspaceOverride = expectedAccount || resolveOrgOverride(loginOptions.org)
+					? loginOptions.org
+					: await chooseLoginWorkspace(getAccountIdCandidates(tokenResult.access, tokenResult.idToken));
+				if (workspaceOverride === null) {
+					console.log("Cancelled. Account was not saved.");
+					return 0;
+				}
+				resolved = resolveAccountSelection(tokenResult, workspaceOverride, expectedAccount?.accountId);
 				persistResult = await persistAccountPool([resolved], false, {
 					preserveSelection: loginOptions.preserveSelection,
 					expectedAccount: expectedAccount ?? undefined,

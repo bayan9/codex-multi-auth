@@ -319,3 +319,17 @@ describe("runHealthCheck live probe", () => {
 		expect(logged()).toContain("1 Codex available");
 	});
 });
+
+it("checks usable accounts concurrently while committing results in account order",async()=>{
+ loadAccountsMock.mockResolvedValue(storageWith([account("one"),account("two"),account("three"),account("four")]));
+ let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+ const started:string[]=[];
+ fetchCodexQuotaSnapshotMock.mockImplementation(async ({accountId}:{accountId:string})=>{
+  started.push(accountId);if(accountId==="acc_one") await gate;return snapshot();
+ });
+ const pending=runHealthCheck({liveProbe:true});
+ try{await vi.waitFor(()=>expect(started).toContain("acc_four"),{timeout:100});}
+ finally{release();await pending;}
+ expect(fetchCodexQuotaSnapshotMock).toHaveBeenCalledTimes(4);
+ expect(logged()).toContain("Checking account probes");
+});

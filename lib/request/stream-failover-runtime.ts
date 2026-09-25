@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
 import type { RuntimeRotationProxyStatus } from "../runtime/rotation-server-types.js";
+import type { StreamCompletion } from "./response-outcome.js";
 
 export const HOP_BY_HOP_HEADERS = new Set([
 	"connection",
@@ -155,20 +156,30 @@ export async function forwardStreamingResponse(
 	onChunk?: (chunk: Uint8Array) => void,
 	/** Additional response headers, applied after (so they can override) the forwarded upstream ones. */
 	extraHeaders?: Record<string, string>,
+	completion?: () => StreamCompletion,
 ): Promise<boolean> {
 	status.streamsStarted += 1;
 	res.writeHead(upstream.status, {
 		...responseHeadersForClient(upstream.headers),
 		...extraHeaders,
 	});
-	if (!upstream.body) {
+	let clientDisconnected = false;
+	const finish = (): boolean => {
+		if (clientDisconnected || res.destroyed) return false;
+		const result = completion?.();
+		if (result && !result.success) {
+			status.lastError = result.errorCode;
+			if (result.missingTerminal) res.write(Buffer.from(`data: ${JSON.stringify({type:"error",error:{code:result.errorCode,message:"Upstream ended before completing the response."}})}\n\n`));
+		}
 		res.end();
-		return true;
-	}
+		return result?.success ?? true;
+	};
+	if (!upstream.body) return finish();
 
 	const reader = upstream.body.getReader();
 	res.on("close", () => {
 		if (!res.writableEnded) {
+			clientDisconnected = true;
 			void reader.cancel().catch(() => undefined);
 		}
 	});
@@ -199,8 +210,7 @@ export async function forwardStreamingResponse(
 				}
 			}
 		}
-		res.end();
-		return true;
+		return finish();
 	} catch (error) {
 		status.lastError = error instanceof Error ? error.message : String(error);
 		onStreamError();
