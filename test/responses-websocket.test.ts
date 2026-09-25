@@ -378,3 +378,206 @@ it("cancels queued creates as well as the streaming turn without blocking new wo
  await vi.waitFor(()=>expect(f.calls.some(call=>call.model==="after-cancel")).toBe(true));
  expect(f.calls.map(call=>call.model)).toEqual(["stall","after-cancel"]);
 });
+
+/** Gateway in front of an arbitrary upstream; records the Response each routed turn produced. */
+async function customGateway(options: {
+	upstream: Server;
+	auth?: (req: IncomingMessage) => number | null;
+	outboundHeaders?: Record<string, string>;
+}) {
+	const upstreamUrl = await listen(options.upstream);
+	cleanups.push(async () => {
+		options.upstream.closeAllConnections();
+		await new Promise<void>((r) => options.upstream.close(() => r()));
+	});
+	const gateway = new ResponsesWebSocketGateway(fetch, { maxPayloadBytes: 16384 });
+	const responses: Response[] = [];
+	const server = createServer((req, res) => {
+		gateway.handle(req, async () => {
+			const denied = options.auth ? options.auth(req) : req.headers.authorization === "Bearer fixture-local" ? null : 401;
+			if (denied !== null) {
+				res.writeHead(denied);
+				res.end();
+				return;
+			}
+			if (req.method !== "POST") {
+				res.writeHead(404);
+				res.end();
+				return;
+			}
+			const chunks: Buffer[] = [];
+			for await (const chunk of req) chunks.push(Buffer.from(chunk));
+			const response = await gateway.fetch(`${upstreamUrl}/responses`, {
+				method: "POST",
+				headers: { authorization: "Bearer fixture-upstream", "content-type": "application/json", ...options.outboundHeaders },
+				body: Buffer.concat(chunks),
+			});
+			responses.push(response);
+			res.writeHead(response.status, Object.fromEntries(response.headers));
+			if (response.body) for await (const chunk of response.body) res.write(chunk);
+			res.end();
+		});
+	});
+	const baseUrl = await listen(server);
+	gateway.attach(server, baseUrl);
+	cleanups.push(async () => {
+		gateway.close();
+		server.closeAllConnections();
+		await new Promise<void>((r) => server.close(() => r()));
+	});
+	const connect = async (headers: Record<string, string> = { authorization: "Bearer fixture-local" }) => {
+		const ws = new WebSocket(baseUrl.replace("http:", "ws:") + "/responses", { headers });
+		cleanups.push(async () => ws.terminate());
+		await once(ws, "open");
+		return ws;
+	};
+	const handshakeStatus = (headers: Record<string, string>) => new Promise<number>((resolve, reject) => {
+		const ws = new WebSocket(baseUrl.replace("http:", "ws:") + "/responses", { headers });
+		cleanups.push(async () => ws.terminate());
+		ws.once("unexpected-response", (_req, res) => { resolve(res.statusCode ?? 0); res.resume(); });
+		ws.once("open", () => resolve(101));
+		ws.once("error", reject);
+	});
+	return { connect, handshakeStatus, responses };
+}
+
+function rejectingUpstream(status: number, headers: Record<string, string>, onPost?: (body: string) => void): Server {
+	const upstream = createServer(async (req, res) => {
+		const chunks: Buffer[] = [];
+		for await (const chunk of req) chunks.push(Buffer.from(chunk));
+		onPost?.(Buffer.concat(chunks).toString("utf8"));
+		res.writeHead(200, { "content-type": "text/event-stream" });
+		res.end(`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_http", output: [] } })}\n\n`);
+	});
+	upstream.on("upgrade", (_req, socket) => {
+		socket.end(`HTTP/1.1 ${status} Rejected\r\n${Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join("")}Content-Length: 0\r\nConnection: close\r\n\r\n`);
+	});
+	return upstream;
+}
+
+it("keeps Retry-After and quota headers from a rejected upstream handshake", async () => {
+	const g = await customGateway({
+		upstream: rejectingUpstream(429, { "retry-after": "120", "x-codex-primary-used-percent": "100" }),
+		outboundHeaders: { "chatgpt-account-id": "acc_fixture" },
+	});
+	const ws = await g.connect();
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "error", status: 429 });
+	expect(g.responses[0]?.headers.get("retry-after")).toBe("120");
+	expect(g.responses[0]?.headers.get("x-codex-primary-used-percent")).toBe("100");
+});
+
+it("keeps headers carried by a pre-generation error event", async () => {
+	const upstream = createServer();
+	const wss = new WebSocketServer({ server: upstream });
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	wss.on("connection", (ws) => ws.on("message", () => ws.send(JSON.stringify({
+		type: "error", status: 429, headers: { "retry-after": "45", "x-codex-secondary-used-percent": "100" },
+		error: { code: "rate_limit_exceeded", message: "fixture" },
+	}))));
+	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
+	const ws = await g.connect();
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "error", status: 429 });
+	expect(g.responses[0]?.headers.get("retry-after")).toBe("45");
+	expect(g.responses[0]?.headers.get("x-codex-secondary-used-percent")).toBe("100");
+});
+
+it("carries handshake quota headers on the first response of a fresh upstream socket", async () => {
+	const upstream = createServer();
+	const wss = new WebSocketServer({ server: upstream });
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	wss.on("headers", (headers) => headers.push("x-codex-primary-used-percent: 42"));
+	wss.on("connection", (ws) => ws.on("message", () => {
+		ws.send(JSON.stringify({ type: "response.created", response: { id: "resp_q" } }));
+		ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_q", output: [] } }));
+	}));
+	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
+	const ws = await g.connect();
+	await turn(ws, { model: "shared", input: [] });
+	expect(g.responses[0]?.headers.get("x-codex-primary-used-percent")).toBe("42");
+	expect(g.responses[0]?.headers.get("content-type")).toBe("text/event-stream");
+});
+
+it("answers a transient auth outage with 503 and only a real 401 with 401", async () => {
+	let status = 503;
+	const g = await customGateway({ upstream: rejectingUpstream(404, {}), auth: () => status });
+	expect(await g.handshakeStatus({ authorization: "Bearer fixture-local" })).toBe(503);
+	status = 401;
+	expect(await g.handshakeStatus({ authorization: "Bearer fixture-local" })).toBe(401);
+});
+
+it("authenticates a WebSocket upgrade that presents the client key as x-api-key", async () => {
+	const g = await customGateway({
+		upstream: rejectingUpstream(404, {}),
+		auth: (req) => req.headers["x-api-key"] === "fixture-local" || req.headers.authorization === "Bearer fixture-local" ? null : 401,
+	});
+	expect(await g.handshakeStatus({ "x-api-key": "fixture-local" })).toBe(101);
+	expect(await g.handshakeStatus({ "x-api-key": "wrong" })).toBe(401);
+});
+
+it("forwards the client's OpenAI-Beta WebSocket flag alongside the routing flag", async () => {
+	const upstream = createServer();
+	const wss = new WebSocketServer({ server: upstream });
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	const betas: (string | undefined)[] = [];
+	wss.on("connection", (ws, req) => {
+		betas.push(req.headers["openai-beta"] as string | undefined);
+		ws.on("message", () => ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_b", output: [] } })));
+	});
+	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture", "openai-beta": "responses=experimental" } });
+	const ws = await g.connect({ authorization: "Bearer fixture-local", "openai-beta": "responses_websockets=2026-02-06" });
+	await turn(ws, { model: "shared", input: [] });
+	expect(betas).toEqual(["responses=experimental, responses_websockets=2026-02-06"]);
+});
+
+it("falls back to HTTP for an API credential whose WebSocket handshake is refused", async () => {
+	const posts: string[] = [];
+	const g = await customGateway({ upstream: rejectingUpstream(404, {}, (body) => posts.push(body)) });
+	const ws = await g.connect();
+	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
+	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
+	expect(posts).toHaveLength(2);
+	expect(JSON.parse(posts[0]!)).toMatchObject({ model: "api/fixture", stream: true });
+});
+
+it("does not fall back to HTTP for a ChatGPT workspace whose handshake is refused", async () => {
+	const posts: string[] = [];
+	const g = await customGateway({ upstream: rejectingUpstream(403, {}, (body) => posts.push(body)), outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
+	const ws = await g.connect();
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "error", status: 403 });
+	expect(posts).toHaveLength(0);
+});
+
+it("retries once on a fresh socket when a reused upstream socket closes before accepting", async () => {
+	const upstream = createServer();
+	const wss = new WebSocketServer({ server: upstream });
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	let connections = 0; let messages = 0;
+	wss.on("connection", (ws) => {
+		connections++;
+		ws.on("message", () => {
+			messages++;
+			if (messages === 2) { ws.terminate(); return; }
+			ws.send(JSON.stringify({ type: "response.created", response: { id: `resp_${messages}` } }));
+			ws.send(JSON.stringify({ type: "response.completed", response: { id: `resp_${messages}`, output: [] } }));
+		});
+	});
+	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
+	const ws = await g.connect();
+	await turn(ws, { model: "shared", input: [] });
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
+	expect(connections).toBe(2);
+	expect(messages).toBe(3);
+});
+
+it("keeps loopback hops off an environment HTTP proxy", async () => {
+	const undici = await import("undici");
+	const previous = undici.getGlobalDispatcher();
+	const f = await fixture();
+	undici.setGlobalDispatcher(new undici.ProxyAgent("http://127.0.0.1:9"));
+	try {
+		const ws = await f.connect();
+		expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
+	} finally {
+		undici.setGlobalDispatcher(previous);
+	}
+});

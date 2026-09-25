@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
+import { Agent, fetch as undiciFetch } from "undici";
 import { parseModelRoute } from "../model-route-policy.js";
 import { isRecord } from "../utils.js";
 import { ResponseOutputHistory, hasOrphanToolResult } from "./response-output-history.js";
@@ -17,7 +18,26 @@ const terminal = new Set([
 ]);
 type Json = Record<string, unknown>;
 type Chain = { body: Json; output: unknown[]; pool: string; bytes: number };
-type Context = { signal: AbortSignal; session: SocketSession; previousId?: string; delta?: unknown };
+type Context = { signal: AbortSignal; session: SocketSession; previousId?: string; delta?: unknown; clientBeta?: string };
+/** Headers that describe the synthetic body or the upgrade itself, never the upstream decision. */
+const LOCAL_ONLY_HEADERS = /^(connection|upgrade|keep-alive|sec-websocket-.*|content-length|content-encoding|content-type|transfer-encoding|set-cookie)$/i;
+function upstreamHeaders(source: unknown): Record<string, string> {
+	const headers: Record<string, string> = {};
+	if (!isRecord(source)) return headers;
+	for (const [key, value] of Object.entries(source)) {
+		if (LOCAL_ONLY_HEADERS.test(key)) continue;
+		if (typeof value === "string") headers[key] = value;
+		else if (typeof value === "number") headers[key] = String(value);
+		else if (Array.isArray(value) && value.every(item => typeof item === "string")) headers[key] = value.join(", ");
+	}
+	return headers;
+}
+/** Union of comma-separated OpenAI-Beta features; the client's own flags are kept. */
+function mergeBeta(current: string | null, client: string | undefined): string | null {
+	if (!client) return current;
+	const features = [...(current ?? "").split(","), ...client.split(",")].map(item => item.trim()).filter(Boolean);
+	return [...new Set(features)].join(", ") || null;
+}
 function wireError(code: string, status = 400): Json {
 	return {
 		type: "error",
@@ -47,6 +67,8 @@ class SocketSession {
 	readonly channels = new Map<string, WebSocket>();
 	readonly owners = new Map<string, WebSocket>();
 	readonly chains = new Map<string, Chain>();
+	/** Credentials whose WebSocket handshake was refused; they use HTTP for the session. */
+	private readonly httpOnly = new Set<string>();
 	bytes = 0;
 	controller: AbortController | undefined;
 	closed = false;
@@ -57,6 +79,7 @@ class SocketSession {
 			upstreamConnections: number;
 			upstreamRequests: number;
 		},
+		private readonly httpFetch: typeof fetch = fetch,
 	) {}
 	close() {
 		this.closed = true;
@@ -88,11 +111,16 @@ class SocketSession {
 		input: string | URL | Request,
 		init: RequestInit,
 		context: Context,
+		fresh = false,
 	): Promise<Response> {
         if (context.signal.aborted || this.closed) throw new ClientCancellationError();
 		const url = new URL(String(input));
 		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 		const headers = new Headers(init.headers);
+		// The routing pipeline stamps its HTTP beta flag; the native client's
+		// WebSocket flag (e.g. responses_websockets=<date>) must survive the hop.
+		const beta = mergeBeta(headers.get("openai-beta"), context.clientBeta);
+		if (beta) headers.set("openai-beta", beta);
 		const key = createHash("sha256")
 			.update(url.toString())
 			.update("\0")
@@ -100,12 +128,20 @@ class SocketSession {
 			.update("\0")
 			.update(headers.get("chatgpt-account-id") ?? "")
 			.digest("hex");
+		// API/ZDR credentials are not ChatGPT workspaces: when their WebSocket
+		// handshake is refused, the turn (and the session) uses plain HTTP.
+		const apiCredential = !headers.has("chatgpt-account-id");
+		if (apiCredential && this.httpOnly.has(key)) return this.httpFetch(input, init);
 		const body = bodyJson(init.body);
 		delete body.stream;
 		delete body.background;
 		body.store = false;
 		body.type = "response.create";
-		let socket = this.channels.get(key);
+		let socket = fresh ? undefined : this.channels.get(key);
+		if (fresh) {
+			this.channels.get(key)?.terminate();
+			this.channels.delete(key);
+		}
 		if (socket?.readyState !== WebSocket.OPEN) {
 			socket?.terminate();
 			this.channels.delete(key);
@@ -122,6 +158,8 @@ class SocketSession {
 		else if (context.previousId && hasOrphanToolResult(body.input)) {
 			return Response.json(wireError("previous_response_not_found"), {status: 400});
 		}
+		const reused = socket !== undefined;
+		let handshakeHeaders: Record<string, string> | undefined;
 		if (!socket) {
 			if (context.signal.aborted || this.closed) throw new ClientCancellationError();
 			if (this.channels.size >= 16) {
@@ -162,6 +200,9 @@ class SocketSession {
                     };
                     context.signal.addEventListener("abort", abort, {once:true});
 					init.signal?.addEventListener("abort", abort, { once: true });
+					opening.once("upgrade", (response) => {
+						handshakeHeaders = upstreamHeaders(response.headers);
+					});
 					opening.once("open", () => {
 						cleanup();
 						resolve(undefined);
@@ -182,14 +223,19 @@ class SocketSession {
 										message: "Upstream rejected the WebSocket handshake.",
 									},
 								},
-								{ status: status >= 400 && status <= 599 ? status : 502 },
+								// Retry-After and x-codex-* quota headers drive cooldowns.
+								{ status: status >= 400 && status <= 599 ? status : 502, headers: upstreamHeaders(response.headers) },
 							),
 						);
 						opening.terminate();
 					});
 				},
 			);
-			if (rejected) return rejected;
+			if (rejected) {
+				if (!apiCredential) return rejected;
+				this.httpOnly.add(key);
+				return this.httpFetch(input, init);
+			}
 			this.channels.set(key, socket);
 		}
 		const active = socket;
@@ -220,7 +266,14 @@ class SocketSession {
 				finished = true;
 				cleanup();
 				this.channels.delete(key);
-                const error = context.signal.aborted || this.closed
+                const cancelled = context.signal.aborted || this.closed;
+                // A reused socket the server already closed is not this account's
+                // failure: retry once on a fresh socket before reporting one.
+                if (!accepted && reused && !cancelled) {
+                    resolve(this.fetch(input, init, context, true));
+                    return;
+                }
+                const error = cancelled
                     ? new ClientCancellationError()
                     : Error("Upstream WebSocket disconnected");
                 if (accepted) streamController.error(error);
@@ -243,14 +296,16 @@ class SocketSession {
 							event.status <= 599
 								? event.status
 								: 400;
-						resolve(Response.json(event, { status }));
+						resolve(Response.json(event, { status, headers: upstreamHeaders(event.headers) }));
 						return;
 					}
 					if (!accepted) {
 						accepted = true;
+						// Handshake headers describe the account only at connect time,
+						// so they ride on the first response of a fresh socket.
 						resolve(
 							new Response(stream, {
-								headers: { "content-type": "text/event-stream" },
+								headers: { ...handshakeHeaders, "content-type": "text/event-stream" },
 							}),
 						);
 					}
@@ -306,6 +361,10 @@ export class ResponsesWebSocketGateway {
 	private readonly sessions = new Set<SocketSession>();
 	private readonly wss: WebSocketServer;
 	private readonly maxBytes: number;
+	/** Loopback hops must never go through an environment HTTP proxy (NODE_USE_ENV_PROXY). */
+	private readonly loopback = new Agent();
+	private readonly loopbackFetch = ((input: string, init?: RequestInit) =>
+		undiciFetch(input, { ...(init as Parameters<typeof undiciFetch>[1]), dispatcher: this.loopback })) as unknown as typeof fetch;
 	constructor(
 		private readonly upstreamFetch: typeof fetch,
 		private readonly options: {
@@ -357,15 +416,21 @@ export class ResponsesWebSocketGateway {
 				);
 			};
 			void (async () => {
-				const authorization = req.headers.authorization ?? "";
+				const credentials: Record<string, string> = {};
+				for (const name of ["authorization", "x-api-key"]) {
+					const value = req.headers[name];
+					if (typeof value === "string") credentials[name] = value;
+				}
 				// An authenticated unknown HTTP path returns 404; all unknown credentials return 401.
-				const auth = await fetch(`${baseUrl}/__websocket_auth_check__`, {
-					headers: { authorization },
+				const auth = await this.loopbackFetch(`${baseUrl}/__websocket_auth_check__`, {
+					headers: credentials,
 					signal: AbortSignal.timeout(5000),
 				});
 				await auth.body?.cancel();
 				if (auth.status !== 404) {
-					reject(401);
+					// Only a real 401 means bad credentials; a storage or policy outage is
+					// transient and must not make the native client distrust its login.
+					reject(auth.status === 401 ? 401 : auth.status >= 500 ? 503 : auth.status);
 					return;
 				}
 				if (req.headers.origin) {
@@ -397,7 +462,7 @@ export class ResponsesWebSocketGateway {
 	}
 	private serve(ws: WebSocket, req: IncomingMessage, baseUrl: string): void {
 		this.stats.connections++;
-		const session = new SocketSession(this.maxBytes, this.stats);
+		const session = new SocketSession(this.maxBytes, this.stats, this.upstreamFetch);
 		this.sessions.add(session);
 		let queue = Promise.resolve(),
 			queued = 0,
@@ -500,7 +565,8 @@ export class ResponsesWebSocketGateway {
 						const id = randomUUID();
 						const controller = new AbortController();
                         session.controller = controller;
-                        this.contexts.set(id, { session, previousId, delta: event.input, signal: controller.signal });
+                        const clientBeta = req.headers["openai-beta"];
+                        this.contexts.set(id, { session, previousId, delta: event.input, signal: controller.signal, clientBeta: typeof clientBeta === "string" ? clientBeta : undefined });
 						const headers = new Headers();
 						for (const [key, value] of Object.entries(req.headers)) {
 							if (
@@ -514,7 +580,7 @@ export class ResponsesWebSocketGateway {
 						headers.set(CONTEXT_HEADER, id);
 						headers.set("content-type", "application/json");
 						try {
-							const response = await fetch(`${baseUrl}/responses`, {
+							const response = await this.loopbackFetch(`${baseUrl}/responses`, {
 								method: "POST",
 								headers,
 								body: JSON.stringify(body),
@@ -587,5 +653,6 @@ export class ResponsesWebSocketGateway {
 		for (const session of this.sessions) session.close();
 		this.contexts.clear();
 		this.wss.close();
+		void this.loopback.close().catch(() => undefined);
 	}
 }

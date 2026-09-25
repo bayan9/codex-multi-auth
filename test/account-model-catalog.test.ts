@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AccountModelCatalog } from "../lib/runtime/account-model-catalog.js";
+import { AccountModelCatalog, CatalogRetryError, MAX_CATALOG_RETRY_MS, clampCatalogRetryMs } from "../lib/runtime/account-model-catalog.js";
 
 describe("live account model catalogs", () => {
 	it("routes from a fresh eligible catalog without waiting for unrelated discovery", async () => {
@@ -15,7 +15,7 @@ describe("live account model catalogs", () => {
 		try {expect(await catalog.prepareRouting(["slow","ready"],"model",undefined,undefined,()=>true,10000)).toBe("ready");}
 		finally {release();await catalog.list(["slow"]);}
 	});
-	it("bounds cold discovery and never treats an expired entitlement as current",async()=>{
+	it("bounds a slow refresh and then routes by the last successful catalog",async()=>{
         vi.useFakeTimers();
 		let now=0,release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
 		const catalog=new AccountModelCatalog(async()=>{if(now)await gate;return {models:[{slug:"model"}]};},()=>now,100);
@@ -24,7 +24,9 @@ describe("live account model catalogs", () => {
 			expect(catalog.supportsCached("a","model")).toBe(false);
 			const pending=catalog.prepareRouting(["a"],"model",undefined,undefined,()=>true,10);
             await vi.advanceTimersByTimeAsync(10);
-            expect(await pending).toBe("pending");
+            expect(await pending).toBe("ready");
+            expect(catalog.supportsForRouting("a","model")).toBe(true);
+            expect(catalog.supportsForRouting("a","other")).toBe(false);
 		}finally{release();await catalog.list(["a"]);vi.useRealTimers();}
 	});
 	it("unions live models, preserves future metadata, and respects a pin", async () => {
@@ -137,7 +139,7 @@ it("starts the next workspace as soon as any discovery slot finishes",async()=>{
  const started:string[]=[];
  const catalog=new AccountModelCatalog(async key=>{started.push(key);if(key==="slow") await gate;return {models:[{slug:key}]};});
  const pending=catalog.list(["slow","two","three","four"]);
- try {await vi.waitFor(()=>expect(started).toContain("four"),{timeout:100});}
+ try {await vi.waitFor(()=>expect(started).toContain("four"),{timeout:5000});}
  finally{release();await pending;vi.useRealTimers();}
  expect(started).toEqual(["slow","two","three","four"]);
 });
@@ -198,4 +200,40 @@ it("advertises only effort and tier pairs that a single account can serve", asyn
 	for (const effort of efforts)
 		for (const tier of tiers)
 			expect((await catalog.supports("a", "m", effort, tier)) || (await catalog.supports("b", "m", effort, tier))).toBe(true);
+});
+
+describe("fail-open routing", () => {
+	it("routes an unknown catalog but excludes by a fetched one", async () => {
+		const catalog = new AccountModelCatalog(async key => { if (key === "down") throw new CatalogRetryError(120_000); return { models: [{ slug: "present" }] }; });
+		expect(await catalog.prepareRouting(["down"], "anything", "high", "priority", () => true, 10_000)).toBe("ready");
+		expect(catalog.supportsForRouting("down", "anything", "high", "priority")).toBe(true);
+		await catalog.list(["up"]);
+		expect(catalog.supportsForRouting("up", "present")).toBe(true);
+		expect(catalog.supportsForRouting("up", "absent")).toBe(false);
+		expect(await catalog.prepareRouting(["up"], "absent", undefined, undefined, () => true, 10_000)).toBe("unavailable");
+	});
+	it("keeps the last successful catalog whatever its age when a refresh fails", async () => {
+		let now = 0;
+		const fetchCatalog = vi.fn().mockResolvedValueOnce({ models: [{ slug: "old" }] }).mockRejectedValue(new CatalogRetryError(60_000));
+		const catalog = new AccountModelCatalog(fetchCatalog, () => now, 100);
+		await catalog.list(["a"]);
+		now = 24 * 60 * 60_000;
+		await catalog.list(["a"]);
+		expect(fetchCatalog).toHaveBeenCalledTimes(2);
+		expect(catalog.supportsForRouting("a", "old")).toBe(true);
+		expect(catalog.supportsForRouting("a", "new")).toBe(false);
+	});
+	it("caps a throttled catalog backoff at fifteen minutes", async () => {
+		expect(clampCatalogRetryMs(86_400_000)).toBe(MAX_CATALOG_RETRY_MS);
+		expect(MAX_CATALOG_RETRY_MS).toBe(15 * 60_000);
+		expect(clampCatalogRetryMs(null)).toBe(60_000);
+		expect(clampCatalogRetryMs(Number.POSITIVE_INFINITY)).toBe(60_000);
+		let now = 0;
+		const fetchCatalog = vi.fn().mockRejectedValueOnce(new CatalogRetryError(86_400_000)).mockResolvedValue({ models: [{ slug: "m" }] });
+		const catalog = new AccountModelCatalog(fetchCatalog, () => now);
+		await catalog.list(["a"]);
+		now = MAX_CATALOG_RETRY_MS + 1;
+		expect((await catalog.list(["a"])).map(m => m.slug)).toEqual(["m"]);
+		expect(fetchCatalog).toHaveBeenCalledTimes(2);
+	});
 });

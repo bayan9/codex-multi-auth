@@ -675,7 +675,7 @@ Packaged desktop app support uses a reversible bind instead of patching app file
 and the real desktop login, while routing inference through the local account
 pool. This preserves the native authentication path used by Remote Control
 pairing and other account-dependent desktop features; pairing still requires a
-supported native app and its normal account setup. `codex-multi-auth switch <index>` tries the selected inference account first when eligible, then falls back through configured tiers; it does not
+supported native app and its normal account setup. `codex-multi-auth switch <index>` pins the inference account, as in every other mode: requests go only to that account, a model it does not advertise is refused with 403 `model_not_available_in_account_catalog`, and an unavailable pin fails with 503 `codex_pinned_account_unavailable` instead of rotating. Automatic reset-credit redemption never moves traffic off the pin. Run `codex-multi-auth unpin` to resume rotation. It does not
 change the desktop login in this mode. Sign out/in using the desktop app to
 change its real login. An auth-sync warning after a CLI switch can reflect this
 intentional separation; check `rotation status` for the routing state.
@@ -687,8 +687,12 @@ model, reasoning, and speed combination. Within a chosen account the selected
 workspace is preferred, followed by its stored binding and other enabled
 workspaces. Workspace choice is per request and does not change the desktop login
 or saved selection. Explicit account constraints and API/ZDR pool boundaries
-remain enforced. Catalogs refresh on demand after 60 seconds (failed discovery
-retries after 5 seconds), using the native client's version.
+remain enforced. Catalogs refresh on demand after 5 minutes (failed discovery
+retries after 5 seconds), using the native client's version. A throttled catalog
+honors `Retry-After`, capped at 15 minutes; `check capabilities` retries at once.
+Discovery outages never block inference: a workspace whose catalog has not been
+fetched successfully is unknown and stays routable, and once one fetch succeeds
+that last successful catalog decides, whatever its age.
 
 `check` refreshes the running native proxy and reports each credential/workspace
 separately. It labels the stored binding and preferred workspace, and highlights
@@ -915,8 +919,8 @@ codex-multi-auth doctor --fix
 - [settings.md](settings.md)
 - [../troubleshooting.md](../troubleshooting.md)
 
-Subscription priorities use 0 first and default to 1. In native app-bind mode,
-`switch` tries its pinned account first, then falls back through tiers; accounts
+Subscription priorities use 0 first and default to 1. A `switch` pin is strict in
+native app-bind mode too: tiers apply only when nothing is pinned. Accounts
 without the requested model, reasoning or speed are excluded. Larger-numbered tiers can
 serve requests when earlier tiers are unavailable. `account policy list` and
 `status` show priorities. Explicit wrapper `--account` remains a hard constraint.
@@ -978,7 +982,7 @@ runtime scheduling score, and does not rewrite configured priority tiers.
 For native subscription requests, `automatic order` estimates the order from the
 last check. It is separate from `priority tier` and can change with requested
 model/workspace and newer runtime observations. Eligible accounts above a 5%
-reserve go first. Within that phase, a desktop pin wins, then configured tiers,
+reserve go first. A stored `switch` pin bypasses this order entirely. Otherwise, configured tiers,
 then earliest limiting-window reset, with remaining percentage breaking ties. The reserve
 is used only when ordinary eligible subscription accounts are unavailable.
 Unknown/stale reset observations do not receive a reset bonus. API/ZDR pools are
@@ -993,8 +997,8 @@ request. Existing countdowns, fractional usage, API credentials and business
 workspaces do not trigger extra consumption. Checks retain bounded parallelism.
 
 Ordinary inference has no special priority override for 100% accounts. It follows
-configured tiers, the native pin, capability eligibility, earliest reset and the
-5% reserve. Remaining quota only breaks reset-time ties. There is no target to
+configured tiers, capability eligibility, earliest reset and the
+5% reserve; a stored `switch` pin overrides all of them. Remaining quota only breaks reset-time ties. There is no target to
 consume 1% merely to change a rounded display. Explicit strict invocation pins
 and API/ZDR privacy pool isolation remain intact.
 

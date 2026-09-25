@@ -43,7 +43,7 @@ export function chooseAccount(params: {
 	pinnedIndex: number | null;
 	/** Soft preference, used only within the first eligible priority tier. */
 	preferredIndex?: number | null;
-	/** Native desktop pin: first eligible attempt across tiers, then normal fallback. */
+	/** Soft pin: first eligible attempt across tiers, then normal fallback. Ignored whenever `pinnedIndex` is set, which is how the proxy applies a stored `switch` pin. */
 	fallbackPinnedIndex?: number | null;
 	subscriptionQuotaByAccount?: Record<number, SubscriptionQuotaPreference>;
 	skipReasons?: Map<number, string>;

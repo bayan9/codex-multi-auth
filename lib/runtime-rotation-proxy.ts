@@ -19,7 +19,7 @@ import { ApiModelRuntime } from "./runtime/api-model-runtime.js";
 import { buildVisibleModelUnion, parseModelRoute, canonicalServiceTier, type RouteModel } from "./model-route-policy.js";
 import { syncNativeAccountCredentials } from "./runtime/native-account-sync.js";
 import { isNativeClientToken } from "./runtime/native-client-auth.js";
-import { CatalogRetryError, AccountModelCatalog } from "./runtime/account-model-catalog.js";
+import { CatalogRetryError, AccountModelCatalog, clampCatalogRetryMs } from "./runtime/account-model-catalog.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -1194,6 +1194,10 @@ async function handleRequestInner(
 		const managedOAuthFor = (manager: AccountManager): boolean => state.nativeOpenai === true && manager.getAccountsSnapshot().some(account =>
 			isLiveManagedToken(account.access, account.expires, account.enabled, account.authInvalidatedAt));
 		let managedStorageVerified = true;
+		// A missing or unreadable store (not a transient lock) must not become an
+		// empty pool: that would discard the live manager's learned state and hide
+		// the cause behind catalog/403 errors.
+		let nativeStorageMissing = false;
         let nativeOAuthResult: boolean | undefined;
 		const nativeOAuth = async (): Promise<boolean> =>
 			(nativeOAuthResult ??= !!(state.nativeOpenai && bearer && await isNativeClientToken(bearer, state.now())));
@@ -1222,7 +1226,8 @@ async function handleRequestInner(
                 writeJson(res, 503, {error:{code:"native_account_storage_unavailable",message:"Account storage is temporarily unavailable. Retry when it is readable."}});
                 return;
             }
-            if (snapshot.verified || (snapshot.storage === null && !snapshot.transientFailure)) {
+            nativeStorageMissing = snapshot.storage === null && !snapshot.transientFailure;
+            if (snapshot.verified && snapshot.storage !== null) {
 			const accounts = accountManager.getAccountsSnapshot();
 			const sameInventory = accounts.length === disk.accounts.length && accounts.every((a, i) => a.accountId === disk.accounts[i]?.accountId && a.email === disk.accounts[i]?.email);
 			if (!sameInventory) {
@@ -1323,6 +1328,19 @@ async function handleRequestInner(
 		if (isResponsesRequest) {
 			context.headers.delete("content-encoding");
 			context.headers.delete("content-length");
+		}
+		// Explicit API/ZDR routes never touch the OAuth pool, so they stay available.
+		// Everything else would route through a manager the store no longer backs.
+		// A 401 would tell the native client its login is bad when the store is what
+		// is missing, so independently authenticated clients get a 503 (#702).
+		if (nativeStorageMissing && !(isResponsesRequest && context.model && /^(api|zdr)\//.test(context.model))) {
+			writeJson(res, HTTP_STATUS.SERVICE_UNAVAILABLE, {
+				error: {
+					message: "Account storage is unavailable. Run codex-multi-auth login or check the account store.",
+					code: "native_account_storage_unavailable",
+				},
+			});
+			return;
 		}
 		const requestStartedAt = state.now();
 		let policyDecision: RuntimePolicyDecision | null = null;
@@ -1622,13 +1640,19 @@ async function handleRequestInner(
    if(reset && reset.updatedAt > Math.max(cached?.updatedAt??0,observed?.updatedAt??0) && reset.updatedAt <= state.now() && state.now()-reset.updatedAt<=60000)return resetSnapshotQuota(reset);
    return observed && observed.updatedAt >= (cached?.updatedAt ?? 0) ? observed : cached;
   };
-  const pinnedIndex = state.forcedAccountIndex ?? (state.nativeOpenai ? null : storageMeta.pinnedAccountIndex);
+  // A stored `switch` pin is a hard constraint in native mode too (#702), not a
+  // preference: it fails with codex_pinned_account_unavailable rather than
+  // silently serving from another account.
+  const pinnedIndex = state.forcedAccountIndex ?? storageMeta.pinnedAccountIndex;
 		const isPinned = typeof pinnedIndex === "number";
 		if (state.nativeOpenai && (isModelsRequest || (isResponsesRequest && context.model))) {
 			const requestedVersion = incomingUrl.searchParams.get("client_version") ?? incomingHeaders.get("version");
             const catalogClientVersion = requestedVersion && /^[0-9A-Za-z.+_-]{1,80}$/.test(requestedVersion) ? requestedVersion : undefined;
             const backoff = state.catalogBackoff ??= new Map();
 			const forceCatalogRefresh = isModelsRequest && incomingUrl.searchParams.get("refresh_capabilities") === "1";
+			// An explicit capability check is a deliberate retry: it must not stay
+			// parked behind an earlier throttle's backoff.
+			if (forceCatalogRefresh) backoff.clear();
 			const catalogsByVersion = state.modelCatalogs ??= new Map();
 			const versionKey = catalogClientVersion ?? "";
 			state.modelCatalog = forceCatalogRefresh ? undefined : catalogsByVersion.get(versionKey);
@@ -1656,7 +1680,7 @@ async function handleRequestInner(
 				if (!response.ok) {
                     await response.body?.cancel();
                     if (response.status === 429) {
-                        const retryMs = Math.max(60_000, parseRetryAfterHeaderMs(response.headers, state.now()) ?? 60_000);
+                        const retryMs = clampCatalogRetryMs(parseRetryAfterHeaderMs(response.headers, state.now()));
                         if (backoff.size >= 100) backoff.delete(backoff.keys().next().value ?? "");
                         backoff.set(key, state.now() + retryMs);
                         throw new CatalogRetryError(retryMs);
@@ -1810,23 +1834,19 @@ async function handleRequestInner(
 			const effort = isRecord(requestedBody?.reasoning) && typeof requestedBody.reasoning.effort === "string" ? requestedBody.reasoning.effort : undefined;
 			const requestedTier = typeof requestedBody?.service_tier === "string" ? requestedBody.service_tier : undefined;
 			const failures = state.capabilityFailures ??= new RuntimeCapabilityFailures(state.now);
-			const discovery = await modelCatalog.prepareRouting(
+			await modelCatalog.prepareRouting(
 				eligible.flatMap(workspaceModelScopes).filter(scope => scope.routable).map(scope => scope.id),
 				requestedModel, effort, requestedTier, key => failures.supports(key, requestedModel, effort, requestedTier),
 			);
 			if (res.destroyed || res.writableEnded) return;
-			if (discovery === "pending") {
-				res.setHeader("retry-after", "2");
-				writeJson(res, 503, {error:{code:"account_catalog_refresh_pending",message:"Account capabilities are refreshing. Retry shortly."}});
-				return;
-			}
 			let supported = 0;
    catalogEligibleKeys = new Set();
    for (const account of eligible) {
     const candidates: ReturnType<typeof workspaceModelScopes> = [];
     const scopes=workspaceModelScopes(account).filter(scope=>scope.routable).sort((a,b)=>Number(b.selected)-Number(a.selected)||Number(b.bound)-Number(a.bound));
     for(const scope of scopes) {
-     if(failures.supports(scope.id,requestedModel,effort,requestedTier) && modelCatalog.supportsCached(scope.id,requestedModel,effort,requestedTier)) candidates.push(scope);
+     // Fail open: an unknown catalog (outage/throttle) stays routable; only a fetched one excludes.
+     if(failures.supports(scope.id,requestedModel,effort,requestedTier) && modelCatalog.supportsForRouting(scope.id,requestedModel,effort,requestedTier)) candidates.push(scope);
     }
     if(candidates.length){
      candidates.sort((a,b)=>compareSubscriptionQuota(subscriptionQuotaPreference(quotaForScope(account,a),state.now()),subscriptionQuotaPreference(quotaForScope(account,b),state.now())));

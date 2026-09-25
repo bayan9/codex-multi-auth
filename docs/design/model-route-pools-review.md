@@ -34,9 +34,12 @@ not establish provider retention approval.
 5. **MEDIUM — resolved:** Catalogs isolate client versions, bound discovery fan-out
    to three, honor Retry-After, and distinguish unknown access from a confirmed
    missing model. Requested effort/speed combinations are checked per workspace.
-   Picker metadata can be cached while routing requires fresh eligibility.
-6. **MEDIUM — resolved:** Native pins are preferences with eligible fallback;
-   explicit invocation pins remain strict. Checks complete tiny probes for unused personal subscriptions; ordinary
+   Picker metadata can be cached. Routing fails open: only a successfully
+   fetched catalog (the last good one, whatever its age) excludes a model, and a
+   catalog 429 backoff is capped at 15 minutes.
+6. **MEDIUM — resolved:** A stored `switch` pin stays strict in native mode
+   (as in #702), and so do explicit invocation pins; automatic reset-credit
+   redemption never moves traffic off a pin. Checks complete tiny probes for unused personal subscriptions; ordinary
    requests have no special 100% priority. Ordinary eligible
    subscriptions precede the 5% reserve; API credentials never become an implicit
    paid fallback. Runtime quota events update subsequent selections.

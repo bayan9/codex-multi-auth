@@ -4420,13 +4420,31 @@ describe("native mode authenticates before touching account storage", () => {
 		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage: async () => null } });
 		const response = await fetch(`${proxy.baseUrl}/models`, { headers: { authorization: `Bearer ${DEFAULT_CLIENT_API_KEY}` } });
 		expect(response.status).toBe(503);
-		expect((await response.json()).error.code).toBe("account_catalog_unavailable");
+		expect((await response.json()).error.code).toBe("native_account_storage_unavailable");
 		expect(calls).toHaveLength(0);
+	});
+	it("keeps the live pool and its learned limits while the store is missing", async () => {
+		const storage = createStorage(Date.now(), 1);
+		const accountManager = new AccountManager(undefined, storage);
+		let missing = false;
+		const { calls, fetchImpl } = createRecordingFetch(call => call.url.includes("/models") ? Response.json({ models: [{ slug: "model-a" }] }) : textEventStream());
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, readNativeAccountStorage: async () => missing ? null : structuredClone(storage) } });
+		const until = Date.now() + 10 * 60_000;
+		accountManager.getAccountByIndex(0)!.rateLimitResetTimes["codex:model-b"] = until;
+		missing = true;
+		const gone = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(gone.status).toBe(503);
+		expect((await gone.json()).error.code).toBe("native_account_storage_unavailable");
+		expect(calls.filter(c => c.url.endsWith("/responses"))).toHaveLength(0);
+		missing = false;
+		const back = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(back.status).toBe(200); await back.text();
+		expect(accountManager.getAccountByIndex(0)!.rateLimitResetTimes["codex:model-b"]).toBe(until);
 	});
 });
 
 describe("native catalog outages", () => {
-	it("reports a retryable discovery outage without sending inference to an unverified workspace", async () => {
+	it("routes to an account whose catalog is unknown instead of refusing the model", async () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
 		const { calls, fetchImpl } = createRecordingFetch(call => {
 			if (call.url.includes("/models")) {
@@ -4438,10 +4456,27 @@ describe("native catalog outages", () => {
 		});
 		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true } });
 		const response = await postResponses(proxy, { model: "model-a", input: "hello", stream: true });
-		expect(response.status).toBe(503);
-		expect((await response.json()).error.code).toBe("account_catalog_refresh_pending");
+		expect(response.status).toBe(200); await response.text();
 		const inference = calls.filter(c => c.url.includes("/responses"));
-		expect(inference).toHaveLength(0);
+		expect(inference.length).toBeGreaterThan(0);
+		expect(inference.every(c => c.headers.get("chatgpt-account-id") === "acc_1")).toBe(true);
+	});
+	it("keeps excluding by the last successful catalog after a later refresh fails", async () => {
+		let now = Date.now(); let throttled = false;
+		const accountManager = new AccountManager(undefined, createStorage(now, 1));
+		const { calls, fetchImpl } = createRecordingFetch(call => {
+			if (call.url.includes("/models")) return throttled ? new Response("busy", { status: 429 }) : Response.json({ models: [{ slug: "model-a" }] });
+			return textEventStream();
+		});
+		const proxy = await startProxy({ accountManager, fetchImpl, options: { nativeOpenai: true, now: () => now } });
+		const first = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(first.status).toBe(200); await first.text();
+		throttled = true; now += 20 * 60_000;
+		const known = await postResponses(proxy, { model: "model-a", input: "hello" });
+		expect(known.status).toBe(200); await known.text();
+		const absent = await postResponses(proxy, { model: "model-b", input: "hello" });
+		expect(absent.status).toBe(403); await absent.text();
+		expect(calls.filter(c => c.url.endsWith("/responses"))).toHaveLength(2);
 	});
 	it("checks every eligible account catalog concurrently", async () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now(), 3));
@@ -4552,9 +4587,36 @@ describe("catalog review concurrency and backoff",()=>{
    return textEventStream();
   });
   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
-  for(const advance of [0,6000,6000]){now+=advance;const response=await postResponses(proxy,{model:'model-test',input:'test'});expect(response.status).toBe(503);expect((await response.json()).error.code).toBe("account_catalog_refresh_pending");}
+  for(const advance of [0,6000,6000]){now+=advance;const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();expect(response.status).toBe(200);}
   expect(reads).toBe(1);
   now+=120000;const response=await postResponses(proxy,{model:'model-test',input:'test'});await response.text();expect(reads).toBe(2);
+ });
+ it.each([["86400"],[new Date(Date.now()+30*24*3600_000).toUTCString()]])("caps a catalog Retry-After of %s at fifteen minutes",async retryAfter=>{
+  let now=Date.now(),reads=0;
+  const manager=new AccountManager(undefined,createStorage(now,1));
+  const {fetchImpl}=createRecordingFetch(call=>{
+   if(call.url.includes('/models')){reads++;return new Response('busy',{status:429,headers:{'retry-after':retryAfter}});}
+   return textEventStream();
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  const first=await postResponses(proxy,{model:'model-test',input:'test'});await first.text();expect(first.status).toBe(200);
+  expect(reads).toBe(1);
+  now+=15*60_000+1;
+  const later=await postResponses(proxy,{model:'model-test',input:'test'});await later.text();expect(later.status).toBe(200);
+  expect(reads).toBe(2);
+ });
+ it("lets an explicit capability refresh bypass an earlier catalog backoff",async()=>{
+  let now=Date.now(),reads=0;
+  const manager=new AccountManager(undefined,createStorage(now,1));
+  const {fetchImpl}=createRecordingFetch(call=>{
+   if(call.url.includes('/models')){reads++;return reads===1?new Response('busy',{status:429,headers:{'retry-after':'600'}}):Response.json({models:[{slug:'model-test'}]});}
+   return textEventStream();
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  const first=await postResponses(proxy,{model:'model-test',input:'test'});await first.text();expect(reads).toBe(1);
+  const refreshed=await getModels(proxy,"/models?refresh_capabilities=1");
+  expect(refreshed.status).toBe(200);expect((await refreshed.json()).models.map((m:{slug:string})=>m.slug)).toEqual(['model-test']);
+  expect(reads).toBe(2);
  });
  it("still recovers stale state when another account lacks the model",async()=>{
   const storage=createStorage(Date.now(),2),manager=new AccountManager(undefined,storage);
@@ -4720,14 +4782,24 @@ describe("model pool capability boundaries",()=>{
   expect(JSON.parse(sent[0]!.bodyText)).toMatchObject({model:"common",service_tier:"accelerated"});
  });
 
- it("treats a desktop switch as a preference and serves an exclusive model with another account",async()=>{
+ it("keeps a stored switch pin strict and never serves an exclusive model from another account",async()=>{
   vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
   const manager=new AccountManager(undefined,createStorage(Date.now()));
   const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:call.headers.get("chatgpt-account-id")==="acc_2"?"exclusive":"common"}]}):textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
   const response=await postResponses(proxy,{model:"exclusive",input:"test",stream:true});
-  expect(response.status).toBe(200);await response.text();
-  expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_2"]);
+  expect(response.status).toBe(403);expect((await response.json()).error.code).toBe("model_not_available_in_account_catalog");
+  expect(calls.filter(c=>c.url.includes("/responses"))).toHaveLength(0);
+ });
+ it("fails a stored native pin with codex_pinned_account_unavailable instead of rotating",async()=>{
+  vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
+  const manager=new AccountManager(undefined,createStorage(Date.now()));
+  manager.markAccountCoolingDown(manager.getAccountByIndex(0)!,10*60_000,"network-error");
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
+  const response=await postResponses(proxy,{model:"common",input:"test",stream:true});
+  expect(response.status).toBe(503);expect((await response.json()).error.code).toBe("codex_pinned_account_unavailable");
+  expect(calls.filter(c=>c.url.includes("/responses"))).toHaveLength(0);
  });
 
  it("advertises an exclusive OAuth model and sends it only to its eligible account",async()=>{
@@ -4960,15 +5032,15 @@ it("records actual inference dispatch separately from selection and catalog chec
  expect(getRuntimeObservabilitySnapshot().lastInferenceRequestAtByAccount?.[key]).toBe(used);
 });
 
-it("tries the native desktop pin before earlier tiers and falls back after capability rejection", async () => {
+it("keeps the native desktop pin strict across tiers and after a capability rejection", async () => {
  vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
  vi.spyOn(runtimePolicy,"evaluateRuntimePolicy").mockResolvedValue({allowed:true,statusCode:200,errorCode:null,reasons:[],projectKey:null,blockedAccountIndexes:new Set(),scoreBoostByAccount:{},priorityByAccount:{0:8,1:1},budgetEvaluations:[]});
  const manager=new AccountManager(undefined,createStorage(Date.now()));
  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes("/models")?Response.json({models:[{slug:"common"}]}):call.headers.get("chatgpt-account-id")==="acc_1"?Response.json({error:{code:"model_not_found",message:"Model not supported"}},{status:404}):textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true}});
  const response=await postResponses(proxy,{model:"common",input:"test",stream:true});
- expect(response.status).toBe(200);await response.text();
- expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_1","acc_2"]);
+ expect(response.status).not.toBe(200);await response.text();
+ expect(calls.filter(c=>c.url.includes("/responses")).map(c=>c.headers.get("chatgpt-account-id"))).toEqual(["acc_1"]);
 });
 
 it("uses reset urgency, preserves the subscription reserve, and spends that reserve only after other subscriptions drain",async()=>{
@@ -5091,6 +5163,28 @@ it("returns a warm picker cache immediately while expired workspace data refresh
 });
 
 describe('earned reset last-resort integration',()=>{
+ it('never redeems or moves traffic off a stored native pin',async()=>{
+  vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
+  const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
+  const native=await import('../lib/runtime/native-rate-limits.js');
+  let consumptions=0;
+  const rpc=vi.spyOn(native,'nativeRateLimitsRpc').mockImplementation(async(auth,method)=>{
+   if(method==='account/rateLimitResetCredit/consume'){consumptions++;return {outcome:'reset'};}
+   const allowed=auth.accountId==='acc_2';
+   return {accountId:auth.accountId,ordinaryUsageAllowed:allowed,rateLimitResetCredits:{availableCount:1},rateLimits:{planType:'pro',primary:{usedPercent:allowed?0:100,resetsAt:Math.floor(Date.now()/1000)+3600},secondary:{usedPercent:0}}};
+  });
+  const fs=await import('node:fs/promises');const os=await import('node:os');const path=await import('node:path');const originalDir=process.env.CODEX_MULTI_AUTH_DIR;const testDir=await fs.mkdtemp(path.join(os.tmpdir(),'reset-route-pin-'));process.env.CODEX_MULTI_AUTH_DIR=testDir;
+  const service=createResetCreditService();await service.setPolicy('last-resort');
+  try{
+   const manager=new AccountManager(undefined,createStorage(Date.now()));
+   const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:'chat-fixture'}]}):textEventStream());
+   const quota={updatedAt:Date.now(),status:200,model:'chat-fixture',planType:'pro',primary:{usedPercent:100},secondary:{usedPercent:0}};
+   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readSubscriptionQuota:async()=>({byAccountId:{acc_1:quota,acc_2:quota},byEmail:{}})}});
+   const response=await postResponses(proxy,{model:'chat-fixture',input:'hello'});await response.text();
+   expect(consumptions).toBe(0);
+   expect(calls.filter(c=>c.url.endsWith('/responses')).every(c=>c.headers.get('chatgpt-account-id')==='acc_1')).toBe(true);
+  }finally{await service.setPolicy('manual');rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await fs.rm(testDir,{recursive:true,force:true,maxRetries:5});}
+ });
  it.each([true,false])('refreshes all subscription capacity before spending (other usable=%s)',async otherUsable=>{
   const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
   const native=await import('../lib/runtime/native-rate-limits.js');
@@ -5184,7 +5278,7 @@ it("requires fresh eligibility when stale recovery reorders the account inventor
 
 
 describe("native catalog outage with reasoning settings", () => {
-	it("returns a retryable availability error when no workspace catalog is known", async () => {
+	it("routes an effort-bearing request while the catalog is rate limited", async () => {
 		const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
 		const { fetchImpl, calls } = createRecordingFetch(call => call.url.includes("/models")
 			? new Response("busy", { status: 429, headers: { "retry-after": "120" } })
@@ -5192,9 +5286,28 @@ describe("native catalog outage with reasoning settings", () => {
 		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
 		const response = await postResponses(proxy, { model: "model-test", reasoning: { effort: "high" }, service_tier: "priority", input: "test" });
 		await response.text();
-		expect(response.status).toBe(503);
-		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(false);
+		expect(response.status).toBe(200);
+		expect(calls.some(c => c.url.endsWith("/responses"))).toBe(true);
 	});
+});
+
+describe("effort-bearing requests during catalog outages", () => {
+ it("forwards unchanged reasoning settings while discovery is throttled", async () => {
+  let now = Date.now();
+  const manager = new AccountManager(undefined, createStorage(now,1));
+  const {fetchImpl,calls} = createRecordingFetch(call => call.url.includes("/models")
+   ? new Response("busy",{status:429,headers:{"retry-after":"120"}})
+   : textEventStream());
+  const proxy = await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,now:()=>now}});
+  for (const advance of [0,6000,6000]) {
+   now += advance;
+   const response = await postResponses(proxy,{model:"model-test",reasoning:{effort:"high"},service_tier:"priority",input:"test"});
+   await response.text();expect(response.status).toBe(200);
+  }
+  expect(calls.filter(call=>call.url.includes("/models"))).toHaveLength(1);
+  expect(calls.filter(call=>call.url.endsWith("/responses"))).toHaveLength(3);
+  for (const call of calls.filter(call=>call.url.endsWith("/responses"))) expect(JSON.parse(call.bodyText)).toMatchObject({reasoning:{effort:"high"},service_tier:"priority"});
+ });
 });
 
 describe("unversioned catalog requests", () => {
