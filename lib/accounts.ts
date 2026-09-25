@@ -14,6 +14,7 @@ import {
 	type RateLimitStateV3,
 	findMatchingAccountIndex,
 	withAccountStorageTransaction,
+	ACCOUNT_STORAGE_UNREADABLE,
 } from "./storage.js";
 import type { AccountIdSource, OAuthAuthDetails } from "./types.js";
 import type { CodexCliMirror, Workspace } from "./storage/public-types.js";
@@ -1924,6 +1925,24 @@ export class AccountManager {
 				return null;
 			});
 		} catch (error) {
+			// The refresh already rotated the token upstream; the old one is spent.
+			// A locked or unreadable accounts file must not discard the only valid
+			// credential, so keep it live and let the retrying debounced save
+			// persist it once the file can be read.
+			const live = (error as NodeJS.ErrnoException).code === ACCOUNT_STORAGE_UNREADABLE
+				? this.getAccountByIdentity(source, auth)
+				: null;
+			if (live) {
+				this.updateFromAuth(live, auth);
+				live.enabled = true;
+				this.clearAccountCooldown(live);
+				this.clearAuthFailures(live);
+				this.saveToDiskDebounced();
+				log.warn("Account storage unreadable; rotated credential kept in memory until it can be saved", {
+					sourceIndex: source.index,
+				});
+				return live;
+			}
 			throw new CodexAuthError(ERROR_MESSAGES.TOKEN_REFRESH_FAILED, {
 				retryable: isRetryableAuthPersistenceError(error),
 				cause: error,
