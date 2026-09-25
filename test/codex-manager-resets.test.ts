@@ -47,3 +47,19 @@ it.each([false,true])('restores the caller storage state after standalone reset 
   expect(getStoragePathState()).toEqual(previous);
  });
 });
+
+it('does not claim a pending redemption when redeem fails before consuming', async () => {
+ f.redeem.mockRejectedValue(Error('A reset was just redeemed; refresh usage before trying again.'));
+ expect(await runResetsCommand(['redeem','1'])).toBe(1);
+ const output=JSON.stringify(vi.mocked(console.error).mock.calls);
+ expect(output).not.toMatch(/pending/);
+ expect(output).toContain('No reset credit was redeemed');
+});
+
+it('reports a pending result only when a consume is actually unconfirmed', async () => {
+ f.redeem.mockRejectedValue(Error('secret backend detail'));
+ f.list.mockResolvedValue({version:1,policy:'manual',snapshots:{},pending:{key:'k'}});
+ expect(await runResetsCommand(['redeem','1'])).toBe(1);
+ const output=JSON.stringify(vi.mocked(console.error).mock.calls);
+ expect(output).toMatch(/pending/);expect(output).not.toContain('secret');
+});
