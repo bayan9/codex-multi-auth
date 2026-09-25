@@ -601,27 +601,38 @@ async function runAuthLoginFlow(
 			// discovery", so ask the same question before persisting the id.
 			// A targeted re-auth is skipped: persistAccountPool identity-checks it
 			// and would reject a rewritten id.
-			let codexSelection = resolved;
 			if (!expectedAccount && resolved.accountIdOverride) {
+				const authorized = await fetchAuthorizedAccounts(tokenResult.access);
 				const constrained = applyAuthorizedAccountConstraint(
 					resolved,
-					await fetchAuthorizedAccounts(tokenResult.access),
+					authorized,
 				);
 				if (constrained.result?.changed) {
-					codexSelection = constrained.selection;
 					if (resolved.accountIdSource === "manual") {
 						// `--org` / CODEX_AUTH_ACCOUNT_ID is explicit intent, so the saved
 						// binding is kept as chosen. Codex CLI would refuse it though, so
-						// ~/.codex/auth.json gets the id the backend does authorize.
+						// every ~/.codex/auth.json writer gets the authorized id through
+						// the saved CodexCliMirror instead.
+						resolved = {
+							...resolved,
+							codexCliMirror: {
+								forAccountId: resolved.accountIdOverride,
+								accountId: constrained.result.accountId,
+							},
+						};
 						console.warn(
 							"Warning: the workspace you selected is not authorized for these credentials. It is saved as chosen, but the Codex CLI auth file gets the backend's default account instead, because Codex CLI 0.156+ refuses unauthorized workspaces.",
 						);
 					} else {
-						resolved = constrained.selection;
+						resolved = { ...constrained.selection, codexCliMirror: null };
 						console.warn(
 							"Warning: the automatically selected workspace is not authorized for these credentials; using the account the backend reports as default instead. Re-authenticate while that workspace is active in ChatGPT to bind it.",
 						);
 					}
+				} else if (authorized) {
+					// The id is authorized now: drop a mirror left by an earlier login.
+					// Without an answer (fail open) the saved mirror is kept.
+					resolved = { ...resolved, codexCliMirror: null };
 				}
 			}
 			let persistResult: Awaited<ReturnType<typeof persistAccountPool>>;
@@ -646,7 +657,7 @@ async function runAuthLoginFlow(
 			// drift check compares identity, not tokens, so a same-identity refresh
 			// never looks like drift.
 			if (!persistResult || persistResult.isActiveAccount) {
-				await syncSelectionToCodex(codexSelection);
+				await syncSelectionToCodex(resolved);
 			}
 
 			const latestStorage = await loadAccounts();

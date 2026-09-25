@@ -1,3 +1,4 @@
+import { codexCliAccountIdFor } from "../../auth/token-utils.js";
 import type { ForecastAccountResult } from "../../forecast.js";
 import { type CodexQuotaSnapshot, describeCodexProbeFailure } from "../../quota-probe.js";
 import {
@@ -357,7 +358,11 @@ export async function runBestCommand(
 		});
 		if (shouldSyncCurrentBest) {
 			alreadyBestSynced = await deps.setCodexCliActiveSelection({
-				accountId: bestAccount.accountId,
+				accountId: codexCliAccountIdFor(
+					bestAccount,
+					bestAccount.accessToken,
+					probeIdTokenByIndex.get(bestIndex),
+				),
 				email: bestAccount.email,
 				accessToken: bestAccount.accessToken,
 				refreshToken: bestAccount.refreshToken,

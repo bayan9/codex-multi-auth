@@ -161,6 +161,7 @@ function createDeps(
 		}),
 		applyTokenAccountIdentity: () => false,
 		reboundUnauthorizedAccountIdentity: async () => null,
+		refreshCodexCliMirror: async () => null,
 		...overrides,
 	};
 }
@@ -2436,5 +2437,90 @@ describe("repair-commands direct deps coverage", () => {
 		const saved = persisted.accounts[0];
 		expect(saved?.workspaces?.map((workspace) => workspace.id)).toEqual(["personal-id"]);
 		expect(saved?.currentWorkspaceIndex).toBe(0);
+	});
+
+	// fix --live keeps an explicit account's CodexCliMirror in step with the
+	// backend: set while the explicit id is refused, cleared once it is not.
+	it.each([
+		{
+			name: "clears the mirror once the explicit id is authorized",
+			authorizedIds: ["ws-team", "personal-id"],
+			mirror: { forAccountId: "ws-team", accountId: "personal-id" },
+			expectedMirror: undefined,
+			expectedSyncId: "ws-team",
+		},
+		{
+			name: "sets the mirror while the explicit id is refused",
+			authorizedIds: ["personal-id"],
+			mirror: undefined,
+			expectedMirror: { forAccountId: "ws-team", accountId: "personal-id" },
+			expectedSyncId: "personal-id",
+		},
+	])("runFix --live $name", async ({ authorizedIds, mirror, expectedMirror, expectedSyncId }) => {
+		const { refreshCodexCliMirror } = await import("../lib/auth/account-access.js");
+		const fetchMock = vi.fn(async () =>
+			new Response(
+				JSON.stringify({
+					accounts: authorizedIds.map((id) => ({ id })),
+					default_account_id: "personal-id",
+				}),
+				{ status: 200 },
+			),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			quotaCacheMocks.loadQuotaCache.mockResolvedValueOnce({ byAccountId: {}, byEmail: {} });
+			const onDisk = {
+				version: 3 as const,
+				accounts: [
+					{
+						email: "team@example.com",
+						refreshToken: "team-refresh",
+						accessToken: "team-access",
+						expiresAt: Date.now() + 60_000,
+						accountId: "ws-team",
+						accountIdSource: "manual" as const,
+						...(mirror ? { codexCliMirror: mirror } : {}),
+						enabled: true,
+					},
+				],
+				activeIndex: 0,
+				activeIndexByFamily: {},
+			};
+			storageMocks.loadAccounts.mockResolvedValueOnce(structuredClone(onDisk));
+			quotaProbeMocks.fetchCodexQuotaSnapshot.mockReset();
+			quotaProbeMocks.fetchCodexQuotaSnapshot.mockResolvedValue({
+				status: 200,
+				model: "gpt-5-codex",
+				primary: {},
+				secondary: {},
+			});
+			const persist = vi.fn(async () => {});
+			storageMocks.withAccountStorageTransaction.mockImplementation(
+				async (fn: (storage: unknown, persist: unknown) => Promise<void>) =>
+					fn(structuredClone(onDisk), persist),
+			);
+			codexCliWriterMocks.setCodexCliActiveSelection.mockResolvedValueOnce(true);
+			silenceConsole("log");
+
+			await runFix(
+				["--json", "--live"],
+				createDeps({
+					hasUsableAccessToken: () => true,
+					refreshCodexCliMirror: (account, token) => refreshCodexCliMirror(account, token),
+				}),
+			);
+
+			const persisted = persist.mock.calls[0]?.[0] as {
+				accounts: Array<{ accountId?: string; codexCliMirror?: unknown }>;
+			};
+			expect(persisted.accounts[0]?.accountId).toBe("ws-team");
+			expect(persisted.accounts[0]?.codexCliMirror).toEqual(expectedMirror);
+			expect(codexCliWriterMocks.setCodexCliActiveSelection).toHaveBeenCalledExactlyOnceWith(
+				expect.objectContaining({ accountId: expectedSyncId }),
+			);
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 });

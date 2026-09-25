@@ -337,7 +337,12 @@ as the account's active selection.
 > prints a warning. The check fails open: any error leaves the selection as-is.
 > An explicit `login --org` (or `CODEX_AUTH_ACCOUNT_ID`) binding is saved as
 > chosen, but when the backend does not authorize it, `~/.codex/auth.json` gets
-> the backend's default account instead and the login prints a warning.
+> the backend's default account instead and the login prints a warning. The
+> account remembers that substitute id, so `switch`, `best`, `check`, `doctor`,
+> rotation and the login dashboard keep writing it rather than the refused id.
+> It is dropped when the account is bound to a different id, and `fix --live`
+> re-checks it: removed once the explicit id is authorized, set again while it
+> is not.
 > `login --account` is left untouched: it is identity-checked before the write.
 >
 > **Already-saved accounts**: `login` only guards new selections. An org-sourced

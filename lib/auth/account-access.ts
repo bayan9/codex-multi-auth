@@ -1,5 +1,5 @@
 import { CODEX_BASE_URL } from "../constants.js";
-import type { Workspace } from "../storage/public-types.js";
+import type { CodexCliMirror, Workspace } from "../storage/public-types.js";
 import type { AccountIdSource } from "../types.js";
 
 /**
@@ -209,6 +209,45 @@ function toAuthorizedWorkspaces(
 		kept.push({ id: accountId, enabled: true, isDefault: true });
 	}
 	return kept;
+}
+
+/** The outcome of {@link refreshCodexCliMirror}. */
+export type CodexCliMirrorUpdate = "set" | "cleared";
+
+/**
+ * Re-checks an explicit (`manual`) binding and keeps its CodexCliMirror in
+ * step, mutating the record in place: set to the backend default while the
+ * explicit id is unauthorized, removed once it is authorized again. The
+ * explicit id itself is never changed. Fails open: no answer, no change.
+ */
+export async function refreshCodexCliMirror(
+	account: {
+		accountId?: string;
+		accountIdSource?: AccountIdSource;
+		codexCliMirror?: CodexCliMirror;
+	},
+	accessToken: string,
+	options: FetchAuthorizedAccountsOptions = {},
+): Promise<CodexCliMirrorUpdate | null> {
+	if (account.accountIdSource !== "manual") return null;
+	const currentId = readString(account.accountId);
+	if (!currentId) return null;
+
+	const authorized = await fetchAuthorizedAccounts(accessToken, options);
+	if (!authorized) return null;
+	if (authorized.accountIds.includes(currentId)) {
+		if (!account.codexCliMirror) return null;
+		delete account.codexCliMirror;
+		return "cleared";
+	}
+	const result = constrainSelectionToAuthorized(currentId, authorized);
+	if (!result.changed) return null;
+	const mirror = account.codexCliMirror;
+	if (mirror?.forAccountId === currentId && mirror.accountId === result.accountId) {
+		return null;
+	}
+	account.codexCliMirror = { forAccountId: currentId, accountId: result.accountId };
+	return "set";
 }
 
 /** The slice of a saved account record this migration reads and rewrites. */

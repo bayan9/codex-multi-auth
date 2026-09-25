@@ -6,6 +6,7 @@
 import { decodeJWT } from "./auth.js";
 import { JWT_CLAIM_PATH } from "../constants.js";
 import { isRecord } from "../utils.js";
+import type { CodexCliMirror } from "../storage/public-types.js";
 import type { AccountIdSource, JWTPayload } from "../types.js";
 
 /**
@@ -307,6 +308,29 @@ export function resolveCodexAuthAccountId(
 	if (!trimmed) return undefined;
 	if (!isOpenAiOrgId(trimmed)) return trimmed;
 	return extractAccountId(accessToken) ?? extractAccountId(idToken);
+}
+
+/**
+ * The account id to hand the ~/.codex/auth.json writer for a saved account,
+ * and to compare against that file. Applies the account's live
+ * {@link CodexCliMirror} first, then resolveCodexAuthAccountId's org-id
+ * substitution. An org id without a token claim is returned unchanged so the
+ * writer can still drop it. Every auth.json writer and drift check goes
+ * through this; a raw `account.accountId` there writes back an id Codex CLI
+ * refuses.
+ */
+export function codexCliAccountIdFor(
+	account: { accountId?: string; codexCliMirror?: CodexCliMirror },
+	accessToken?: string,
+	idToken?: string,
+): string | undefined {
+	const accountId = account.accountId?.trim();
+	const mirror = account.codexCliMirror;
+	const selected =
+		accountId && mirror && mirror.forAccountId === accountId
+			? mirror.accountId
+			: account.accountId;
+	return resolveCodexAuthAccountId(selected, accessToken, idToken) ?? selected;
 }
 
 interface CodexAccountIdentity {

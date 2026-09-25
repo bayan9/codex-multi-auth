@@ -5,6 +5,7 @@ import {
 	fetchAuthorizedAccounts,
 	applyAuthorizedAccountConstraint,
 	reboundUnauthorizedAccountIdentity,
+	refreshCodexCliMirror,
 } from "../lib/auth/account-access.js";
 import { CODEX_BASE_URL } from "../lib/constants.js";
 
@@ -520,5 +521,58 @@ describe("workspace metadata follows a rewritten account id", () => {
 		expect(account.workspaces[account.currentWorkspaceIndex]?.id).toBe("personal-id");
 		expect(account.workspaces.map((workspace) => workspace.id)).toEqual(["personal-id"]);
 		expect(account.accountLabel).toBe("");
+	});
+});
+
+describe("refreshCodexCliMirror", () => {
+	const respond = (ids: string[]) =>
+		vi.fn(async () =>
+			new Response(
+				JSON.stringify({ accounts: ids.map((id) => ({ id })), default_account_id: "personal-id" }),
+				{ status: 200 },
+			),
+		);
+
+	it("sets the mirror for a refused explicit id without touching the id", async () => {
+		const account = { accountId: "ws-team", accountIdSource: "manual" as const };
+		await expect(
+			refreshCodexCliMirror(account, "token", { fetch: respond(["personal-id"]) }),
+		).resolves.toBe("set");
+		expect(account).toEqual({
+			accountId: "ws-team",
+			accountIdSource: "manual",
+			codexCliMirror: { forAccountId: "ws-team", accountId: "personal-id" },
+		});
+	});
+
+	it("clears the mirror once the explicit id is authorized", async () => {
+		const account = {
+			accountId: "ws-team",
+			accountIdSource: "manual" as const,
+			codexCliMirror: { forAccountId: "ws-team", accountId: "personal-id" },
+		};
+		await expect(
+			refreshCodexCliMirror(account, "token", { fetch: respond(["ws-team", "personal-id"]) }),
+		).resolves.toBe("cleared");
+		expect(account).not.toHaveProperty("codexCliMirror");
+	});
+
+	it("leaves the mirror alone when the check fails (fail open) or the source is not explicit", async () => {
+		const mirror = { forAccountId: "ws-team", accountId: "personal-id" };
+		const failing = { accountId: "ws-team", accountIdSource: "manual" as const, codexCliMirror: mirror };
+		await expect(
+			refreshCodexCliMirror(failing, "token", {
+				fetch: vi.fn(async () => new Response("", { status: 500 })),
+			}),
+		).resolves.toBeNull();
+		expect(failing.codexCliMirror).toBe(mirror);
+
+		const fetchMock = respond(["personal-id"]);
+		await expect(
+			refreshCodexCliMirror({ accountId: "ws-team", accountIdSource: "org" }, "token", {
+				fetch: fetchMock,
+			}),
+		).resolves.toBeNull();
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });

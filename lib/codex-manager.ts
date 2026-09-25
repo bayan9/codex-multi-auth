@@ -7,7 +7,11 @@ import {
 	formatWaitTime,
 	sanitizeEmail,
 } from "./accounts.js";
-import { reboundUnauthorizedAccountIdentity } from "./auth/account-access.js";
+import {
+	reboundUnauthorizedAccountIdentity,
+	refreshCodexCliMirror,
+} from "./auth/account-access.js";
+import { codexCliAccountIdFor } from "./auth/token-utils.js";
 import { loadCodexCliState } from "./codex-cli/state.js";
 import { setCodexCliActiveSelection } from "./codex-cli/writer.js";
 import {
@@ -172,6 +176,7 @@ function createRepairCommandDeps(): RepairCommandDeps {
 		resolveStoredAccountIdentity,
 		applyTokenAccountIdentity,
 		reboundUnauthorizedAccountIdentity,
+		refreshCodexCliMirror,
 	};
 }
 
@@ -321,7 +326,6 @@ export async function autoSyncActiveAccountToCodex(): Promise<boolean> {
 	let syncRefreshToken = account.refreshToken;
 	let syncExpiresAt = account.expiresAt;
 	let syncIdToken: string | undefined;
-	let syncAccountId = account.accountId;
 	let syncEmail = account.email;
 	let changed = false;
 	let nextStoredAccount: AccountMetadataV3 | null = null;
@@ -359,7 +363,6 @@ export async function autoSyncActiveAccountToCodex(): Promise<boolean> {
 		syncRefreshToken = refreshResult.refresh;
 		syncExpiresAt = refreshResult.expires;
 		syncIdToken = refreshResult.idToken;
-		syncAccountId = nextStoredAccount.accountId;
 		syncEmail = nextStoredAccount.email;
 	}
 
@@ -390,7 +393,11 @@ export async function autoSyncActiveAccountToCodex(): Promise<boolean> {
 	}
 
 	return setCodexCliActiveSelection({
-		accountId: syncAccountId,
+		accountId: codexCliAccountIdFor(
+			nextStoredAccount ?? account,
+			syncAccessToken,
+			syncIdToken,
+		),
 		email: syncEmail,
 		accessToken: syncAccessToken,
 		refreshToken: syncRefreshToken,

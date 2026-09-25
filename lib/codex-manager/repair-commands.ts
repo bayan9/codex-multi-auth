@@ -20,11 +20,15 @@ import {
 import { isCodexUnavailableError } from "../errors.js";
 import {
 	codexAuthAccountIdsMatch,
+	codexCliAccountIdFor,
 	codexCliActiveIdentity,
 	isOpenAiOrgId,
 } from "../auth/token-utils.js";
 import { queuedRefresh } from "../refresh-queue.js";
-import type { ConstrainedSelection } from "../auth/account-access.js";
+import type {
+	CodexCliMirrorUpdate,
+	ConstrainedSelection,
+} from "../auth/account-access.js";
 import {
 	findMatchingAccountIndex,
 	getStoragePath,
@@ -151,6 +155,14 @@ export interface RepairCommandDeps {
 		account: AccountMetadataV3,
 		accessToken: string,
 	) => Promise<ConstrainedSelection | null>;
+	/**
+	 * Keeps an explicit (`manual`) account's CodexCliMirror in step with the
+	 * backend's authorization; see lib/auth/account-access.ts. Live-only.
+	 */
+	refreshCodexCliMirror: (
+		account: AccountMetadataV3,
+		accessToken: string,
+	) => Promise<CodexCliMirrorUpdate | null>;
 }
 
 function printFixUsage(): void {
@@ -396,6 +408,7 @@ function hasAccountStorageMutation(
 		|| before.accountLabel !== after.accountLabel
 		|| before.currentWorkspaceIndex !== after.currentWorkspaceIndex
 		|| JSON.stringify(before.workspaces) !== JSON.stringify(after.workspaces)
+		|| JSON.stringify(before.codexCliMirror) !== JSON.stringify(after.codexCliMirror)
 	);
 }
 
@@ -444,6 +457,13 @@ function applyAccountStorageMutations(
 		// since this run loaded storage.
 		if (mutation.before.accountLabel !== mutation.after.accountLabel) {
 			target.accountLabel = mutation.after.accountLabel;
+		}
+		if (
+			JSON.stringify(mutation.before.codexCliMirror) !==
+			JSON.stringify(mutation.after.codexCliMirror)
+		) {
+			target.codexCliMirror = mutation.after.codexCliMirror;
+			if (!target.codexCliMirror) delete target.codexCliMirror;
 		}
 		// The pointer indexes the list, so the two move together: copying only
 		// the list would keep a pointer moved on disk meanwhile, possibly out
@@ -1311,6 +1331,16 @@ export async function runFix(
 	// attempt on the refresh path sees a `token` source and reports nothing.
 	// Tracking it per index keeps the note on whichever report ends up final.
 	const reboundIndexes = new Set<number>();
+	// Explicit accounts whose CodexCliMirror this run set or cleared. Checked
+	// once per account even when the refresh path runs after a failed probe.
+	const mirrorUpdates = new Map<number, CodexCliMirrorUpdate | null>();
+	const checkMirror = async (index: number, accessToken: string): Promise<void> => {
+		const account = storage.accounts[index];
+		if (!account || mirrorUpdates.has(index)) return;
+		const update = await deps.refreshCodexCliMirror(account, accessToken);
+		mirrorUpdates.set(index, update);
+		if (update) accountStorageChanged = true;
+	};
 	const noteRebound = (index: number): void => {
 		reboundIndexes.add(index);
 		accountStorageChanged = true;
@@ -1349,6 +1379,7 @@ export async function runFix(
 				) {
 					noteRebound(i);
 				}
+				if (currentAccessToken) await checkMirror(i, currentAccessToken);
 				const probeAccountId = currentAccessToken
 					? account.accountId ?? extractAccountId(currentAccessToken)
 					: undefined;
@@ -1450,6 +1481,7 @@ export async function runFix(
 				) {
 					noteRebound(i);
 				}
+				await checkMirror(i, refreshResult.access);
 				const probeAccountId = account.accountId ?? nextAccountId;
 				if (probeAccountId) {
 					try {
@@ -1577,6 +1609,12 @@ export async function runFix(
 	);
 	const recommendation = recommendForecastAccount(forecastResults);
 	for (const report of reports) {
+		const mirrorUpdate = mirrorUpdates.get(report.index);
+		if (mirrorUpdate === "set") {
+			report.message = `explicit workspace is not authorized for these credentials; Codex CLI auth uses the backend default. ${report.message}`;
+		} else if (mirrorUpdate === "cleared") {
+			report.message = `explicit workspace is authorized again; Codex CLI auth uses it. ${report.message}`;
+		}
 		if (!reboundIndexes.has(report.index)) continue;
 		report.label = formatAccountLabel(storage.accounts[report.index], report.index);
 		report.message = `workspace was not authorized for these credentials; rebound to the account's default identity. ${report.message}`;
@@ -1607,9 +1645,13 @@ export async function runFix(
 			await persist(nextStorage);
 			committedActiveIndex = deps.resolveActiveIndex(nextStorage, "codex");
 			const committedActive = nextStorage.accounts[committedActiveIndex];
+			const syncIndexes = [
+				...reboundIndexes,
+				...[...mirrorUpdates].filter(([, update]) => update).map(([index]) => index),
+			];
 			const isRebound =
 				committedActive !== undefined &&
-				[...reboundIndexes].some((index) => {
+				syncIndexes.some((index) => {
 					const rebound = storage.accounts[index];
 					return (
 						rebound !== undefined &&
@@ -1619,7 +1661,10 @@ export async function runFix(
 				});
 			if (isRebound && committedActive.enabled !== false) {
 				codexActiveSynced = await setCodexCliActiveSelection({
-					accountId: committedActive.accountId,
+					accountId: codexCliAccountIdFor(
+						committedActive,
+						committedActive.accessToken,
+					),
 					email: committedActive.email,
 					accessToken: committedActive.accessToken,
 					refreshToken: committedActive.refreshToken,
@@ -2221,7 +2266,10 @@ export async function runDoctor(
 					&& !!codexActiveAccountId
 					&& !codexAuthAccountIdsMatch(
 						{
-							accountId: managerActiveAccountId,
+							// As the writer would write it (CodexCliMirror applied).
+							accountId: activeAccount
+								? codexCliAccountIdFor(activeAccount, activeAccount.accessToken)
+								: managerActiveAccountId,
 							accessToken: activeAccount?.accessToken,
 						},
 						codexActiveIdentity,
@@ -2305,7 +2353,11 @@ export async function runDoctor(
 
 				if (!options.dryRun && canSyncActiveAccount) {
 					pendingCodexActiveSync = {
-						accountId: activeAccount.accountId,
+						accountId: codexCliAccountIdFor(
+							activeAccount,
+							syncAccessToken,
+							syncIdToken,
+						),
 						email: activeAccount.email,
 						accessToken: syncAccessToken,
 						refreshToken: syncRefreshToken,

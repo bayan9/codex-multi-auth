@@ -511,3 +511,45 @@ describe("runBestCommand", () => {
 		expect(jsonCall).not.toContain("sk-secret");
 	});
 });
+
+describe("runBestCommand with a Codex CLI mirror", () => {
+	it("syncs the mirror id when the current best account is refreshed", async () => {
+		const storage = createStorage([
+			createAccount({
+				accountId: "ws-team",
+				accountIdSource: "manual",
+				codexCliMirror: { forAccountId: "ws-team", accountId: "ws-authorized" },
+				expiresAt: 0,
+			}),
+		]);
+		const deps = createDeps({
+			loadAccounts: vi.fn(async () => storage),
+			parseBestArgs: vi.fn(() => ({
+				ok: true,
+				options: {
+					live: true,
+					json: true,
+					model: "gpt-5-codex",
+					modelProvided: false,
+				} satisfies BestCliOptions,
+			})),
+			hasUsableAccessToken: vi.fn(() => false),
+			queuedRefresh: vi.fn(async () => ({
+				type: "success",
+				access: "access-best-next",
+				refresh: "refresh-best-next",
+				expires: Date.now() + 120_000,
+				idToken: "id-token",
+			})),
+			// No claim: best's refresh then keeps the saved explicit id.
+			extractAccountId: vi.fn(() => undefined),
+			extractAccountEmail: vi.fn(() => "best@example.com"),
+		});
+
+		expect(await runBestCommand(["--live"], deps)).toBe(0);
+
+		expect(deps.setCodexCliActiveSelection).toHaveBeenCalledExactlyOnceWith(
+			expect.objectContaining({ accountId: "ws-authorized" }),
+		);
+	});
+});
