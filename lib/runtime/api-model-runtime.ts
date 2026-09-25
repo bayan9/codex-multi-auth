@@ -403,7 +403,9 @@ export class ApiModelRuntime {
 				signal?.removeEventListener("abort", abort);
 			}
 		}
-		return this.failure(lastStatus, "model_route_pool_unavailable");
+		// A 401/403 here belongs to the API key, not the desktop login; the native
+		// client must not read an exhausted credential pool as a bad login.
+		return this.failure(lastStatus === 401 || lastStatus === 403 ? 503 : lastStatus, "model_route_pool_unavailable");
 	}
 	recordStreamFailure(credential: ApiRouteCredential, alias: string, body: Record<string, unknown>, error: unknown): void {
 		const route = parseModelRoute(alias);

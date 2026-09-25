@@ -463,3 +463,12 @@ it.each([true,false])("uses typed cancellation and never retries another credent
  if(!preaborted){await started;controller.abort();}
  await assertion;expect(fetcher.mock.calls.filter(c=>c[1]?.method==="POST")).toHaveLength(preaborted?0:1);
 });
+
+it.each([401,403])("answers an API pool whose credentials all return %i with 503, not an auth status",async status=>{
+ const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>init?.method==="POST"?Response.json({error:{code:"invalid_api_key"}},{status}):Response.json({data:[{id:"exclusive"}]}));
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch);
+ const response=await runtime.request("api/exclusive",{model:"api/exclusive"},[credential("one","api"),credential("two","api",2)]);
+ expect(response?.status).toBe(503);
+ expect((await response!.json()).error.code).toBe("model_route_pool_unavailable");
+ expect(fetcher.mock.calls.filter(call=>(call[1] as RequestInit|undefined)?.method==="POST")).toHaveLength(2);
+});
