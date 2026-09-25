@@ -417,3 +417,34 @@ it("retains documented image support through a metadata outage and adopts an exp
  fetcher.mockResolvedValue(new Response("Model ID: `fixture`\n\n## Model details\n- Input modalities: text\n"));
  expect((await reader.enrich(input,true))[0]?.input_modalities).toEqual(["text"]);
 });
+
+it("keeps verified efforts and speed tiers through a throttled re-probe and retries it soon", async () => {
+	let now = 1;
+	let throttled = false;
+	let posts = 0;
+	const fetcher = vi.fn(async (_u: unknown, init?: RequestInit) => {
+		if (init?.method !== "POST") return new Response("missing", { status: 404 });
+		posts++;
+		if (throttled) return Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 });
+		const body = JSON.parse(String(init.body));
+		if (body.tools) return Response.json({ output: [{ type: "function_call", name: "capability_probe" }] });
+		if (body.service_tier === "priority") return Response.json({ service_tier: "priority" });
+		if (body.service_tier) return Response.json({ service_tier: "default" });
+		return Response.json({ service_tier: "default", reasoning: body.reasoning });
+	});
+	const reader = new ApiModelCapabilities(fetcher as typeof fetch, () => now);
+	const efforts = async () => ((await reader.enrich([{ slug: "fixture" }], false, route))[0]);
+	const first = await efforts();
+	expect(first?.supported_reasoning_levels).toEqual(expect.arrayContaining([expect.objectContaining({ effort: "xhigh" })]));
+	expect(first?.service_tiers).toEqual([expect.objectContaining({ id: "priority" })]);
+	throttled = true;
+	now += 900_001;
+	const second = await efforts();
+	expect(second?.supported_reasoning_levels).toEqual(expect.arrayContaining([expect.objectContaining({ effort: "xhigh" })]));
+	expect(second?.service_tiers).toEqual([expect.objectContaining({ id: "priority" })]);
+	// Not trusted as fresh for 15 minutes: a minute later it probes again.
+	const afterThrottle = posts;
+	now += 60_001;
+	await efforts();
+	expect(posts).toBeGreaterThan(afterThrottle);
+});
