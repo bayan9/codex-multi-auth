@@ -14,6 +14,7 @@ const terminal = new Set([
 	"response.completed",
 	"response.failed",
 	"response.incomplete",
+	"response.cancelled",
 	"error",
 ]);
 type Json = Record<string, unknown>;

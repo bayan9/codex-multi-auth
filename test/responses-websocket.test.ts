@@ -581,3 +581,18 @@ it("keeps loopback hops off an environment HTTP proxy", async () => {
 		undici.setGlobalDispatcher(previous);
 	}
 });
+
+it("ends a turn on response.cancelled so queued creates are not held behind it", async () => {
+	const f = await fixture((ws, body, id) => {
+		if (body.model !== "cancelled-upstream") return false;
+		ws.send(JSON.stringify({ type: "response.cancelled", response: { id, status: "cancelled" } }));
+		return true;
+	});
+	const ws = await f.connect();
+	const events: Record<string, unknown>[] = [];
+	ws.on("message", (raw) => events.push(JSON.parse(raw.toString())));
+	ws.send(JSON.stringify({ type: "response.create", model: "cancelled-upstream", input: [] }));
+	await vi.waitFor(() => expect(events.some((event) => event.type === "response.cancelled")).toBe(true));
+	expect((await turn(ws, { model: "after", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
+	expect(f.calls.map((call) => call.model)).toEqual(["cancelled-upstream", "after"]);
+});

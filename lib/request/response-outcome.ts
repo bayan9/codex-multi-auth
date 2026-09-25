@@ -15,7 +15,12 @@ export class ResponseOutcome {
 
 	observe(value: unknown): void {
 		if (!isRecord(value)) return;
-		const type = value.type ?? (value.object === "response" && typeof value.status === "string" ? `response.${value.status}` : undefined);
+		let type = value.type ?? (value.object === "response" && typeof value.status === "string" ? `response.${value.status}` : undefined);
+		// SSE `response.done` carries its outcome in the nested status.
+		if (type === "response.done") {
+			const status = isRecord(value.response) ? value.response.status : undefined;
+			type = typeof status === "string" ? `response.${status}` : "response.completed";
+		}
 		if (type === "response.completed") {
 			if (!this.terminal) this.terminal = "completed";
 			return;
