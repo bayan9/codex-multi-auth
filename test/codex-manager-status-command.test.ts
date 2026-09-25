@@ -570,14 +570,21 @@ it("colors status headings but keeps forced-color JSON clean", async () => {
  } finally {vi.unstubAllEnvs();resetUiRuntimeOptions();}
 });
 
-it("labels native pins as first-with-fallback separately from the configured tier", async () => {
+it("reports a native pin as strict, with no fallback order, separately from the configured tier", async () => {
  const logInfo=vi.fn();
- const deps=createStatusDeps({logInfo,loadAccounts:async()=>({...createStorage(),pinnedAccountIndex:0}),loadAppBindStatus:async()=>({nativeOpenai:true,state:"running",pid:123,baseUrl:null,totalRequests:0,lastAccountIndex:null,lastAccountLabel:null,lastAccountEmail:null,lastAccountId:null,updatedAt:2000,lastError:null})});
+ const storage={...createStorage(),pinnedAccountIndex:0};
+ storage.accounts=[storage.accounts[0]!,{...storage.accounts[0]!,accountId:"fixture-other",email:"other@example.com",refreshToken:"fixture-other-refresh"}];
+ const deps=createStatusDeps({logInfo,loadAccounts:async()=>storage,loadAppBindStatus:async()=>({nativeOpenai:true,state:"running",pid:123,baseUrl:null,totalRequests:0,lastAccountIndex:null,lastAccountLabel:null,lastAccountEmail:null,lastAccountId:null,updatedAt:2000,lastError:null})});
  await runStatusCommand(deps);
- expect(logInfo.mock.calls.flat().join("\n")).toContain("0-pinned; eligible first, then tiered fallback");
- expect(logInfo.mock.calls.flat().join("\n")).toContain("priority tier: 1");
+ const text=logInfo.mock.calls.flat().join("\n");
+ expect(text).toContain("Pinned: account 1 (strict; set by switch)");
+ expect(text).not.toMatch(/fallback/);
+ expect(text).toContain("priority tier: 1");
+ expect(text).not.toMatch(/automatic order: #2/);
  logInfo.mockClear();await runStatusCommand({...deps,json:true});
- expect(JSON.parse(logInfo.mock.calls[0]![0]).accounts[0].selectionPreference).toBe("pin-first-fallback");
+ const accounts=JSON.parse(logInfo.mock.calls[0]![0]).accounts;
+ expect(accounts[0].selectionPreference).toBe("strict-pin");
+ expect(accounts[1].automaticOrder).toBeNull();
 });
 
 it("includes cached quota pressure in status risk without changing configured tiers", async () => {

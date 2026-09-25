@@ -520,13 +520,22 @@ describe("workspace choice before account persistence",()=>{
   expect(resolveAccountSelectionMock).toHaveBeenCalledWith(TOKEN_SUCCESS,"selected-workspace",undefined);
   expect(persistAccountPoolMock).toHaveBeenCalledOnce();
  });
- it("refuses ambiguous noninteractive setup before writing",async()=>{
+ it("rejects an invalid workspace selection before writing",async()=>{
   runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
-  chooseLoginWorkspaceMock.mockRejectedValue(new CodexValidationError("Multiple workspaces found; use --org"));
+  chooseLoginWorkspaceMock.mockRejectedValue(new CodexValidationError("Invalid workspace selection. Account was not saved."));
   expect(await runAuthLogin(["--manual"],deps())).toBe(1);
-  expect(loggedLines(errorSpy)).toContain("Login failed: Multiple workspaces found; use --org");
+  expect(loggedLines(errorSpy)).toContain("Login failed: Invalid workspace selection. Account was not saved.");
   expect(persistAccountPoolMock).not.toHaveBeenCalled();
   expect(syncSelectionToCodexMock).not.toHaveBeenCalled();
+ });
+ it("persists the automatic choice when a noninteractive chooser defers",async()=>{
+  runSignInFlowMock.mockResolvedValue(TOKEN_SUCCESS);
+  // Noninteractive ambiguity warns and resolves undefined instead of throwing.
+  chooseLoginWorkspaceMock.mockResolvedValue(undefined);
+  expect(await runAuthLogin(["--manual"],deps())).toBe(0);
+  expect(chooseLoginWorkspaceMock).toHaveBeenCalledOnce();
+  expect(resolveAccountSelectionMock).toHaveBeenCalledWith(TOKEN_SUCCESS,undefined,undefined);
+  expect(persistAccountPoolMock).toHaveBeenCalledOnce();
  });
 });
 

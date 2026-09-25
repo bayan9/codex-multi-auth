@@ -263,8 +263,10 @@ export async function runStatusCommand(
   const candidates=storage.accounts.map((account,index)=>({account,index,quota:quotaPreferences[index] ?? subscriptionQuotaPreference(null,now),tier:accountPolicies.accounts[getAccountPolicyKey(account,index)]?.priority ?? 1}))
    .filter(a=>forecastResults[a.index]?.availability === "ready" && !a.quota.exhausted);
   candidates.sort((a,b)=>Number(usesSubscriptionReserve(a.quota))-Number(usesSubscriptionReserve(b.quota)) ||
-   Number(storage.pinnedAccountIndex===b.index)-Number(storage.pinnedAccountIndex===a.index) || a.tier-b.tier || compareSubscriptionQuota(a.quota,b.quota) || Number(b.index===activeIndex)-Number(a.index===activeIndex) || a.index-b.index);
-  candidates.forEach((a,index)=>automaticOrder.set(a.index,index+1));
+   a.tier-b.tier || compareSubscriptionQuota(a.quota,b.quota) || Number(b.index===activeIndex)-Number(a.index===activeIndex) || a.index-b.index);
+  // A switch pin is strict in native mode too: no other account is tried, so none gets an order.
+  const pinned=typeof storage.pinnedAccountIndex==="number" ? candidates.filter(a=>a.index===storage.pinnedAccountIndex) : candidates;
+  pinned.forEach((a,index)=>{automaticOrder.set(a.index,index+1);});
  }
  const activityKeys = [...storage.accounts.map(inferenceAccountKey),...apiRoutes.map(route=>`sha256:${modelScopeId(route.kind,route.id)}`)];
  const persistedActivity = await deps.loadInferenceRequestTimes?.(activityKeys) ?? {};
@@ -318,7 +320,7 @@ export async function runStatusCommand(
 				current: i === activeIndex,
 				priority: accountPolicies.accounts[getAccountPolicyKey(account, i)]?.priority ?? 1,
 				markers,
-				selectionPreference: storage.pinnedAccountIndex === i ? (appBindStatus?.nativeOpenai ? "pin-first-fallback" : "strict-pin") : null,
+				selectionPreference: storage.pinnedAccountIndex === i ? "strict-pin" : null,
 				forecastRiskScore: forecastResults[i]?.riskScore ?? null,
 				forecastRiskLevel: forecastResults[i]?.riskLevel ?? null,
 				forecastQuotaUpdatedAt: forecastQuotas[i]?.updatedAt ?? null,
@@ -420,9 +422,7 @@ export async function runStatusCommand(
 				`Pinned: invalid account index ${pinnedAccountIndex}; run codex-multi-auth unpin`,
 			);
 		} else {
-			logInfo(appBindStatus?.nativeOpenai
-				? paint(`Pinned: account ${pinnedAccountIndex + 1} (0-pinned; eligible first, then tiered fallback)`, "accent")
-				: `Pinned: account ${pinnedAccountIndex + 1} (set by switch)`);
+			logInfo(paint(`Pinned: account ${pinnedAccountIndex + 1} (strict; set by switch)`, "accent"));
 			if (!appBindStatus?.nativeOpenai && runtimeCurrent && runtimeCurrent.index !== pinnedAccountIndex) {
 				logInfo(
 					`  warning: runtime currently using account ${runtimeCurrent.index + 1} but pin requests account ${pinnedAccountIndex + 1}; the proxy will pick up the pin on the next request.`,
@@ -446,7 +446,7 @@ export async function runStatusCommand(
 			storage.accounts,
 			deps.formatRateLimitEntry,
 		);
-		if (storage.pinnedAccountIndex === i) markers.push(appBindStatus?.nativeOpenai ? "0-pinned; fallback enabled" : "strict pin");
+		if (storage.pinnedAccountIndex === i) markers.push("strict pin");
 		const markerLabel = markers.length > 0 ? ` [${markers.join(", ")}]` : "";
   const lastInferenceAt = inferenceTimes[inferenceAccountKey(account)];
   const activity = typeof account.lastUsed === "number" && account.lastUsed > 0
@@ -461,7 +461,8 @@ export async function runStatusCommand(
    const order=automaticOrder.get(i);
    const reset=preference?.resetAtMs ? `; limiting window resets in ${formatWaitTime(Math.max(0,preference.resetAtMs-now))}` : "; reset ordering unknown; run check";
    const reserve=usesSubscriptionReserve(preference)?`; ${SUBSCRIPTION_RESERVE_PERCENT}% reserve (last resort)`:"";
-   logInfo(paint(`   automatic order: ${order ? `#${order}` : "unavailable"}${reset}${reserve}`,reserve?"warning":"accent"));
+   const pinnedElsewhere=typeof storage.pinnedAccountIndex==="number" && storage.pinnedAccountIndex!==i;
+   logInfo(paint(`   automatic order: ${order ? `#${order}` : pinnedElsewhere ? `none (account ${(storage.pinnedAccountIndex ?? 0)+1} is pinned)` : "unavailable"}${reset}${reserve}`,reserve?"warning":"accent"));
   }
   const quota = forecastQuotas[i];
   if (quota) {
