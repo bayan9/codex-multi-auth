@@ -5973,8 +5973,13 @@ function createCompatibilityCodexHome(
 	};
 }
 
-function buildForwardArgs(rawArgs) {
-	const { args: compatibilityArgs, requestedModel } = rewriteReasoningConfigArgs(rawArgs);
+function buildForwardArgs(rawArgs, { preserveNativeSettings = false } = {}) {
+	// Native app binding keeps the caller's model and reasoning settings verbatim;
+	// it still needs the file auth store, because the router authenticates the
+	// desktop token it reads from auth.json.
+	const { args: compatibilityArgs, requestedModel } = preserveNativeSettings
+		? { args: [...rawArgs], requestedModel: extractRequestedModel(rawArgs) }
+		: rewriteReasoningConfigArgs(rawArgs);
 	const forceFileAuthStore = (process.env.CODEX_MULTI_AUTH_FORCE_FILE_AUTH_STORE ?? "1").trim() !== "0";
 	if (!forceFileAuthStore) {
 		return { args: compatibilityArgs, requestedModel };
@@ -6565,7 +6570,11 @@ async function main() {
             return 1;
         }
         delete process.env.CODEX_MULTI_AUTH_FORCE_ACCOUNT_INDEX;
-        const result = await forwardToRealCodexOnce(realCodexBin, forced.strippedArgs, process.env);
+        // Best effort: a locked or read-only config.toml (Windows EPERM/EBUSY)
+        // must not block the launch; the per-invocation override below still applies.
+        await ensurePersistedCodexFileAuthStore();
+        const { args: nativeArgs } = buildForwardArgs(forced.strippedArgs, { preserveNativeSettings: true });
+        const result = await forwardToRealCodexOnce(realCodexBin, nativeArgs, process.env);
         return result.exitCode;
     }
 	const forcedAccount = await applyForcedAccountSelection(rawArgs, process.env);
