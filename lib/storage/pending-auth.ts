@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { withRetry } from "../fs-retry.js";
+import { createLogger } from "../logger.js";
 import { tempPathFor } from "../temp-path.js";
 import { withFileTransactionLock } from "./file-lock.js";
 import type { AccountStorageV3 } from "./public-types.js";
@@ -25,6 +26,7 @@ const entrySchema = z.object({
 const fileSchema = z.object({ version: z.literal(1), entries: z.array(entrySchema).max(1000) });
 type PendingAuth = z.infer<typeof entrySchema>;
 const retry = { maxAttempts: 6, backoffMs: 25 };
+const log = createLogger("pending-auth");
 
 export function getPendingAuthPath(storagePath: string): string {
 	return `${storagePath}.pending-auth.json`;
@@ -32,12 +34,20 @@ export function getPendingAuthPath(storagePath: string): string {
 
 const hash = (token: string) => createHash("sha256").update(token).digest("hex");
 
+/**
+ * Only a missing file is empty. The entries are the only copy of rotated
+ * tokens, so a lock that outlasts the retries or a torn/corrupt file throws:
+ * a writer must never replace it with a partial list.
+ */
 async function read(path: string): Promise<PendingAuth[]> {
+	let raw: string;
 	try {
-		return fileSchema.parse(JSON.parse(await fs.readFile(path, "utf8"))).entries;
-	} catch {
-		return [];
+		raw = await withRetry(() => fs.readFile(path, "utf8"), retry);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
 	}
+	return fileSchema.parse(JSON.parse(raw)).entries;
 }
 
 async function write(path: string, entries: PendingAuth[]): Promise<void> {
@@ -78,7 +88,17 @@ export async function applyPendingAuth(
 	storage: AccountStorageV3 | null,
 ): Promise<AccountStorageV3 | null> {
 	if (!storage) return storage;
-	const entries = await read(getPendingAuthPath(storagePath));
+	let entries: PendingAuth[];
+	try {
+		entries = await read(getPendingAuthPath(storagePath));
+	} catch (error) {
+		// Loading must still work; the file is left untouched for a later load.
+		log.error("Pending rotated credentials could not be read; affected accounts may need a re-login if this persists", {
+			path: getPendingAuthPath(storagePath),
+			error: String(error),
+		});
+		return storage;
+	}
 	if (!entries.length) return storage;
 	for (const account of storage.accounts) {
 		const entry = account.refreshToken ? entries.find((item) => item.prior === hash(account.refreshToken)) : undefined;

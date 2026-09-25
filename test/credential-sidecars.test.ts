@@ -15,11 +15,13 @@ afterEach(async () => {
 	await fs.rm(dir, { recursive: true, force: true });
 });
 
-it.each(["reset-credits.json", "api-capability-probes.json"])(
+it.each(["reset-credits.json", "api-capability-probes.json", "api-routes.json"])(
 	"waits for an in-flight %s writer so its old state cannot reappear after the reset",
 	async (name) => {
 		const path = join(dir, name);
 		await fs.writeFile(path, '{"policy":"last-resort"}');
+		const rm = vi.spyOn(fs, "rm");
+		const removed = () => rm.mock.calls.some(([target]) => String(target) === path);
 		let release!: () => void;
 		let entered!: () => void;
 		const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -32,10 +34,15 @@ it.each(["reset-credits.json", "api-capability-probes.json"])(
 		});
 		await inside;
 		const cleared = clearCredentialSidecars();
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		// Let the clear run up to the lock it needs; it must not have deleted yet.
+		// (For the later files, the earlier api-routes.json deletion proves the clear got this far.)
+		if (name !== "api-routes.json") await vi.waitFor(() => expect(rm.mock.calls.some(([target]) => String(target).endsWith("api-routes.json"))).toBe(true));
+		for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+		expect(removed()).toBe(false);
 		release();
 		await writer;
 		await cleared;
+		expect(removed()).toBe(true);
 		await expect(fs.stat(path)).rejects.toMatchObject({ code: "ENOENT" });
 	},
 );
