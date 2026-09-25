@@ -9,6 +9,7 @@ import {
 	formatAccountLabel,
 	sanitizeEmail,
 } from "../accounts.js";
+import { codexCliAccountIdFor } from "../auth/token-utils.js";
 import { setCodexCliActiveSelection } from "../codex-cli/writer.js";
 import {
 	type DashboardDisplaySettings,
@@ -389,7 +390,7 @@ export async function runHealthCheck(
 		const activeAccount = storage.accounts[activeIndex];
 		if (activeAccount) {
 			await setCodexCliActiveSelection({
-				accountId: activeAccount.accountId,
+				accountId: codexCliAccountIdFor(activeAccount, activeAccount.accessToken),
 				email: activeAccount.email,
 				accessToken: activeAccount.accessToken,
 				refreshToken: activeAccount.refreshToken,

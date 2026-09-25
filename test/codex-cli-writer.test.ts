@@ -144,6 +144,164 @@ describe("codex-cli writer", () => {
     );
   });
 
+  it("writes the token's chatgpt_account_id instead of an org id (#700)", async () => {
+    const jwt = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const accessToken = jwt({
+      "https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-1" },
+    });
+
+    await setCodexCliActiveSelection({
+      accountId: "org-AbC123",
+      accessToken,
+      refreshToken: "r",
+    });
+    let written = JSON.parse(await readFile(authPath, "utf-8")) as {
+      tokens?: { account_id?: string };
+    };
+    expect(written.tokens?.account_id).toBe("ws-uuid-1");
+
+    // explicit non-org workspace selections are preserved
+    await setCodexCliActiveSelection({
+      accountId: "team-ws-uuid",
+      accessToken,
+      refreshToken: "r",
+    });
+    written = JSON.parse(await readFile(authPath, "utf-8"));
+    expect(written.tokens?.account_id).toBe("team-ws-uuid");
+
+    // no claim in either token: never write the org id, drop the field
+    await setCodexCliActiveSelection({
+      accountId: "org-AbC123",
+      accessToken: "opaque-access",
+      refreshToken: "r",
+    });
+    written = JSON.parse(await readFile(authPath, "utf-8"));
+    expect(written.tokens?.account_id).toBeUndefined();
+  });
+
+  it("falls back to the id_token's chatgpt_account_id for an org id (#700)", async () => {
+    const jwt = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const idToken = jwt({
+      "https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-2" },
+    });
+
+    await setCodexCliActiveSelection({
+      accountId: "ORG-AbC123",
+      accessToken: "opaque-access",
+      idToken,
+      refreshToken: "r",
+    });
+    const written = JSON.parse(await readFile(authPath, "utf-8")) as {
+      tokens?: { account_id?: string };
+    };
+    expect(written.tokens?.account_id).toBe("ws-uuid-2");
+  });
+
+  it("sanitises a stale org account_id already in auth.json when no accountId is selected (#700)", async () => {
+    const jwt = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const accessToken = jwt({
+      "https://api.openai.com/auth": { chatgpt_account_id: "ws-uuid-3" },
+    });
+    await writeFile(
+      authPath,
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: {
+          access_token: "old-access",
+          refresh_token: "old-refresh",
+          account_id: "org-Stale",
+        },
+      }),
+      "utf-8",
+    );
+
+    await setCodexCliActiveSelection({ accessToken, refreshToken: "r" });
+    const written = JSON.parse(await readFile(authPath, "utf-8")) as {
+      tokens?: { account_id?: string };
+    };
+    expect(written.tokens?.account_id).toBe("ws-uuid-3");
+  });
+
+  it("does not carry the previous workspace id onto new tokens without an accountId (#700)", async () => {
+    const jwt = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const writeExisting = (accountId: string) =>
+      writeFile(
+        authPath,
+        JSON.stringify({
+          auth_mode: "chatgpt",
+          tokens: {
+            access_token: "old-access",
+            refresh_token: "old-refresh",
+            account_id: accountId,
+          },
+        }),
+        "utf-8",
+      );
+    const readAccountId = async () =>
+      (JSON.parse(await readFile(authPath, "utf-8")) as {
+        tokens?: { account_id?: string };
+      }).tokens?.account_id;
+
+    await writeExisting("ws-previous-account");
+    await setCodexCliActiveSelection({
+      accessToken: jwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "ws-new-account" },
+      }),
+      refreshToken: "r",
+    });
+    expect(await readAccountId()).toBe("ws-new-account");
+
+    // a token without any claim gives nothing better, so the id is kept
+    await writeExisting("ws-previous-account");
+    await setCodexCliActiveSelection({ accessToken: "opaque-access", refreshToken: "r" });
+    expect(await readAccountId()).toBe("ws-previous-account");
+  });
+
+  it("keeps a same-identity id_token when a resync passes no idToken", async () => {
+    const jwt = (claims: Record<string, unknown>) =>
+      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+    const auth = { chatgpt_account_id: "ws-uuid-1" };
+    const idToken = jwt({ sub: "user-1", email: "a@example.com", "https://api.openai.com/auth": auth });
+    const refreshedAccess = jwt({ sub: "user-1", exp: 2, "https://api.openai.com/auth": auth });
+    const otherUserAccess = jwt({ sub: "user-2", "https://api.openai.com/auth": auth });
+    await writeFile(
+      authPath,
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: {
+          access_token: jwt({ sub: "user-1", exp: 1, "https://api.openai.com/auth": auth }),
+          refresh_token: "old-refresh",
+          id_token: idToken,
+          account_id: "ws-uuid-1",
+        },
+      }),
+      "utf-8",
+    );
+
+    await setCodexCliActiveSelection({
+      accountId: "org-AbC123",
+      accessToken: refreshedAccess,
+      refreshToken: "r2",
+    });
+    let written = JSON.parse(await readFile(authPath, "utf-8")) as {
+      tokens?: { id_token?: string };
+    };
+    expect(written.tokens?.id_token).toBe(idToken);
+
+    // a different user in the same workspace does not inherit it
+    await setCodexCliActiveSelection({
+      accountId: "ws-uuid-1",
+      accessToken: otherUserAccess,
+      refreshToken: "r3",
+    });
+    written = JSON.parse(await readFile(authPath, "utf-8"));
+    expect(written.tokens?.id_token).toBe(otherUserAccess);
+  });
+
   it("creates auth.json when missing and selection includes tokens", async () => {
     const updated = await setCodexCliActiveSelection({
       accountId: "acc_new",

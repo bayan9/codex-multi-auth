@@ -1,4 +1,10 @@
 import { extractAccountId, sanitizeEmail } from "../accounts.js";
+import {
+	codexAuthAccountIdsMatch,
+	codexCliAccountIdFor,
+	codexCliActiveIdentity,
+	isOpenAiOrgId,
+} from "../auth/token-utils.js";
 import type { ExistingAccountInfo } from "../cli.js";
 import { loadCodexCliState } from "../codex-cli/state.js";
 import { setCodexCliActiveSelection } from "../codex-cli/writer.js";
@@ -540,10 +546,20 @@ function activeAccountMatchesCodexCliState(
 	state: Awaited<ReturnType<typeof loadCodexCliState>>,
 ): boolean {
 	if (!state) return true;
-	const accountId = account.accountId?.trim();
-	const activeAccountId = state.activeAccountId?.trim();
-	if (accountId && activeAccountId) {
-		return accountId === activeAccountId;
+	// An org account_id in auth.json (written before #700) makes Codex CLI
+	// 0.156+ fail; resync so the writer replaces it with the workspace id.
+	if (isOpenAiOrgId(state.authFileAccountId)) return false;
+	// A stored "org-..." id is written to auth.json as the token's workspace
+	// id, while the legacy accounts.json keeps the raw id (#700); match either.
+	// Compared as the writer would write it: through the account's
+	// CodexCliMirror, or an explicit id the backend refused comes back here.
+	const accountId = codexCliAccountIdFor(account, account.accessToken)?.trim();
+	const activeIdentity = codexCliActiveIdentity(state);
+	if (accountId && activeIdentity.accountId) {
+		return codexAuthAccountIdsMatch(
+			{ accountId, accessToken: account.accessToken },
+			activeIdentity,
+		);
 	}
 
 	const email = sanitizeEmail(account.email);
@@ -573,7 +589,7 @@ export async function syncCodexCliActiveSelectionIfDrifted(
 			return false;
 		}
 		return setCodexCliActiveSelection({
-			accountId: account.accountId,
+			accountId: codexCliAccountIdFor(account, account.accessToken),
 			email: account.email,
 			accessToken: account.accessToken,
 			refreshToken: account.refreshToken,

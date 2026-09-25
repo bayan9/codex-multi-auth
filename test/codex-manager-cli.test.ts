@@ -126,6 +126,9 @@ vi.mock("../lib/auth/auth.js", () => ({
 		}
 	}),
 	sanitizeOAuthResponseBodyForLog: vi.fn((body: string) => body),
+	// syncSelectionToCodex resolves the auth.json id through token-utils,
+	// which decodes the access token; these fixtures carry no JWT claims.
+	decodeJWT: vi.fn(() => null),
 	REDIRECT_URI: "http://localhost:1455/auth/callback",
 	AUTH_REDIRECT: {
 		host: "localhost",
