@@ -140,8 +140,13 @@ export async function runApiLoginMenu(
 		try {
 			let route = routes.find((r) => r.id === choice);
 			if (choice === "add") {
-				const label = await d.text("Credential label: ");
+				const label = (await d.text("Credential label: ")).trim();
 				if (!label) continue;
+				// Match the stored schema here, so a bad label is not reported as a key problem after discovery.
+				if (label.length > 80 || /[\x00-\x1f\x7f]/.test(label)) {
+					d.log("Credential label must be 1-80 printable characters. Nothing was saved.");
+					continue;
+				}
 				const kind = await d.select(
 					[
 						{ label: "API", value: "api" },
@@ -210,10 +215,10 @@ export async function runApiLoginMenu(
 			if (!route) continue;
 			const selection = await chooseModels({ ...route, enabled: true }, d);
 			if (selection === null) continue;
-			const next = [
-				...routes.filter((r) => r.id !== route.id),
-				{ ...route, ...selection },
-			];
+			const edited = { ...route, ...selection };
+			const next = routes.some((r) => r.id === edited.id)
+				? routes.map((r) => (r.id === edited.id ? edited : r))
+				: [...routes, edited];
 			await d.save(next, routes);
 			routes = next;
 			d.log(

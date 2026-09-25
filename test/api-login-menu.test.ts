@@ -109,3 +109,19 @@ it.each([false,true])("reports a concurrent edit and tolerates recovery reload f
  expect(log.mock.calls.flat().join(" ")).not.toMatch(/check the key/);
  expect(select.mock.calls[2]?.[0]).toEqual(expect.arrayContaining([expect.objectContaining({label:expect.stringContaining(failReload?"Fixture":"Updated")})]));
 });
+
+it("rejects an over-long label before asking for the key instead of blaming the key later",async()=>{
+ const choices=["add","back"];const log=vi.fn();const save=vi.fn();const secret=vi.fn(async()=>"fixture-secret");
+ await runApiLoginMenu({load:async()=>[],save,secret,log,text:async()=>"x".repeat(81),discover:async()=>["model"],select:async()=>choices.shift()??null});
+ expect(secret).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();
+ const output=log.mock.calls.flat().join(" ");
+ expect(output).toMatch(/label/i);expect(output).not.toMatch(/check the key/);
+});
+
+it("keeps a route in place when its visible models are edited",async()=>{
+ const route=(id:string):ApiRouteCredential=>({id,label:id,kind:"api",apiKey:"fixture",priority:9,enabled:true,visibleModels:[]});
+ const choices=["first","models","toggle:model","save","back"];const save=vi.fn();
+ await runApiLoginMenu({load:async()=>[route("first"),route("second")],save,log:vi.fn(),discover:async()=>["model"],select:async()=>choices.shift()??null});
+ expect(save.mock.calls[0]?.[0]?.map((r:ApiRouteCredential)=>r.id)).toEqual(["first","second"]);
+ expect(save.mock.calls[0]?.[0]?.[0]?.visibleModels).toEqual(["model"]);
+});
