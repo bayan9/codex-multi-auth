@@ -805,7 +805,7 @@ failure.
   The namespaced `codex-multi-auth auth limits ...` form is an alias. No npm
   scripts or storage migrations were added.
 - `codex-multi-auth login` remains browser-first by default.
-- New logins prefer a uniquely identified Personal workspace over an organization default. If several workspaces exist without a unique Personal choice, interactive login requires selecting one before saving; noninteractive login requires `--org`. Cancelling the choice saves nothing. Explicit overrides and targeted re-authentication take precedence.
+- New logins prefer a uniquely identified Personal workspace over an organization default. If several workspaces exist without a unique Personal choice, interactive login asks you to pick one before saving, and the pick is saved as an explicit binding like `--org`. Noninteractive login keeps the 2.16.0 automatic choice and prints a warning naming `--org`. Organization (`org-`) aliases of the token's workspace do not count as extra workspaces and are not offered in the picker. Cancelling the choice saves nothing. Explicit overrides and targeted re-authentication take precedence.
 - `check` now refreshes reset credits and model/capability discovery. API
   capability probes remain opt-in per credential and billable; plain `check`
   reuses results younger than 15 minutes, and `check capabilities` forces them.

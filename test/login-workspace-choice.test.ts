@@ -13,8 +13,27 @@ describe('new login workspace choice',()=>{
   expect(await chooseLoginWorkspace([team,{...team,accountId:'second'}],{interactive:true,select})).toBe('second');
   expect(select).toHaveBeenCalledOnce();
  });
- it('does not silently select a default in a noninteractive login',async()=>{
-  await expect(chooseLoginWorkspace([team,{...team,accountId:'second'}],{interactive:false,select:vi.fn()})).rejects.toThrow('login --org');
+ it('falls back to the automatic choice with an --org warning in a noninteractive login',async()=>{
+  const select=vi.fn(),warn=vi.fn();
+  expect(await chooseLoginWorkspace([team,{...team,accountId:'second'}],{interactive:false,select,warn})).toBeUndefined();
+  expect(select).not.toHaveBeenCalled();
+  expect(warn).toHaveBeenCalledOnce();
+  expect(warn.mock.calls[0]?.[0]).toContain('--org');
+ });
+ it('does not count organization aliases of the token workspace as a second workspace',async()=>{
+  const token={accountId:'workspace-uuid',label:'Token account [id:fixture]',source:'token' as const,isDefault:true};
+  const org={accountId:'org-business',label:'Business [id:fixture]',source:'org' as const,isDefault:true};
+  const select=vi.fn(),warn=vi.fn();
+  expect(await chooseLoginWorkspace([token,org],{interactive:true,select,warn})).toBeUndefined();
+  expect(await chooseLoginWorkspace([token,org,{...org,accountId:'org-other'}],{interactive:false,select,warn})).toBeUndefined();
+  expect(select).not.toHaveBeenCalled();
+  expect(warn).not.toHaveBeenCalled();
+ });
+ it('offers only real workspaces in the interactive picker, never organization aliases',async()=>{
+  const select=vi.fn().mockResolvedValue('second');
+  const org={accountId:'org-business',label:'Business [id:fixture]',source:'org' as const};
+  expect(await chooseLoginWorkspace([team,{...team,accountId:'second'},org],{interactive:true,select})).toBe('second');
+  expect(select.mock.calls[0]?.[0].map((item:{value:string})=>item.value)).toEqual(['team','second']);
  });
  it('returns cancellation without a workspace choice',async()=>{
   expect(await chooseLoginWorkspace([team,{...personal,isPersonal:false}],{interactive:true,select:vi.fn().mockResolvedValue(null)})).toBeNull();
