@@ -469,8 +469,12 @@ async function customGateway(options: {
 			});
 			responses.push(response);
 			res.writeHead(response.status, Object.fromEntries(response.headers));
-			if (response.body) for await (const chunk of response.body) res.write(chunk);
-			res.end();
+			try {
+				if (response.body) for await (const chunk of response.body) res.write(chunk);
+				res.end();
+			} catch {
+				res.destroy();
+			}
 		});
 	});
 	const baseUrl = await listen(server);
@@ -569,19 +573,29 @@ it("authenticates a WebSocket upgrade that presents the client key as x-api-key"
 	expect(await g.handshakeStatus({ "x-api-key": "wrong" })).toBe(401);
 });
 
-it("forwards the client's OpenAI-Beta WebSocket flag alongside the routing flag", async () => {
+it("does not send the HTTP routing beta to the OAuth WebSocket endpoint", async () => {
 	const upstream = createServer();
 	const wss = new WebSocketServer({ server: upstream });
 	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
 	const betas: (string | undefined)[] = [];
 	wss.on("connection", (ws, req) => {
 		betas.push(req.headers["openai-beta"] as string | undefined);
-		ws.on("message", () => ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_b", output: [] } })));
+		ws.on("message", () => {
+		// The OAuth endpoint accepts the handshake, emits metadata, then closes
+		// 1011 when the HTTP-only responses=experimental flag is combined with WS.
+		if (req.headers["openai-beta"]?.includes("responses=experimental")) {
+			ws.send(JSON.stringify({type: "codex.rate_limits"}));
+			ws.send(JSON.stringify({type: "codex.response.metadata", headers: {}}));
+			ws.close(1011);
+			return;
+		}
+		ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_b", output: [] } }));
+	});
 	});
 	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture", "openai-beta": "responses=experimental" } });
 	const ws = await g.connect({ authorization: "Bearer fixture-local", "openai-beta": "responses_websockets=2026-02-06" });
-	await turn(ws, { model: "shared", input: [] });
-	expect(betas).toEqual(["responses=experimental, responses_websockets=2026-02-06"]);
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({type: "response.completed"});
+	expect(betas).toEqual(["responses_websockets=2026-02-06"]);
 });
 
 it("falls back to HTTP for an API credential whose WebSocket handshake is refused", async () => {
@@ -711,4 +725,26 @@ it("does not diagnose response body cancellation as an upstream disconnect",asyn
  expect([...f.peers].every(peer=>peer.readyState===WebSocket.CLOSED)).toBe(true);
  expect(f.stats.upstreamRequests).toBe(1);
  expect(f.calls).toHaveLength(1);
+});
+
+it.each([
+	{name: "future client flags", current: "responses=experimental, routing=fixture", client: "responses_websockets=future, custom=one, custom=one", expected: "routing=fixture, responses_websockets=future, custom=one"},
+	{name: "missing client beta", current: "responses=experimental", client: undefined, expected: undefined},
+	{name: "explicit client HTTP beta", current: "responses=experimental", client: "responses=experimental, client=explicit", expected: "responses=experimental, client=explicit"},
+	{name: "API beta flags", current: "api=fixture", client: "responses_websockets=future", expected: "api=fixture, responses_websockets=future"},
+])("preserves beta provenance for $name", async ({current, client, expected}) => {
+	const upstream = createServer();
+	const wss = new WebSocketServer({server: upstream});
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	const betas: (string | undefined)[] = [];
+	wss.on("connection", (ws, req) => {
+		betas.push(req.headers["openai-beta"] as string | undefined);
+		ws.on("message", () => ws.send(JSON.stringify({type: "response.completed", response: {id: "resp_beta", output: []}})));
+	});
+	const g = await customGateway({upstream, outboundHeaders: {"openai-beta": current}});
+	const headers: Record<string, string> = {authorization: "Bearer fixture-local"};
+	if (client !== undefined) headers["openai-beta"] = client;
+	const ws = await g.connect(headers);
+	expect((await turn(ws, {model: "api/fixture", input: []})).at(-1)?.type).toBe("response.completed");
+	expect(betas).toEqual([expected]);
 });

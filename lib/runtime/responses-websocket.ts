@@ -1,3 +1,4 @@
+import { OPENAI_HEADER_VALUES } from "../constants.js";
 import { ClientCancellationError } from "../request/client-cancellation.js";
 import type { Duplex } from "node:stream";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -49,11 +50,12 @@ function upstreamHeaders(source: unknown): Record<string, string> {
 	}
 	return headers;
 }
-/** Union of comma-separated OpenAI-Beta features; the client's own flags are kept. */
+/** Remove the router's HTTP-only flag; preserve every explicit client beta. */
 function mergeBeta(current: string | null, client: string | undefined): string | null {
-	if (!client) return current;
-	const features = [...(current ?? "").split(","), ...client.split(",")].map(item => item.trim()).filter(Boolean);
-	return [...new Set(features)].join(", ") || null;
+	const routingFlags = (current ?? "").split(",").map(item => item.trim())
+		.filter(item => item && item !== OPENAI_HEADER_VALUES.BETA_RESPONSES);
+	const clientFlags = (client ?? "").split(",").map(item => item.trim()).filter(Boolean);
+	return [...new Set([...routingFlags, ...clientFlags])].join(", ") || null;
 }
 function wireError(code: string, status = 400): Json {
 	return {
@@ -130,10 +132,12 @@ class SocketSession {
 		const url = new URL(String(input));
 		url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
 		const headers = new Headers(init.headers);
-		// The routing pipeline stamps its HTTP beta flag; the native client's
-		// WebSocket flag (e.g. responses_websockets=<date>) must survive the hop.
+		// The OAuth HTTP beta selects an incompatible upstream protocol when
+		// combined with the native WebSocket beta (metadata then close 1011).
+		// Keep the original client flags, without the router's HTTP injection.
 		const beta = mergeBeta(headers.get("openai-beta"), context.clientBeta);
 		if (beta) headers.set("openai-beta", beta);
+		else headers.delete("openai-beta");
 		const key = createHash("sha256")
 			.update(url.toString())
 			.update("\0")
