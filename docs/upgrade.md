@@ -83,6 +83,33 @@ subscription priming, or request-program setting is migrated.
 WebSocket disconnect details. This helps investigate interruptions without
 replaying a generation that may already have started upstream.
 
+### WebSocket Compatibility And Recovery
+
+WebSocket forwarding preserves the native client's beta flags without adding the
+HTTP-only Responses beta. Upstream connections offer `permessage-deflate`
+compression with modest zlib settings and requested dictionary resets. Servers
+that decline compression still use WebSockets; decompressed messages retain the
+same size limits.
+
+After an unexpected upstream disconnect, native Codex can retry on one fresh
+WebSocket. A second disconnect within 60 seconds makes the router request HTTP
+recovery on that authenticated conversation's next connection. A completed
+generation clears the failure count; a warm-up does not. Codex may keep HTTP
+fallback for the rest of that session. The router never automatically replays a
+request whose generation outcome is uncertain.
+
+At the 64-connection limit, a valid new connection can reclaim an idle setup or
+warm-up connection. Queued work, active requests and generated response history
+remain protected. If every slot is protected, the router requests immediate HTTP
+recovery instead of five rejected WebSocket handshake retries.
+
+New disconnect records include sanitized request counts and TCP transport flags;
+local send completion does not prove upstream receipt. Compression reduces
+request bytes but does not establish the cause of an earlier `1006` close.
+No credential or configuration migration is required. See the
+[status and transport reference](reference/commands.md#reading-status-and-check-output)
+for diagnostic fields and recovery details.
+
 ### `codex` Is No Longer Ours (v2.1.2)
 
 The package stopped publishing a global `codex` binary — that name belongs to the official Codex install path (npm, Homebrew, or a release binary). Use `codex-multi-auth …` for account management, and `codex-multi-auth-codex`/`mcodex` when you intentionally want the forwarding wrapper. If a stale shim still answers to `codex`, reinstall the official CLI.
