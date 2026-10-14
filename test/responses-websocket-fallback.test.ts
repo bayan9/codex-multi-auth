@@ -25,6 +25,7 @@ function credential(headers: IncomingHttpHeaders): string | undefined {
 async function fixture() {
 	let websocketCreates = 0;
 	let httpCreates = 0;
+	const controlledRequests = new Map<string, WebSocket>();
 	const upstream = createServer((_req, res) => {
 		httpCreates++;
 		res.writeHead(200, { "content-type": "text/event-stream" });
@@ -34,6 +35,7 @@ async function fixture() {
 	wss.on("connection", ws => ws.on("message", raw => {
 		websocketCreates++;
 		const body = JSON.parse(raw.toString());
+		if (body.model.startsWith("controlled-")) controlledRequests.set(body.model, ws);
 		if (body.model.startsWith("rejected-")) {
 			ws.send(JSON.stringify({ type: "error", status: Number(body.model.slice(9)), error: { code: "fixture_rejection" } }));
 			return;
@@ -46,7 +48,7 @@ async function fixture() {
 			ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_success", output: [] } }));
 			return;
 		}
-		if (body.model !== "stall") ws.close(1011);
+		if (body.model !== "stall" && !body.model.startsWith("controlled-")) ws.close(1011);
 	}));
 	const upstreamUrl = await listen(upstream);
 	cleanups.push(async () => {
@@ -101,7 +103,14 @@ async function fixture() {
 		});
 		return { ws, status };
 	}
-	return { connect, baseUrl, stats: gateway.stats, counts: () => ({ websocketCreates, httpCreates }) };
+	function finishControlled(model: string, outcome: "disconnect" | "complete") {
+		const ws = controlledRequests.get(model);
+		if (!ws) throw Error(`No pending fixture request for ${model}`);
+		controlledRequests.delete(model);
+		if (outcome === "disconnect") ws.close(1011);
+		else ws.send(JSON.stringify({ type: "response.completed", response: { id: `resp_${model}`, output: [] } }));
+	}
+	return { connect, baseUrl, finishControlled, stats: gateway.stats, counts: () => ({ websocketCreates, httpCreates }) };
 }
 
 const scope = { authorization: "Bearer fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" };
@@ -145,6 +154,55 @@ it.each(["before-first-event", "disconnect"])("allows one fresh WebSocket retry 
 	expect(response.status).toBe(200);
 	expect(await response.text()).toContain("response.completed");
 	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 1 });
+});
+
+async function startControlled(g: Awaited<ReturnType<typeof fixture>>, model: string) {
+	const { ws, status } = await g.connect(scope);
+	expect(status).toBe(101);
+	const started = once(ws, "message");
+	const done = request(ws, model);
+	await started;
+	return async (outcome: "disconnect" | "complete") => {
+		g.finishControlled(model, outcome);
+		await done;
+	};
+}
+
+it("combines disconnects from concurrent sockets in the same scope without replay", async () => {
+	const g = await fixture();
+	const [first, second] = await Promise.all([
+		startControlled(g, "controlled-first"),
+		startControlled(g, "controlled-second"),
+	]);
+	await Promise.all([first("disconnect"), second("disconnect")]);
+	expect((await g.connect(scope)).status).toBe(426);
+	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 0 });
+});
+
+it.each(["failure-first", "completion-first"])("orders shared failure recovery by concurrent socket events: %s", async order => {
+	const g = await fixture();
+	await disconnect(g);
+	const [failed, completed] = await Promise.all([
+		startControlled(g, "controlled-failed"),
+		startControlled(g, "controlled-completed"),
+	]);
+	if (order === "failure-first") {
+		await failed("disconnect");
+		expect((await g.connect(scope)).status).toBe(426);
+		await completed("complete");
+		expect((await g.connect(scope)).status).toBe(101);
+		// The completion also clears the failure recorded by the other socket.
+		await disconnect(g);
+		expect((await g.connect(scope)).status).toBe(101);
+	} else {
+		await completed("complete");
+		await failed("disconnect");
+		// A later failure survives the earlier completion, but still gets one retry.
+		expect((await g.connect(scope)).status).toBe(101);
+	}
+	await disconnect(g);
+	expect((await g.connect(scope)).status).toBe(426);
+	expect(g.counts()).toEqual({ websocketCreates: order === "failure-first" ? 5 : 4, httpCreates: 0 });
 });
 
 it("isolates fallback by authenticated client and thread, including shared session IDs", async () => {
