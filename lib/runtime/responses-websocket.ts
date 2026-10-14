@@ -27,6 +27,8 @@ interface WebSocketStats {
  lastDisconnect?: WebSocketDisconnectDiagnostic;
 }
 const CONTEXT_HEADER = "x-local-responses-transport";
+const HTTP_FALLBACK_COOLDOWN_MS = 60_000;
+const MAX_HTTP_FALLBACK_SCOPES = 256;
 const terminal = new Set([
 	"response.completed",
 	"response.failed",
@@ -37,6 +39,25 @@ const terminal = new Set([
 type Json = Record<string, unknown>;
 type Chain = { body: Json; output: unknown[]; pool: string; bytes: number };
 type Context = { routeKind: "oauth" | "api" | "zdr"; signal: AbortSignal; session: SocketSession; previousId?: string; delta?: unknown; clientBeta?: string };
+/** A thread-scoped hint only; authentication is checked separately before use. */
+function fallbackScope(req: IncomingMessage): string | undefined {
+	// Native clients can share a session across threads. Prefer the conversation
+	// identity so a failed thread does not downgrade a healthy sibling.
+	const conversation = req.headers.conversation_id;
+	const session = req.headers.session_id;
+	const identity = typeof conversation === "string" && conversation.trim()
+		? conversation.trim()
+		: typeof session === "string" ? session.trim() : "";
+	if (!identity || identity.length > 1024) return undefined;
+	const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+	const apiKey = req.headers["x-api-key"];
+	const credentials = [...new Set([
+		bearer,
+		typeof apiKey === "string" ? apiKey.trim() : undefined,
+	].filter((value): value is string => !!value))].sort();
+	if (!credentials.length) return undefined;
+	return createHash("sha256").update(JSON.stringify([credentials, identity])).digest("hex");
+}
 /** Headers that describe the synthetic body or the upgrade itself, never the upstream decision. */
 const LOCAL_ONLY_HEADERS = /^(connection|upgrade|keep-alive|sec-websocket-.*|content-length|content-encoding|content-type|transfer-encoding|set-cookie)$/i;
 function upstreamHeaders(source: unknown): Record<string, string> {
@@ -96,6 +117,7 @@ class SocketSession {
 		readonly maxBytes: number,
 		readonly stats: WebSocketStats,
 		private readonly httpFetch: typeof fetch = fetch,
+		private readonly onDisconnect?: () => void,
 	) {}
 	close() {
 		this.closed = true;
@@ -284,6 +306,7 @@ class SocketSession {
 				this.channels.delete(key);
                 const cancelled = bodyCancelled || init.signal?.aborted || context.signal.aborted || this.closed;
                 if (!cancelled) {
+                    this.onDisconnect?.();
                     const at = Date.now();
                     this.stats.lastDisconnect = {
                         at, cause, routeKind: context.routeKind,
@@ -396,6 +419,7 @@ export class ResponsesWebSocketGateway {
 	private readonly contexts = new Map<string, Context>();
 	private readonly scope = new AsyncLocalStorage<Context>();
 	private readonly sessions = new Set<SocketSession>();
+	private readonly httpFallbackUntil = new Map<string, number>();
 	private readonly wss: WebSocketServer;
 	private readonly maxBytes: number;
 	/** Loopback hops must never go through an environment HTTP proxy (NODE_USE_ENV_PROXY). */
@@ -431,6 +455,29 @@ export class ResponsesWebSocketGateway {
 			return context.session.fetch(input, init, context);
 		return this.upstreamFetch(input, init);
 	};
+	private rememberDisconnect(scope: string | undefined): void {
+		if (!scope) return;
+		const now = Date.now();
+		for (const [key, until] of this.httpFallbackUntil) {
+			if (until <= now) this.httpFallbackUntil.delete(key);
+		}
+		this.httpFallbackUntil.delete(scope);
+		this.httpFallbackUntil.set(scope, now + HTTP_FALLBACK_COOLDOWN_MS);
+		while (this.httpFallbackUntil.size > MAX_HTTP_FALLBACK_SCOPES) {
+			const oldest = this.httpFallbackUntil.keys().next().value;
+			if (oldest === undefined) break;
+			this.httpFallbackUntil.delete(oldest);
+		}
+	}
+	private needsHttpFallback(req: IncomingMessage): boolean {
+		const scope = fallbackScope(req);
+		if (!scope) return false;
+		const until = this.httpFallbackUntil.get(scope);
+		if (until === undefined) return false;
+		if (until > Date.now()) return true;
+		this.httpFallbackUntil.delete(scope);
+		return false;
+	}
 	handle(req: IncomingMessage, handler: () => Promise<void>): void {
 		const id = req.headers[CONTEXT_HEADER];
 		delete req.headers[CONTEXT_HEADER];
@@ -490,6 +537,13 @@ export class ResponsesWebSocketGateway {
 					reject(403);
 					return;
 				}
+                // The failed create is never replayed here. Native Codex handles
+                // a 426 on its next connection by rebuilding the request over HTTP,
+                // without spending its remaining WebSocket retry budget.
+                if (this.needsHttpFallback(req)) {
+                    reject(426);
+                    return;
+                }
                 if (socket.destroyed) return;
 				this.wss.handleUpgrade(req, socket, head, (ws) =>
 					this.serve(ws, req, baseUrl),
@@ -499,7 +553,8 @@ export class ResponsesWebSocketGateway {
 	}
 	private serve(ws: WebSocket, req: IncomingMessage, baseUrl: string): void {
 		this.stats.connections++;
-		const session = new SocketSession(this.maxBytes, this.stats, this.upstreamFetch);
+		const scope = fallbackScope(req);
+		const session = new SocketSession(this.maxBytes, this.stats, this.upstreamFetch, () => this.rememberDisconnect(scope));
 		this.sessions.add(session);
 		let queue = Promise.resolve(),
 			queued = 0,
@@ -690,6 +745,7 @@ export class ResponsesWebSocketGateway {
 		for (const ws of this.wss.clients) ws.terminate();
 		for (const session of this.sessions) session.close();
 		this.contexts.clear();
+		this.httpFallbackUntil.clear();
 		this.wss.close();
 		void this.loopback.close().catch(() => undefined);
 	}
