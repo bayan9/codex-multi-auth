@@ -143,6 +143,25 @@ function writeStatus(statusPath, payload) {
 function readDisconnect(value) {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 	const { at, cause, stage, closeCode, routeKind, connectionAgeMs, eventCount } = value;
+	const transport = {};
+	for (const key of ["requestBytes", "inputItemCount"]) {
+		const field = value[key];
+		if (field !== undefined) {
+			if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) return null;
+			transport[key] = field;
+		}
+	}
+	for (const key of ["isPrewarm", "hasPreviousResponse", "reusedConnection", "sendCompleted", "compressionNegotiated", "tcpEndReceived", "tcpCloseHadError"]) {
+		const field = value[key];
+		if (field !== undefined) {
+			if (typeof field !== "boolean") return null;
+			transport[key] = field;
+		}
+	}
+	if (value.transportErrorCode !== undefined) {
+		if (!["ECONNRESET", "EPIPE", "ETIMEDOUT", "OTHER"].includes(value.transportErrorCode)) return null;
+		transport.transportErrorCode = value.transportErrorCode;
+	}
 	if (typeof at !== "number" || !Number.isFinite(at) || at < 0 || at > 8.64e15) return null;
 	if (!["close", "transport_error", "invalid_event", "buffer_limit", "send_error"].includes(cause)) return null;
 	if (!["awaiting_first_event", "streaming"].includes(stage)) return null;
@@ -157,6 +176,7 @@ function readDisconnect(value) {
 		...(routeKind !== undefined ? { routeKind } : {}),
 		...(connectionAgeMs !== undefined ? { connectionAgeMs } : {}),
 		...(eventCount !== undefined ? { eventCount } : {}),
+		...transport,
 	};
 }
 

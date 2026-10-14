@@ -272,7 +272,7 @@ it("preserves sanitized disconnect history across daemon restarts and replaces i
 	const statePath = join(root, "state.json");
 	const statusPath = join(root, "status.json");
 	await writeState(statePath, { clientApiKey: "fixture-token", host: "127.0.0.1", port: 0, statusPath });
-	const prior = { at: 123, cause: "close", stage: "streaming", closeCode: 1011, routeKind: "zdr", eventCount: 4, connectionAgeMs: 100 };
+	const prior = { at: 123, cause: "close", stage: "streaming", closeCode: 1011, routeKind: "zdr", eventCount: 4, connectionAgeMs: 100, requestBytes: 1234, inputItemCount: 2, isPrewarm: false, hasPreviousResponse: true, reusedConnection: true, sendCompleted: true, compressionNegotiated: false, transportErrorCode: "ECONNRESET", tcpEndReceived: false, tcpCloseHadError: true };
 	writeFileSync(statusPath, JSON.stringify({
 		state: "stopped",
 		lastWebsocketDisconnect: { ...prior, reason: "private-reason", authorization: "private-token" },
@@ -395,5 +395,27 @@ it("preserves WebSocket admission history across restarts and replaces it after 
 		} finally {
 			await stopChild(child);
 		}
+	}
+});
+
+
+it.each([{ requestBytes: -1 }, { tcpEndReceived: "false" }, { transportErrorCode: "private-code" }])("rejects invalid persisted or current WebSocket transport evidence: %j", async invalid => {
+	const root = await createTempRoot("router-invalid-transport-");
+	const scriptPath = createRouterFixture(root);
+	const statePath = join(root, "state.json");
+	const statusPath = join(root, "status.json");
+	const diagnostic = { at: 123, cause: "close", stage: "awaiting_first_event", closeCode: 1006, ...invalid };
+	await writeState(statePath, { clientApiKey: "fixture-token", host: "127.0.0.1", port: 0, statusPath });
+	await writeState(statusPath, { lastWebsocketDisconnect: diagnostic });
+	const child = spawn(process.execPath, [scriptPath, "--status", statusPath, "--state", statePath], {
+		env: { ...process.env, CODEX_APP_ROUTER_TEST_DISCONNECT: JSON.stringify(diagnostic) },
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	try {
+		const running = await readJsonWhen(statusPath, value => value.state === "running");
+		expect(running.lastWebsocketDisconnect).toBeNull();
+		expect(JSON.stringify(running)).not.toContain("private-code");
+	} finally {
+		await stopChild(child);
 	}
 });

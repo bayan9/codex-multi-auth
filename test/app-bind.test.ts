@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	bindCodexAppRuntimeRotation,
 	formatAppBindStatus,
+	formatWebsocketDisconnect,
 	getAppBindStatus,
 	parsePosixProcessStartTime,
 	resolveAppBindPaths,
@@ -2341,4 +2342,31 @@ it("bounds active WebSocket connections without capping the lifetime reclaim cou
 	const status = await getAppBindStatus(options);
 	expect(status.router?.websocketActiveConnections).toBeNull();
 	expect(status.router?.websocketCapacityReclaims).toBe(Number.MAX_SAFE_INTEGER);
+});
+
+
+it.each([
+	{ fields: { requestBytes: 1234, inputItemCount: 2, isPrewarm: false, hasPreviousResponse: true, reusedConnection: true, sendCompleted: true, compressionNegotiated: false, transportErrorCode: "ECONNRESET", tcpEndReceived: false, tcpCloseHadError: true }, valid: true },
+	{ fields: { requestBytes: 0, inputItemCount: 0, transportErrorCode: "OTHER" }, valid: true },
+	...[
+		{ requestBytes: -1 }, { requestBytes: 1.5 }, { inputItemCount: "2" },
+		{ isPrewarm: "false" }, { hasPreviousResponse: 1 }, { reusedConnection: null },
+		{ sendCompleted: "true" }, { compressionNegotiated: "secret" },
+		{ transportErrorCode: "secret-error" }, { tcpEndReceived: 0 }, { tcpCloseHadError: "false" },
+	].map(fields => ({ fields, valid: false })),
+])("validates safe WebSocket transport evidence: %j", async ({ fields, valid }) => {
+	const root = await createTempRoot("app-bind-ws-transport-");
+	const options = { platform: "linux" as const, home: root, env: { CODEX_HOME: join(root, "codex"), CODEX_MULTI_AUTH_DIR: join(root, "multi-auth") } };
+	const paths = resolveAppBindPaths(options);
+	await mkdir(paths.bindDir, { recursive: true });
+	const base = { at: 123, cause: "close", stage: "awaiting_first_event", closeCode: 1006 };
+	await writeFile(paths.statusPath, JSON.stringify({ state: "stopped", lastWebsocketDisconnect: { ...base, ...fields, message: "private-message", request: "private-body" } }));
+	expect((await getAppBindStatus(options)).router?.lastWebsocketDisconnect).toEqual(valid ? { ...base, ...fields } : null);
+});
+
+
+it("formats safe WebSocket transport evidence and keeps old records compatible", () => {
+	const base = { at: 1000, cause: "close", stage: "awaiting_first_event", closeCode: 1006 };
+	expect(formatWebsocketDisconnect(base)).toBe("Last WebSocket disconnect: 1970-01-01T00:00:01.000Z; cause=close; stage=awaiting_first_event; closeCode=1006");
+	expect(formatWebsocketDisconnect({ ...base, requestBytes: 120, inputItemCount: 2, isPrewarm: false, hasPreviousResponse: true, reusedConnection: true, sendCompleted: true, compressionNegotiated: false, transportErrorCode: "ECONNRESET", tcpEndReceived: false, tcpCloseHadError: true })).toContain("requestBytes=120; inputItemCount=2; isPrewarm=false; hasPreviousResponse=true; reusedConnection=true; sendCompleted=true; compressionNegotiated=false; transportErrorCode=ECONNRESET; tcpEndReceived=false; tcpCloseHadError=true");
 });

@@ -264,7 +264,7 @@ it.each(["oauth", "api", "zdr"] as const)("records sanitized %s close context wi
  const ws = await f.connect();
  const before = Date.now();
  await turn(ws, {model:routeKind === "oauth" ? "shared" : `${routeKind}/shared`,input:[]});
- expect(f.stats.lastDisconnect).toEqual({at:expect.any(Number),cause:"close",stage:"streaming",closeCode:1011,routeKind,connectionAgeMs:expect.any(Number),eventCount:1});
+ expect(f.stats.lastDisconnect).toMatchObject({at:expect.any(Number),cause:"close",stage:"streaming",closeCode:1011,routeKind,connectionAgeMs:expect.any(Number),eventCount:1});
  expect(f.stats.lastDisconnect?.connectionAgeMs).toBeGreaterThanOrEqual(0);
  expect(f.stats.lastDisconnect?.at).toBeGreaterThanOrEqual(before);
  expect(JSON.stringify(f.stats)).not.toContain("secret fixture reason");
@@ -274,7 +274,7 @@ it("distinguishes invalid upstream events from transport disconnects", async () 
  const f = await fixture(ws => { ws.send("not JSON: secret"); return true; });
  const ws = await f.connect();
  await turn(ws,{model:"shared",input:[]});
- expect(f.stats.lastDisconnect).toEqual({at:expect.any(Number),cause:"invalid_event",stage:"streaming",routeKind:"oauth",connectionAgeMs:expect.any(Number),eventCount:1});
+ expect(f.stats.lastDisconnect).toMatchObject({at:expect.any(Number),cause:"invalid_event",stage:"streaming",routeKind:"oauth",connectionAgeMs:expect.any(Number),eventCount:1});
  expect(JSON.stringify(f.stats)).not.toContain("secret");
 });
 it("does not report an idle close after completion as an interrupted response", async () => {
@@ -704,7 +704,7 @@ it.each(["transport_error","buffer_limit"] as const)("records one %s diagnostic 
 it("records a send callback failure without replaying the create",async()=>{
  const f=await fixture(undefined,{sendFailure:true});const ws=await f.connect();
  await turn(ws,{model:"shared",input:[]});
- expect(f.stats.lastDisconnect).toMatchObject({cause:"send_error",stage:"awaiting_first_event"});
+ expect(f.stats.lastDisconnect).toMatchObject({cause:"send_error",stage:"awaiting_first_event",sendCompleted:false,transportErrorCode:"OTHER",requestBytes:expect.any(Number),inputItemCount:0});
  const peer=[...f.peers][0]!;
  expect(peer.readyState).not.toBe(WebSocket.OPEN);
  if(peer.readyState!==WebSocket.CLOSED)await once(peer,"close");
@@ -747,4 +747,106 @@ it.each([
 	const ws = await g.connect(headers);
 	expect((await turn(ws, {model: "api/fixture", input: []})).at(-1)?.type).toBe("response.completed");
 	expect(betas).toEqual([expected]);
+});
+
+
+it.each([
+	{ mode: "end", reused: false, prewarm: false },
+	{ mode: "reset", reused: false, prewarm: false },
+	{ mode: "end", reused: true, prewarm: true },
+])("records safe transport evidence for $mode before the first event (reused=$reused)", async ({ mode, reused, prewarm }) => {
+	const upstream = createServer();
+	const wss = new WebSocketServer({ server: upstream });
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	let messages = 0;
+	let requestBytes = 0;
+	wss.on("connection", (ws, req) => ws.on("message", raw => {
+		messages++;
+		if (reused && messages === 1) {
+			ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_fixture", output: [] } }));
+			return;
+		}
+		requestBytes = Buffer.byteLength(raw.toString());
+		if (mode === "reset") req.socket.resetAndDestroy();
+		else req.socket.end();
+	}));
+	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
+	const ws = await g.connect();
+	if (reused) await turn(ws, { model: "shared", input: [] });
+	const events = await turn(ws, {
+		model: "shared", input: [{ role: "user", content: "private-prompt 🔒" }],
+		...(prewarm ? { generate: false } : {}),
+		...(reused ? { previous_response_id: "resp_fixture" } : {}),
+	});
+	expect(events.at(-1)?.type).toBe("error");
+	expect(g.stats.lastDisconnect).toMatchObject({
+		cause: "close", closeCode: 1006, stage: "awaiting_first_event",
+		requestBytes, inputItemCount: 1, isPrewarm: prewarm, hasPreviousResponse: reused,
+		reusedConnection: reused, sendCompleted: true, compressionNegotiated: false,
+		tcpEndReceived: mode === "end", tcpCloseHadError: mode === "reset",
+	});
+	if (mode === "reset") expect(g.stats.lastDisconnect?.transportErrorCode).toBe("ECONNRESET");
+	else expect(g.stats.lastDisconnect).not.toHaveProperty("transportErrorCode");
+	expect(messages).toBe(reused ? 2 : 1);
+	expect(g.stats.upstreamRequests).toBe(messages);
+	expect(JSON.stringify(g.stats.lastDisconnect)).not.toMatch(/private-prompt|resp_fixture|acc_fixture/);
+});
+
+it.each(["EPIPE", "ETIMEDOUT", "private-code"])("allowlists transport error codes: %s", async code => {
+	const f = await fixture();
+	const ws = await f.connect();
+	const created = once(ws, "message");
+	const pending = turn(ws, { model: "stall", input: [] });
+	await created;
+	const peer = [...f.peers][0]!;
+	peer.emit("error", Object.assign(Error("private-error-message"), { code }));
+	await pending;
+	expect(f.stats.lastDisconnect).toMatchObject({ transportErrorCode: code === "private-code" ? "OTHER" : code });
+	expect(JSON.stringify(f.stats.lastDisconnect)).not.toMatch(/private-code|private-error-message/);
+	expect(f.stats.upstreamRequests).toBe(1);
+	peer.terminate();
+});
+
+it("negotiates bounded upstream compression and transmits the full request with fewer wire bytes", async () => {
+	const upstream = createServer();
+	const wss = new WebSocketServer({ server: upstream, perMessageDeflate: true });
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	const received: { extensions: string; wireBytes: number; body: Record<string, unknown> }[] = [];
+	wss.on("connection", (ws, req) => {
+		const before = req.socket.bytesRead;
+		ws.on("message", raw => {
+			received.push({ extensions: ws.extensions, wireBytes: req.socket.bytesRead - before, body: JSON.parse(raw.toString()) });
+			ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_compressed", output: [] } }));
+		});
+	});
+	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
+	const ws = await g.connect();
+	const input = [{ role: "user", content: [{ type: "input_text", text: "synthetic padding ".repeat(500) }] }];
+	expect((await turn(ws, { model: "shared", input })).at(-1)?.type).toBe("response.completed");
+	expect(received).toHaveLength(1);
+	expect(received[0]?.extensions).toBe("permessage-deflate");
+	expect(received[0]?.body.input).toEqual(input);
+	expect(received[0]?.wireBytes).toBeLessThan(Buffer.byteLength(JSON.stringify(input)) / 4);
+});
+
+it("enforces the decompressed upstream payload limit without replay or HTTP fallback", async () => {
+	let posts = 0, requests = 0, extensions = "";
+	const upstream = createServer((_req, res) => { posts++; res.writeHead(500); res.end(); });
+	const wss = new WebSocketServer({ server: upstream, perMessageDeflate: true });
+	cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+	wss.on("connection", ws => {
+		extensions = ws.extensions;
+		ws.on("error", () => {});
+		ws.on("message", () => {
+			requests++;
+			ws.send(JSON.stringify({ type: "response.output_text.delta", delta: "synthetic output ".repeat(4000) }));
+		});
+	});
+	const g = await customGateway({ upstream, outboundHeaders: { "chatgpt-account-id": "acc_fixture" } });
+	const ws = await g.connect();
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)?.type).toBe("error");
+	expect(extensions).toBe("permessage-deflate");
+	expect(requests).toBe(1);
+	expect(posts).toBe(0);
+	expect(g.stats.lastDisconnect).toMatchObject({ cause: "transport_error", stage: "awaiting_first_event", eventCount: 0 });
 });

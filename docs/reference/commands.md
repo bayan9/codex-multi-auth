@@ -992,6 +992,18 @@ connection age in milliseconds, and the number of valid events received for
 the interrupted request. Older records remain readable without these fields.
 `status --json` exposes it as `lastWebsocketDisconnect`. Local cancellation and
 request timeouts are excluded; raw upstream messages and payloads are not stored.
+New interruption records may also include outgoing request byte/item counts,
+prewarm/continuation/reuse flags, negotiated compression, local send completion,
+and observed TCP end/error flags. `sendCompleted` means the local WebSocket send
+callback succeeded; it does not prove upstream receipt or generation. Transport
+error codes are limited to `ECONNRESET`, `EPIPE`, `ETIMEDOUT`, or `OTHER`; error
+messages and request content are never retained.
+
+Upstream WebSockets offer `permessage-deflate` compression with modest zlib
+settings and requested dictionary resets. Servers that decline compression still
+use WebSockets, and decompressed messages retain the same size limits. Compression
+reduces request bytes; it does not establish or eliminate every cause of a `1006`
+disconnect.
 
 `rotation status` also reports the number of currently open WebSocket
 connections and idle connections reclaimed to admit new work. The router status

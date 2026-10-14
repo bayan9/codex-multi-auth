@@ -417,6 +417,26 @@ async function readAppBindBackup(path: string): Promise<AppBindBackup | null> {
 function readWebsocketDisconnect(value: unknown): WebSocketDisconnectDiagnostic | null {
  if (!isRecord(value) || typeof value.at !== "number" || !Number.isFinite(value.at) || value.at < 0) return null;
  const { cause, stage, closeCode, routeKind, connectionAgeMs, eventCount } = value;
+ const transport: Partial<WebSocketDisconnectDiagnostic> = {};
+ for (const key of ["requestBytes", "inputItemCount"] as const) {
+  const field = value[key];
+  if (field !== undefined) {
+   if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) return null;
+   transport[key] = field;
+  }
+ }
+ for (const key of ["isPrewarm", "hasPreviousResponse", "reusedConnection", "sendCompleted", "compressionNegotiated", "tcpEndReceived", "tcpCloseHadError"] as const) {
+  const field = value[key];
+  if (field !== undefined) {
+   if (typeof field !== "boolean") return null;
+   transport[key] = field;
+  }
+ }
+ const errorCode = value.transportErrorCode;
+ if (errorCode !== undefined) {
+  if (errorCode !== "ECONNRESET" && errorCode !== "EPIPE" && errorCode !== "ETIMEDOUT" && errorCode !== "OTHER") return null;
+  transport.transportErrorCode = errorCode;
+ }
  if (routeKind !== undefined && routeKind !== "oauth" && routeKind !== "api" && routeKind !== "zdr") return null;
  for (const count of [connectionAgeMs, eventCount]) if (count !== undefined && (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0)) return null;
  if (cause !== "close" && cause !== "transport_error" && cause !== "invalid_event" && cause !== "buffer_limit" && cause !== "send_error") return null;
@@ -425,7 +445,7 @@ function readWebsocketDisconnect(value: unknown): WebSocketDisconnectDiagnostic 
  return {at:value.at,cause,stage,...(typeof closeCode === "number" ? {closeCode} : {}),
  ...(routeKind === "oauth" || routeKind === "api" || routeKind === "zdr" ? {routeKind} : {}),
  ...(typeof connectionAgeMs === "number" ? {connectionAgeMs} : {}),
- ...(typeof eventCount === "number" ? {eventCount} : {})};
+ ...(typeof eventCount === "number" ? {eventCount} : {}), ...transport};
 }
 
 function readWebsocketCounter(value: unknown, maximum = Number.MAX_SAFE_INTEGER): number | null {
@@ -1918,7 +1938,9 @@ async function unbindCodexAppRuntimeRotationLocked(
 export function formatWebsocketDisconnect(value: unknown): string | null {
  const diagnostic = readWebsocketDisconnect(value);
  if (!diagnostic || diagnostic.at > 8.64e15) return null;
- return `Last WebSocket disconnect: ${new Date(diagnostic.at).toISOString()}; cause=${diagnostic.cause}; stage=${diagnostic.stage}${diagnostic.closeCode !== undefined ? `; closeCode=${diagnostic.closeCode}` : ""}${diagnostic.routeKind !== undefined ? `; route=${diagnostic.routeKind}` : ""}${diagnostic.connectionAgeMs !== undefined ? `; connectionAgeMs=${diagnostic.connectionAgeMs}` : ""}${diagnostic.eventCount !== undefined ? `; events=${diagnostic.eventCount}` : ""}`;
+ const transport = (["requestBytes", "inputItemCount", "isPrewarm", "hasPreviousResponse", "reusedConnection", "sendCompleted", "compressionNegotiated", "transportErrorCode", "tcpEndReceived", "tcpCloseHadError"] as const)
+  .filter(key => diagnostic[key] !== undefined).map(key => `; ${key}=${diagnostic[key]}`).join("");
+ return `Last WebSocket disconnect: ${new Date(diagnostic.at).toISOString()}; cause=${diagnostic.cause}; stage=${diagnostic.stage}${diagnostic.closeCode !== undefined ? `; closeCode=${diagnostic.closeCode}` : ""}${diagnostic.routeKind !== undefined ? `; route=${diagnostic.routeKind}` : ""}${diagnostic.connectionAgeMs !== undefined ? `; connectionAgeMs=${diagnostic.connectionAgeMs}` : ""}${diagnostic.eventCount !== undefined ? `; events=${diagnostic.eventCount}` : ""}${transport}`;
 }
 
 function formatWebsocketAdmission(status: AppBindRouterStatus | null): string[] {

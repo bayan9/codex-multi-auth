@@ -19,6 +19,17 @@ export interface WebSocketDisconnectDiagnostic {
  routeKind?: "oauth" | "api" | "zdr";
  connectionAgeMs?: number;
  eventCount?: number;
+ requestBytes?: number;
+ inputItemCount?: number;
+ isPrewarm?: boolean;
+ hasPreviousResponse?: boolean;
+ reusedConnection?: boolean;
+ /** Local send callback success, not evidence of upstream receipt. */
+ sendCompleted?: boolean;
+ compressionNegotiated?: boolean;
+ transportErrorCode?: "ECONNRESET" | "EPIPE" | "ETIMEDOUT" | "OTHER";
+ tcpEndReceived?: boolean;
+ tcpCloseHadError?: boolean;
 }
 /** Local admission evidence only; no headers, credentials, or conversation IDs. */
 export interface WebSocketUpgradeRejectionDiagnostic {
@@ -115,10 +126,22 @@ function bodyJson(body: RequestInit["body"]): Json {
 	return value;
 }
 
+type TransportErrorCode = NonNullable<WebSocketDisconnectDiagnostic["transportErrorCode"]>;
+interface SocketTransportEvidence {
+	tcpEndReceived: boolean;
+	tcpCloseHadError?: boolean;
+	transportErrorCode?: TransportErrorCode;
+}
+function transportErrorCode(error: unknown): TransportErrorCode {
+	const code = isRecord(error) ? error.code : undefined;
+	return code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT" ? code : "OTHER";
+}
+
 /** Per-client memory only; credentials never leave the existing routing boundary. */
 class SocketSession {
 	readonly channels = new Map<string, WebSocket>();
 	private readonly openedAt = new WeakMap<WebSocket, number>();
+	private readonly transportEvidence = new WeakMap<WebSocket, SocketTransportEvidence>();
 	readonly owners = new Map<string, WebSocket>();
 	readonly chains = new Map<string, Chain>();
 	/** Credentials whose WebSocket handshake was refused; they use HTTP for the session. */
@@ -207,6 +230,7 @@ class SocketSession {
 		else if (context.previousId && hasOrphanToolResult(body.input)) {
 			return Response.json(wireError("previous_response_not_found"), {status: 400});
 		}
+		const reusedConnection = !!socket;
 		let handshakeHeaders: Record<string, string> | undefined;
 		if (!socket) {
 			if (context.signal.aborted || this.closed) throw new ClientCancellationError();
@@ -232,7 +256,16 @@ class SocketSession {
 				followRedirects: false,
 				handshakeTimeout: 15000,
 				maxPayload: this.maxBytes,
-				perMessageDeflate: false,
+				// Offer native compression with modest zlib work and request dictionary
+				// resets. Message limits also apply after inflation; peers can decline
+				// the extension and continue using WebSockets.
+				perMessageDeflate: {
+					clientNoContextTakeover: true,
+					serverNoContextTakeover: true,
+					concurrencyLimit: 4,
+					threshold: 1024,
+					zlibDeflateOptions: { level: 3 },
+				},
 			});
 			const opening = socket;
 			const rejected = await new Promise<Response | undefined>(
@@ -250,6 +283,20 @@ class SocketSession {
 					init.signal?.addEventListener("abort", abort, { once: true });
 					opening.once("upgrade", (response) => {
 						handshakeHeaders = upstreamHeaders(response.headers);
+						// ws consumes TCP/TLS errors without re-emitting them. Observe
+						// the public upgrade socket before its close handler runs.
+						const tcp = response.socket;
+						const evidence: SocketTransportEvidence = { tcpEndReceived: false };
+						this.transportEvidence.set(opening, evidence);
+						const onEnd = () => { evidence.tcpEndReceived = true; };
+						const onError = (error: Error) => { evidence.transportErrorCode = transportErrorCode(error); };
+						tcp.once("end", onEnd);
+						tcp.once("error", onError);
+						tcp.once("close", (hadError) => {
+							evidence.tcpCloseHadError = hadError;
+							tcp.off("end", onEnd);
+							tcp.off("error", onError);
+						});
 					});
 					opening.once("open", () => {
 						cleanup();
@@ -288,11 +335,14 @@ class SocketSession {
 			this.channels.set(key, socket);
 		}
 		const active = socket;
+		const serializedBody = JSON.stringify(body);
 		return new Promise<Response>((resolve, reject) => {
 			let accepted = false,
 				finished = false;
 			let bodyCancelled = false;
 			let eventCount = 0;
+			let sendCompleted = false;
+			let requestTransportErrorCode: TransportErrorCode | undefined;
 			let streamController: ReadableStreamDefaultController<Uint8Array>;
 			const stream = new ReadableStream<Uint8Array>(
 				{
@@ -322,11 +372,23 @@ class SocketSession {
                 if (!cancelled) {
                     this.onDisconnect?.();
                     const at = Date.now();
+                    const transport = this.transportEvidence.get(active);
+                    const errorCode = transport?.transportErrorCode ?? requestTransportErrorCode;
                     this.stats.lastDisconnect = {
                         at, cause, routeKind: context.routeKind,
                         connectionAgeMs: Math.max(0, at - (this.openedAt.get(active) ?? at)), eventCount,
                         stage: accepted ? "streaming" : "awaiting_first_event",
                         ...(typeof closeCode === "number" ? {closeCode} : {}),
+                        requestBytes: Buffer.byteLength(serializedBody),
+                        ...(Array.isArray(body.input) ? { inputItemCount: body.input.length } : {}),
+                        isPrewarm: body.generate === false,
+                        hasPreviousResponse: typeof body.previous_response_id === "string" && body.previous_response_id.length > 0,
+                        reusedConnection, sendCompleted,
+                        compressionNegotiated: active.extensions.split(",").some(extension => extension.trim() === "permessage-deflate"),
+                        ...(transport ? { tcpEndReceived: transport.tcpEndReceived,
+                            ...(transport.tcpCloseHadError !== undefined ? { tcpCloseHadError: transport.tcpCloseHadError } : {}),
+                        } : {}),
+                        ...(errorCode ? { transportErrorCode: errorCode } : {}),
                     };
                 }
                 // Once create has been sent, a disconnect cannot prove generation
@@ -345,7 +407,10 @@ class SocketSession {
                 }
 			};
 			const onSocketClose = (code: number) => onClose(code);
-			const onError = () => onClose(undefined, "transport_error");
+			const onError = (error: Error) => {
+				requestTransportErrorCode = transportErrorCode(error);
+				onClose(undefined, "transport_error");
+			};
 			const abort = () => active.terminate();
 			const onMessage = (raw: WebSocket.RawData, isBinary: boolean) => {
 				let failureCause: WebSocketDisconnectDiagnostic["cause"] = "invalid_event";
@@ -417,11 +482,12 @@ class SocketSession {
 				return;
 			}
 			this.stats.upstreamRequests++;
-			active.send(JSON.stringify(body), (error) => {
+			active.send(serializedBody, (error) => {
 				if (error) {
+					requestTransportErrorCode = transportErrorCode(error);
 					onClose(undefined, "send_error");
 					active.terminate();
-				}
+				} else sendCompleted = true;
 			});
 		});
 	}
