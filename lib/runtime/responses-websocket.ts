@@ -20,16 +20,27 @@ export interface WebSocketDisconnectDiagnostic {
  connectionAgeMs?: number;
  eventCount?: number;
 }
+/** Local admission evidence only; no headers, credentials, or conversation IDs. */
+export interface WebSocketUpgradeRejectionDiagnostic {
+ at: number;
+ reason: "origin" | "capacity" | "repeated_disconnect";
+ status: number;
+ activeConnections: number;
+}
 interface WebSocketStats {
  connections: number;
+ activeConnections: number;
+ capacityReclaims: number;
  upstreamConnections: number;
  upstreamRequests: number;
  lastDisconnect?: WebSocketDisconnectDiagnostic;
+ lastUpgradeRejection?: WebSocketUpgradeRejectionDiagnostic;
 }
 const CONTEXT_HEADER = "x-local-responses-transport";
 const HTTP_FALLBACK_COOLDOWN_MS = 60_000;
 const MAX_HTTP_FALLBACK_SCOPES = 256;
 const HTTP_FALLBACK_FAILURE_THRESHOLD = 2;
+const MAX_CLIENT_SESSIONS = 64;
 const terminal = new Set([
 	"response.completed",
 	"response.failed",
@@ -420,12 +431,14 @@ class SocketSession {
 export class ResponsesWebSocketGateway {
 	readonly stats: WebSocketStats = {
 		connections: 0,
+		activeConnections: 0,
+		capacityReclaims: 0,
 		upstreamConnections: 0,
 		upstreamRequests: 0,
 	};
 	private readonly contexts = new Map<string, Context>();
 	private readonly scope = new AsyncLocalStorage<Context>();
-	private readonly sessions = new Set<SocketSession>();
+	private readonly sessions = new Map<SocketSession, { socket: WebSocket; canReclaim: () => boolean }>();
 	private readonly websocketFailures = new Map<string, { until: number; count: number }>();
 	private readonly wss: WebSocketServer;
 	private readonly maxBytes: number;
@@ -450,6 +463,24 @@ export class ResponsesWebSocketGateway {
 			noServer: true,
 			maxPayload: this.maxBytes,
 			perMessageDeflate: false,
+			// ws validates method/key/version/subprotocol before this synchronous gate.
+			// An invalid newcomer must never evict an existing usable connection.
+			verifyClient: ({ req }, done) => {
+				if (req.socket.destroyed || !req.socket.readable || !req.socket.writable) {
+					done(false, 503);
+					return;
+				}
+				if (this.sessions.size >= MAX_CLIENT_SESSIONS && !this.reclaimIdleSession()) {
+					// Capacity is not an authentication failure. Native Codex handles
+					// 426 immediately instead of retrying five rejected handshakes.
+					this.stats.lastUpgradeRejection = {
+						at: Date.now(), reason: "capacity", status: 426, activeConnections: this.sessions.size,
+					};
+					done(false, 426);
+					return;
+				}
+				done(true);
+			},
 		});
 	}
 	readonly fetch: typeof fetch = async (input, init) => {
@@ -486,6 +517,19 @@ export class ResponsesWebSocketGateway {
 		this.websocketFailures.delete(scope);
 		return false;
 	}
+	/** Release idle setup sockets only; active work and generated history stay pinned. */
+	private reclaimIdleSession(): boolean {
+		for (const [session, client] of this.sessions) {
+			if (!client.canReclaim()) continue;
+			this.sessions.delete(session);
+			this.stats.activeConnections = this.sessions.size;
+			this.stats.capacityReclaims++;
+			session.close();
+			client.socket.terminate();
+			return true;
+		}
+		return false;
+	}
 	handle(req: IncomingMessage, handler: () => Promise<void>): void {
 		const id = req.headers[CONTEXT_HEADER];
 		delete req.headers[CONTEXT_HEADER];
@@ -507,6 +551,11 @@ export class ResponsesWebSocketGateway {
 					`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
 				);
 			};
+			const rejectAdmission = (reason: WebSocketUpgradeRejectionDiagnostic["reason"], status: number) => {
+				if (socket.destroyed) return;
+				this.stats.lastUpgradeRejection = { at: Date.now(), reason, status, activeConnections: this.sessions.size };
+				reject(status);
+			};
 			void (async () => {
 				const credentials: Record<string, string> = {};
 				for (const name of ["authorization", "x-api-key"]) {
@@ -526,7 +575,7 @@ export class ResponsesWebSocketGateway {
 					return;
 				}
 				if (req.headers.origin) {
-					reject(403);
+					rejectAdmission("origin", 403);
 					return;
 				}
 				if (await this.options.upgrade?.(req, socket, head)) return;
@@ -541,16 +590,12 @@ export class ResponsesWebSocketGateway {
 					reject(404);
 					return;
 				}
-				if (req.headers.origin || this.sessions.size >= 64) {
-					reject(403);
-					return;
-				}
                 // Allow one fresh native WebSocket attempt after a disconnect.
                 // The failed create is never replayed here. Native Codex handles
                 // a 426 on its next connection by rebuilding the request over HTTP,
                 // without spending its remaining WebSocket retry budget.
                 if (this.needsHttpFallback(req)) {
-                    reject(426);
+                    rejectAdmission("repeated_disconnect", 426);
                     return;
                 }
                 if (socket.destroyed) return;
@@ -568,11 +613,16 @@ export class ResponsesWebSocketGateway {
 			() => this.rememberDisconnect(scope),
 			() => { if (scope) this.websocketFailures.delete(scope); },
 		);
-		this.sessions.add(session);
 		let queue = Promise.resolve(),
 			queued = 0,
 			queuedBytes = 0;
 		let generation = 0;
+		let hasGenerated = false;
+		this.sessions.set(session, {
+			socket: ws,
+			canReclaim: () => !hasGenerated && queued === 0 && !session.controller && !session.closed && ws.readyState === WebSocket.OPEN,
+		});
+		this.stats.activeConnections = this.sessions.size;
 		const send = (event: Json) => {
 			if (ws.readyState !== WebSocket.OPEN) return;
 			if (ws.bufferedAmount > this.maxBytes) {
@@ -585,6 +635,7 @@ export class ResponsesWebSocketGateway {
 		ws.once("close", () => {
 			session.close();
 			this.sessions.delete(session);
+			this.stats.activeConnections = this.sessions.size;
 		});
 		ws.on("message", (raw, isBinary) => {
 			let event: Json;
@@ -668,6 +719,7 @@ export class ResponsesWebSocketGateway {
 							return;
 						}
 						const id = randomUUID();
+						if (body.generate !== false) hasGenerated = true;
 						const controller = new AbortController();
                         session.controller = controller;
                         const clientBeta = req.headers["openai-beta"];
@@ -756,7 +808,9 @@ export class ResponsesWebSocketGateway {
 	}
 	close() {
 		for (const ws of this.wss.clients) ws.terminate();
-		for (const session of this.sessions) session.close();
+		for (const session of this.sessions.keys()) session.close();
+		this.sessions.clear();
+		this.stats.activeConnections = 0;
 		this.contexts.clear();
 		this.websocketFailures.clear();
 		this.wss.close();

@@ -1002,6 +1002,12 @@ and open-connection count. This distinguishes a rejected handshake from an
 upstream interruption without recording headers, credentials, or chat identifiers.
 The last rejection survives router restarts; connection counters reset.
 
+The router limits local WebSocket connections to 64. At that limit, a valid
+new connection can replace an idle connection used only for setup or warm-up.
+Queued work, active requests, and connections with generated response history
+are protected. If all connections are protected, native Codex recovers over HTTP
+immediately instead of retrying five rejected WebSocket handshakes.
+
 WebSocket forwarding preserves the client's beta flags without injecting the
 HTTP-only Responses beta. After an unexpected upstream disconnect, native Codex
 can retry on a fresh WebSocket. A second disconnect within 60 seconds makes the
