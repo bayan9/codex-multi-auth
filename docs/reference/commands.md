@@ -993,6 +993,13 @@ the interrupted request. Older records remain readable without these fields.
 `status --json` exposes it as `lastWebsocketDisconnect`. Local cancellation and
 request timeouts are excluded; raw upstream messages and payloads are not stored.
 
+WebSocket forwarding preserves the client's beta flags without injecting the
+HTTP-only Responses beta. After an unexpected upstream disconnect, the router
+asks the same authenticated conversation to use HTTP on its next connection
+for 60 seconds. Native Codex then falls back without exhausting its WebSocket
+retry budget. Other conversations remain eligible for WebSockets, and the
+router never replays a request whose generation outcome is uncertain.
+
 API model entries require explicit selection and never serve as automatic paid
 fallbacks; see [model route pools](../design/model-route-pools.md) for setup
 and refresh behavior. Credential-scoped access programs can be configured per
