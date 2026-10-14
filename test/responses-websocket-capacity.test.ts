@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import { afterEach, expect, it, vi } from "vitest";
 import { ResponsesWebSocketGateway } from "../lib/runtime/responses-websocket.js";
@@ -49,6 +49,35 @@ async function complete(ws: WebSocket, options: Record<string, unknown> = {}): P
 	const done = event(ws, "response.completed");
 	send(ws, "completed", options);
 	await done;
+}
+
+function rawUpgrade(baseUrl: string, headers: Record<string, string>, method = "GET") {
+	return new Promise<{ status: number; body: string }>((resolve, reject) => {
+		const request = httpRequest(`${baseUrl}/responses`, {
+			method,
+			headers: {
+				authorization: "Bearer capacity-fixture-local",
+				connection: "Upgrade",
+				upgrade: "websocket",
+				"sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+				"sec-websocket-version": "13",
+				...headers,
+			},
+		});
+		request.once("response", response => {
+			let body = "";
+			response.setEncoding("utf8");
+			response.on("data", chunk => { body += chunk; });
+			response.once("end", () => resolve({ status: response.statusCode ?? 0, body }));
+			response.once("error", reject);
+		});
+		request.once("upgrade", (_response, socket) => {
+			socket.destroy();
+			reject(Error("Malformed fixture handshake was unexpectedly accepted"));
+		});
+		request.once("error", reject);
+		request.end();
+	});
 }
 
 async function fixture(upgrade?: (req: IncomingMessage) => Promise<boolean>) {
@@ -327,6 +356,22 @@ it("checks credentials, Origin, and path before reclaiming capacity", async () =
 	expect((await g.connect({}, "/unknown-fixture")).status).toBe(404);
 	expect(clients.every(ws => ws.readyState === WebSocket.OPEN)).toBe(true);
 	expect(g.stats).toMatchObject({ activeConnections: 64, capacityReclaims: 0 });
+});
+
+it.each([
+	{ name: "key", headers: { "sec-websocket-key": "invalid-fixture-key" }, method: "GET", status: 400, message: "Missing or invalid Sec-WebSocket-Key header" },
+	{ name: "version", headers: { "sec-websocket-version": "12" }, method: "GET", status: 400, message: "Missing or invalid Sec-WebSocket-Version header" },
+	{ name: "subprotocol", headers: { "sec-websocket-protocol": "fixture, fixture" }, method: "GET", status: 400, message: "Invalid Sec-WebSocket-Protocol header" },
+	{ name: "method", headers: {}, method: "POST", status: 405, message: "Invalid HTTP method" },
+])("rejects malformed $name before evicting any authenticated idle client", async ({ headers, method, status, message }) => {
+	const g = await fixture();
+	const clients = await g.open(64);
+	const response = await rawUpgrade(g.baseUrl, headers, method);
+	expect(response).toEqual({ status, body: message });
+	expect(g.stats).toMatchObject({ connections: 64, activeConnections: 64, capacityReclaims: 0 });
+	expect(clients.every(ws => ws.readyState === WebSocket.OPEN)).toBe(true);
+	expect(g.upstreamRequests).toEqual([]);
+	expect(g.httpCreates()).toBe(0);
 });
 
 it("does not reclaim an idle sibling for a scope already requiring HTTP recovery", async () => {
