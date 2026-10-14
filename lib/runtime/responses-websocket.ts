@@ -43,11 +43,12 @@ type Context = { routeKind: "oauth" | "api" | "zdr"; signal: AbortSignal; sessio
 function fallbackScope(req: IncomingMessage): string | undefined {
 	// Native clients can share a session across threads. Prefer the conversation
 	// identity so a failed thread does not downgrade a healthy sibling.
-	const conversation = req.headers.conversation_id;
-	const session = req.headers.session_id;
-	const identity = typeof conversation === "string" && conversation.trim()
-		? conversation.trim()
-		: typeof session === "string" ? session.trim() : "";
+	// Current native clients send hyphenated names; retain older underscore
+	// aliases, with thread identity taking priority over a shared session.
+	const identity = ["thread-id", "conversation_id", "session-id", "session_id"]
+		.map(name => req.headers[name])
+		.find((value): value is string => typeof value === "string" && !!value.trim())
+		?.trim();
 	if (!identity || identity.length > 1024) return undefined;
 	const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
 	const apiKey = req.headers["x-api-key"];

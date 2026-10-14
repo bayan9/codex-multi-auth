@@ -152,11 +152,35 @@ it("normalizes bearer and API-key client authentication for the same session", a
 	expect((await g.connect({ "x-api-key": "fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" })).status).toBe(426);
 });
 
-it.each(["session_id", "conversation_id"])("supports a native scope containing only %s", async header => {
+it.each(["thread-id", "session-id", "session_id", "conversation_id"])("supports a native scope containing only %s", async header => {
 	const g = await fixture();
 	const headers = { authorization: "Bearer fixture-a", [header]: "fixture-scope" };
 	await disconnect(g, headers);
 	expect((await g.connect(headers)).status).toBe(426);
+});
+
+it("prefers native thread-id over conflicting legacy conversation and session aliases", async () => {
+	const g = await fixture();
+	const headers = { ...scope, "thread-id": "native-thread", "session-id": "native-session" };
+	await disconnect(g, headers);
+	expect((await g.connect({ ...headers, "thread-id": "sibling-thread" })).status).toBe(101);
+	expect((await g.connect({ ...headers, conversation_id: "different-legacy-thread", "session-id": "different-session", session_id: "different-legacy-session" })).status).toBe(426);
+});
+
+it("prefers a legacy conversation over shared session aliases when native thread-id is absent", async () => {
+	const g = await fixture();
+	const headers = { ...scope, "session-id": "native-session" };
+	await disconnect(g, headers);
+	expect((await g.connect({ ...headers, conversation_id: "sibling-thread" })).status).toBe(101);
+	expect((await g.connect({ ...headers, "session-id": "different-session" })).status).toBe(426);
+});
+
+it("prefers native session-id over conflicting legacy session_id when no thread is provided", async () => {
+	const g = await fixture();
+	const headers = { authorization: "Bearer fixture-a", "session-id": "native-session", session_id: "legacy-session" };
+	await disconnect(g, headers);
+	expect((await g.connect({ ...headers, "session-id": "other-native-session" })).status).toBe(101);
+	expect((await g.connect({ ...headers, session_id: "other-legacy-session" })).status).toBe(426);
 });
 
 it("does not use a global cooldown when the client has no stable scope", async () => {
