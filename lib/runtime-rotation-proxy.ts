@@ -1356,6 +1356,9 @@ export async function startRuntimeRotationProxy(
 			schedulingStrategy: state.schedulingStrategy,
  websocketConnections: websocketGateway.stats.connections,
  websocketUpstreamRequests: websocketGateway.stats.upstreamRequests,
+ websocketActiveConnections: websocketGateway.stats.activeConnections,
+ websocketCapacityReclaims: websocketGateway.stats.capacityReclaims,
+ lastWebsocketUpgradeRejection: websocketGateway.stats.lastUpgradeRejection,
  lastWebsocketDisconnect: websocketGateway.stats.lastDisconnect,
 			// Redact any email/token material that leaked into a raw upstream or
 			// refresh error string before exposing it to status/report consumers

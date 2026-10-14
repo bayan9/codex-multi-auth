@@ -993,6 +993,15 @@ the interrupted request. Older records remain readable without these fields.
 `status --json` exposes it as `lastWebsocketDisconnect`. Local cancellation and
 request timeouts are excluded; raw upstream messages and payloads are not stored.
 
+`rotation status` also reports the number of currently open WebSocket
+connections and idle connections reclaimed to admit new work. The router status
+JSON exposes these as `websocketActiveConnections` and
+`websocketCapacityReclaims`. Its `lastWebsocketUpgradeRejection` records only a
+timestamp, reason (`origin`, `capacity`, or `repeated_disconnect`), HTTP status,
+and open-connection count. This distinguishes a rejected handshake from an
+upstream interruption without recording headers, credentials, or chat identifiers.
+The last rejection survives router restarts; connection counters reset.
+
 WebSocket forwarding preserves the client's beta flags without injecting the
 HTTP-only Responses beta. After an unexpected upstream disconnect, native Codex
 can retry on a fresh WebSocket. A second disconnect within 60 seconds makes the

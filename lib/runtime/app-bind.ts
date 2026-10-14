@@ -1,4 +1,4 @@
-import type { WebSocketDisconnectDiagnostic } from "./responses-websocket.js";
+import type { WebSocketDisconnectDiagnostic, WebSocketUpgradeRejectionDiagnostic } from "./responses-websocket.js";
 import { withNativeBindingLock } from "./native-binding-lock.js";
 import { isRecord } from "../utils.js";
 import { hasNativeProviderConfig, rewriteNativeProviderConfig, restoreNativeProviderConfig } from "./native-provider-config.js";
@@ -89,6 +89,9 @@ export interface AppBindState {
 
 export interface AppBindRouterStatus {
 	lastWebsocketDisconnect?: WebSocketDisconnectDiagnostic | null;
+	websocketActiveConnections?: number | null;
+	websocketCapacityReclaims?: number | null;
+	lastWebsocketUpgradeRejection?: WebSocketUpgradeRejectionDiagnostic | null;
 	schedulingStrategy?: "hybrid" | "sequential";
 	state: string | null;
 	pid: number | null;
@@ -425,11 +428,30 @@ function readWebsocketDisconnect(value: unknown): WebSocketDisconnectDiagnostic 
  ...(typeof eventCount === "number" ? {eventCount} : {})};
 }
 
+function readWebsocketCounter(value: unknown, maximum = Number.MAX_SAFE_INTEGER): number | null {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= maximum
+		? value : null;
+}
+
+function readWebsocketUpgradeRejection(value: unknown): WebSocketUpgradeRejectionDiagnostic | null {
+	if (!isRecord(value)) return null;
+	const at = readWebsocketCounter(value.at, 8.64e15);
+	const activeConnections = readWebsocketCounter(value.activeConnections, 64);
+	const { reason, status } = value;
+	if (at === null || activeConnections === null) return null;
+	if (!((reason === "origin" && status === 403) ||
+		((reason === "capacity" || reason === "repeated_disconnect") && status === 426))) return null;
+	return { at, reason, status, activeConnections };
+}
+
 async function readRouterStatus(path: string): Promise<AppBindRouterStatus | null> {
 	const record = await readJsonFile(path);
 	if (!record) return null;
 	return {
 		lastWebsocketDisconnect: readWebsocketDisconnect(record.lastWebsocketDisconnect),
+		websocketActiveConnections: readWebsocketCounter(record.websocketActiveConnections, 64),
+		websocketCapacityReclaims: readWebsocketCounter(record.websocketCapacityReclaims),
+		lastWebsocketUpgradeRejection: readWebsocketUpgradeRejection(record.lastWebsocketUpgradeRejection),
 		schedulingStrategy: record.schedulingStrategy === "hybrid" || record.schedulingStrategy === "sequential"
 			? record.schedulingStrategy : undefined,
 		state: readString(record, "state"),
@@ -1899,6 +1921,20 @@ export function formatWebsocketDisconnect(value: unknown): string | null {
  return `Last WebSocket disconnect: ${new Date(diagnostic.at).toISOString()}; cause=${diagnostic.cause}; stage=${diagnostic.stage}${diagnostic.closeCode !== undefined ? `; closeCode=${diagnostic.closeCode}` : ""}${diagnostic.routeKind !== undefined ? `; route=${diagnostic.routeKind}` : ""}${diagnostic.connectionAgeMs !== undefined ? `; connectionAgeMs=${diagnostic.connectionAgeMs}` : ""}${diagnostic.eventCount !== undefined ? `; events=${diagnostic.eventCount}` : ""}`;
 }
 
+function formatWebsocketAdmission(status: AppBindRouterStatus | null): string[] {
+	const active = readWebsocketCounter(status?.websocketActiveConnections, 64);
+	const reclaimed = readWebsocketCounter(status?.websocketCapacityReclaims);
+	const counters = [
+		...(active !== null ? [`active=${active}`] : []),
+		...(reclaimed !== null ? [`idleReclaimed=${reclaimed}`] : []),
+	];
+	const rejection = readWebsocketUpgradeRejection(status?.lastWebsocketUpgradeRejection);
+	return [
+		...(counters.length ? [`WebSocket connections: ${counters.join("; ")}`] : []),
+		...(rejection ? [`Last WebSocket upgrade rejection: ${new Date(rejection.at).toISOString()}; reason=${rejection.reason}; status=${rejection.status}; active=${rejection.activeConnections}`] : []),
+	];
+}
+
 export function formatAppBindStatus(status: AppBindStatus): string {
 	if (status.unmanagedBind && !status.state) {
 		return [
@@ -1922,10 +1958,12 @@ export function formatAppBindStatus(status: AppBindStatus): string {
 		parts.push(`lastAccount=Account ${status.router.lastAccountIndex + 1}`);
 	}
 	const diagnostic = formatWebsocketDisconnect(status.router?.lastWebsocketDisconnect);
-	if (status.state.nativeOpenai) return [`Codex app bind: ${parts.join(", ")}, native OpenAI, live account catalogs`, ...(diagnostic ? [diagnostic] : [])].join("\n");
+	const admission = formatWebsocketAdmission(status.router);
+	if (status.state.nativeOpenai) return [`Codex app bind: ${parts.join(", ")}, native OpenAI, live account catalogs`, ...(diagnostic ? [diagnostic] : []), ...admission].join("\n");
 	return [
 		`Codex app bind: ${parts.join(", ")}`,
 		...(diagnostic ? [diagnostic] : []),
+		...admission,
 		[
 			"Note: Codex Desktop may hide history while the app bind selects the",
 			"codex-multi-auth-runtime-proxy provider; use `codex-multi-auth rotation",
