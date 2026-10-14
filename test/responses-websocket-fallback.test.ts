@@ -42,6 +42,10 @@ async function fixture() {
 			ws.send(JSON.stringify({ type: "codex.rate_limits" }));
 			ws.send(JSON.stringify({ type: "codex.response.metadata" }));
 		}
+		if (body.generate === false || body.model === "success") {
+			ws.send(JSON.stringify({ type: "response.completed", response: { id: "resp_success", output: [] } }));
+			return;
+		}
 		if (body.model !== "stall") ws.close(1011);
 	}));
 	const upstreamUrl = await listen(upstream);
@@ -102,16 +106,16 @@ async function fixture() {
 
 const scope = { authorization: "Bearer fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" };
 
-function request(ws: WebSocket, model = "disconnect"): Promise<void> {
+function request(ws: WebSocket, model = "disconnect", generate?: boolean): Promise<void> {
 	const done = new Promise<void>(resolve => {
 		const onMessage = (raw: WebSocket.RawData) => {
-			if (JSON.parse(raw.toString()).type !== "error") return;
+			if (!["error", "response.completed"].includes(JSON.parse(raw.toString()).type)) return;
 			ws.off("message", onMessage);
 			resolve();
 		};
 		ws.on("message", onMessage);
 	});
-	ws.send(JSON.stringify({ type: "response.create", model, input: [] }));
+	ws.send(JSON.stringify({ type: "response.create", model, input: [], ...(generate === undefined ? {} : { generate }) }));
 	return done;
 }
 
@@ -124,23 +128,28 @@ async function disconnect(g: Awaited<ReturnType<typeof fixture>>, headers = scop
 	await closed;
 }
 
-it.each(["before-first-event", "disconnect"])("requests immediate native HTTP fallback after %s without replay", async model => {
+async function repeatedDisconnect(g: Awaited<ReturnType<typeof fixture>>, headers = scope, model = "disconnect") {
+	await disconnect(g, headers, model);
+	await disconnect(g, headers, model);
+}
+
+it.each(["before-first-event", "disconnect"])("allows one fresh WebSocket retry before HTTP fallback after %s without replay", async model => {
 	const g = await fixture();
-	await disconnect(g, scope, model);
+	await repeatedDisconnect(g, scope, model);
 	expect((await g.connect(scope)).status).toBe(426);
-	expect(g.counts()).toEqual({ websocketCreates: 1, httpCreates: 0 });
+	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 0 });
 	const response = await fetch(`${g.baseUrl}/responses`, {
 		method: "POST", headers: { ...scope, "content-type": "application/json" },
 		body: JSON.stringify({ model: "fixture", input: [], stream: true }),
 	});
 	expect(response.status).toBe(200);
 	expect(await response.text()).toContain("response.completed");
-	expect(g.counts()).toEqual({ websocketCreates: 1, httpCreates: 1 });
+	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 1 });
 });
 
 it("isolates fallback by authenticated client and thread, including shared session IDs", async () => {
 	const g = await fixture();
-	await disconnect(g);
+	await repeatedDisconnect(g);
 	expect((await g.connect({ ...scope, conversation_id: "other-thread" })).status).toBe(101);
 	expect((await g.connect({ ...scope, authorization: "Bearer fixture-b" })).status).toBe(101);
 	expect((await g.connect(scope)).status).toBe(426);
@@ -148,21 +157,21 @@ it("isolates fallback by authenticated client and thread, including shared sessi
 
 it("normalizes bearer and API-key client authentication for the same session", async () => {
 	const g = await fixture();
-	await disconnect(g, { authorization: "bearer   fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" });
+	await repeatedDisconnect(g, { authorization: "bearer   fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" });
 	expect((await g.connect({ "x-api-key": "fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" })).status).toBe(426);
 });
 
 it.each(["thread-id", "session-id", "session_id", "conversation_id"])("supports a native scope containing only %s", async header => {
 	const g = await fixture();
 	const headers = { authorization: "Bearer fixture-a", [header]: "fixture-scope" };
-	await disconnect(g, headers);
+	await repeatedDisconnect(g, headers);
 	expect((await g.connect(headers)).status).toBe(426);
 });
 
 it("prefers native thread-id over conflicting legacy conversation and session aliases", async () => {
 	const g = await fixture();
 	const headers = { ...scope, "thread-id": "native-thread", "session-id": "native-session" };
-	await disconnect(g, headers);
+	await repeatedDisconnect(g, headers);
 	expect((await g.connect({ ...headers, "thread-id": "sibling-thread" })).status).toBe(101);
 	expect((await g.connect({ ...headers, conversation_id: "different-legacy-thread", "session-id": "different-session", session_id: "different-legacy-session" })).status).toBe(426);
 });
@@ -170,7 +179,7 @@ it("prefers native thread-id over conflicting legacy conversation and session al
 it("prefers a legacy conversation over shared session aliases when native thread-id is absent", async () => {
 	const g = await fixture();
 	const headers = { ...scope, "session-id": "native-session" };
-	await disconnect(g, headers);
+	await repeatedDisconnect(g, headers);
 	expect((await g.connect({ ...headers, conversation_id: "sibling-thread" })).status).toBe(101);
 	expect((await g.connect({ ...headers, "session-id": "different-session" })).status).toBe(426);
 });
@@ -178,7 +187,7 @@ it("prefers a legacy conversation over shared session aliases when native thread
 it("prefers native session-id over conflicting legacy session_id when no thread is provided", async () => {
 	const g = await fixture();
 	const headers = { authorization: "Bearer fixture-a", "session-id": "native-session", session_id: "legacy-session" };
-	await disconnect(g, headers);
+	await repeatedDisconnect(g, headers);
 	expect((await g.connect({ ...headers, "session-id": "other-native-session" })).status).toBe(101);
 	expect((await g.connect({ ...headers, session_id: "other-legacy-session" })).status).toBe(426);
 });
@@ -186,14 +195,14 @@ it("prefers native session-id over conflicting legacy session_id when no thread 
 it("does not use a global cooldown when the client has no stable scope", async () => {
 	const g = await fixture();
 	const headers = { authorization: "Bearer fixture-a" };
-	await disconnect(g, headers);
+	await repeatedDisconnect(g, headers);
 	expect((await g.connect(headers)).status).toBe(101);
 	expect((await g.connect(scope)).status).toBe(101);
 });
 
 it("checks authentication, origin, and path before applying fallback", async () => {
 	const g = await fixture();
-	await disconnect(g);
+	await repeatedDisconnect(g);
 	expect((await g.connect({ ...scope, authorization: "Bearer invalid" })).status).toBe(401);
 	expect((await g.connect({ ...scope, origin: "https://example.com" })).status).toBe(403);
 	expect((await g.connect(scope, "/unknown")).status).toBe(404);
@@ -203,7 +212,7 @@ it("checks authentication, origin, and path before applying fallback", async () 
 it("expires fallback after a short cooldown so a recovered transport can be retried", async () => {
 	const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
 	const g = await fixture();
-	await disconnect(g);
+	await repeatedDisconnect(g);
 	expect((await g.connect(scope)).status).toBe(426);
 	now.mockReturnValue(160_001);
 	expect((await g.connect(scope)).status).toBe(101);
@@ -212,28 +221,64 @@ it("expires fallback after a short cooldown so a recovered transport can be retr
 it("bounds the number of retained fallback scopes", async () => {
 	const g = await fixture();
 	for (let i = 0; i <= 256; i++) {
-		await disconnect(g, { ...scope, conversation_id: `fixture-thread-${i}` });
+		await repeatedDisconnect(g, { ...scope, conversation_id: `fixture-thread-${i}` });
 	}
 	expect((await g.connect({ ...scope, conversation_id: "fixture-thread-0" })).status).toBe(101);
 	expect((await g.connect({ ...scope, conversation_id: "fixture-thread-256" })).status).toBe(426);
-	expect(g.counts()).toEqual({ websocketCreates: 257, httpCreates: 0 });
+	expect(g.counts()).toEqual({ websocketCreates: 514, httpCreates: 0 });
 }, 15_000);
 
 it.each([401, 403, 429])("does not downgrade after an explicit upstream %s error", async status => {
 	const g = await fixture();
+	await disconnect(g);
 	await disconnect(g, scope, `rejected-${status}`);
 	expect((await g.connect(scope)).status).toBe(101);
 });
 
 it("does not downgrade after client cancellation", async () => {
 	const g = await fixture();
+	await disconnect(g);
+	const previousDisconnect = g.stats.lastDisconnect;
 	const { ws } = await g.connect(scope);
 	const firstEvent = once(ws, "message");
 	const done = request(ws, "stall");
 	await firstEvent;
 	ws.send(JSON.stringify({ type: "response.cancel" }));
 	await done;
-	expect(g.stats.lastDisconnect).toBeUndefined();
+	expect(g.stats.lastDisconnect).toBe(previousDisconnect);
 	expect((await g.connect(scope)).status).toBe(101);
-	expect(g.counts()).toEqual({ websocketCreates: 1, httpCreates: 0 });
+	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 0 });
+});
+
+it("keeps WebSockets after a successful fresh connection and resets failure history", async () => {
+	const g = await fixture();
+	await disconnect(g);
+	const { ws, status } = await g.connect(scope);
+	expect(status).toBe(101);
+	await request(ws, "success");
+	ws.terminate();
+	await disconnect(g);
+	expect((await g.connect(scope)).status).toBe(101);
+	expect(g.counts()).toEqual({ websocketCreates: 3, httpCreates: 0 });
+});
+
+it("does not let successful non-generating prewarm erase a repeated disconnect", async () => {
+	const g = await fixture();
+	await disconnect(g);
+	const { ws, status } = await g.connect(scope);
+	expect(status).toBe(101);
+	await request(ws, "prewarm", false);
+	await request(ws);
+	ws.terminate();
+	expect((await g.connect(scope)).status).toBe(426);
+	expect(g.counts()).toEqual({ websocketCreates: 3, httpCreates: 0 });
+});
+
+it("does not combine failures that are separated by the cooldown window", async () => {
+	const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
+	const g = await fixture();
+	await disconnect(g);
+	now.mockReturnValue(160_001);
+	await disconnect(g);
+	expect((await g.connect(scope)).status).toBe(101);
 });

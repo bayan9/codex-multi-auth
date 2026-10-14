@@ -29,6 +29,7 @@ interface WebSocketStats {
 const CONTEXT_HEADER = "x-local-responses-transport";
 const HTTP_FALLBACK_COOLDOWN_MS = 60_000;
 const MAX_HTTP_FALLBACK_SCOPES = 256;
+const HTTP_FALLBACK_FAILURE_THRESHOLD = 2;
 const terminal = new Set([
 	"response.completed",
 	"response.failed",
@@ -119,6 +120,7 @@ class SocketSession {
 		readonly stats: WebSocketStats,
 		private readonly httpFetch: typeof fetch = fetch,
 		private readonly onDisconnect?: () => void,
+		private readonly onComplete?: () => void,
 	) {}
 	close() {
 		this.closed = true;
@@ -381,6 +383,10 @@ class SocketSession {
 						}
 					}
 					if (terminal.has(event.type)) {
+						// A prewarm completion proves only connection setup, not that
+						// generation works. It must not erase a real disconnect history.
+						if (event.type === "response.completed" && body.generate !== false)
+							this.onComplete?.();
 						finished = true;
 						cleanup();
 						streamController.close();
@@ -420,7 +426,7 @@ export class ResponsesWebSocketGateway {
 	private readonly contexts = new Map<string, Context>();
 	private readonly scope = new AsyncLocalStorage<Context>();
 	private readonly sessions = new Set<SocketSession>();
-	private readonly httpFallbackUntil = new Map<string, number>();
+	private readonly websocketFailures = new Map<string, { until: number; count: number }>();
 	private readonly wss: WebSocketServer;
 	private readonly maxBytes: number;
 	/** Loopback hops must never go through an environment HTTP proxy (NODE_USE_ENV_PROXY). */
@@ -459,24 +465,25 @@ export class ResponsesWebSocketGateway {
 	private rememberDisconnect(scope: string | undefined): void {
 		if (!scope) return;
 		const now = Date.now();
-		for (const [key, until] of this.httpFallbackUntil) {
-			if (until <= now) this.httpFallbackUntil.delete(key);
+		for (const [key, failure] of this.websocketFailures) {
+			if (failure.until <= now) this.websocketFailures.delete(key);
 		}
-		this.httpFallbackUntil.delete(scope);
-		this.httpFallbackUntil.set(scope, now + HTTP_FALLBACK_COOLDOWN_MS);
-		while (this.httpFallbackUntil.size > MAX_HTTP_FALLBACK_SCOPES) {
-			const oldest = this.httpFallbackUntil.keys().next().value;
+		const count = Math.min((this.websocketFailures.get(scope)?.count ?? 0) + 1, HTTP_FALLBACK_FAILURE_THRESHOLD);
+		this.websocketFailures.delete(scope);
+		this.websocketFailures.set(scope, { until: now + HTTP_FALLBACK_COOLDOWN_MS, count });
+		while (this.websocketFailures.size > MAX_HTTP_FALLBACK_SCOPES) {
+			const oldest = this.websocketFailures.keys().next().value;
 			if (oldest === undefined) break;
-			this.httpFallbackUntil.delete(oldest);
+			this.websocketFailures.delete(oldest);
 		}
 	}
 	private needsHttpFallback(req: IncomingMessage): boolean {
 		const scope = fallbackScope(req);
 		if (!scope) return false;
-		const until = this.httpFallbackUntil.get(scope);
-		if (until === undefined) return false;
-		if (until > Date.now()) return true;
-		this.httpFallbackUntil.delete(scope);
+		const failure = this.websocketFailures.get(scope);
+		if (!failure) return false;
+		if (failure.until > Date.now()) return failure.count >= HTTP_FALLBACK_FAILURE_THRESHOLD;
+		this.websocketFailures.delete(scope);
 		return false;
 	}
 	handle(req: IncomingMessage, handler: () => Promise<void>): void {
@@ -538,6 +545,7 @@ export class ResponsesWebSocketGateway {
 					reject(403);
 					return;
 				}
+                // Allow one fresh native WebSocket attempt after a disconnect.
                 // The failed create is never replayed here. Native Codex handles
                 // a 426 on its next connection by rebuilding the request over HTTP,
                 // without spending its remaining WebSocket retry budget.
@@ -555,7 +563,11 @@ export class ResponsesWebSocketGateway {
 	private serve(ws: WebSocket, req: IncomingMessage, baseUrl: string): void {
 		this.stats.connections++;
 		const scope = fallbackScope(req);
-		const session = new SocketSession(this.maxBytes, this.stats, this.upstreamFetch, () => this.rememberDisconnect(scope));
+		const session = new SocketSession(
+			this.maxBytes, this.stats, this.upstreamFetch,
+			() => this.rememberDisconnect(scope),
+			() => { if (scope) this.websocketFailures.delete(scope); },
+		);
 		this.sessions.add(session);
 		let queue = Promise.resolve(),
 			queued = 0,
@@ -746,7 +758,7 @@ export class ResponsesWebSocketGateway {
 		for (const ws of this.wss.clients) ws.terminate();
 		for (const session of this.sessions) session.close();
 		this.contexts.clear();
-		this.httpFallbackUntil.clear();
+		this.websocketFailures.clear();
 		this.wss.close();
 		void this.loopback.close().catch(() => undefined);
 	}
