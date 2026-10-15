@@ -90,8 +90,18 @@ requests wait up to two seconds before responding. If no subscription catalog is
 ready by then, the router returns a temporary unavailable response rather than
 letting a cached API-only list replace the native catalog. Discovery continues
 in the background; a later request can return the subscription and API models
-together. Completed discovery with no eligible subscription models still permits
-an API-only catalog.
+together. Successfully completed discovery with no eligible subscription models
+still permits an API-only catalog. Failed discovery remains unknown and returns
+temporary unavailability instead of replacing subscription entries.
+
+### Concurrent Work On A Pinned Account
+
+A temporary network-error cooldown from one request no longer rejects unrelated
+requests on the same manually or explicitly pinned account. Each request keeps
+its bounded retry budget and backoff. Server-error and authentication cooldowns,
+quota limits, policy restrictions, and circuit admission still apply; unpinned
+pools continue skipping accounts in a network cooldown. This avoids immediate
+503 responses during concurrent main-session and subagent work.
 
 ### WebSocket Compatibility And Recovery
 

@@ -2156,8 +2156,7 @@ async function handleRequestInner(
 				const scopes = discovery.flatMap(workspaceModelScopes);
 				const enabledKeys = scopes.filter(scope => scope.enabled).map(scope => scope.id);
 				const routableKeys = scopes.filter(scope => scope.routable).map(scope => scope.id);
-				let oauthDiscoverySettled = false;
-				const oauthRefresh = modelCatalog.list(enabledKeys).finally(() => { oauthDiscoverySettled = true; });
+				const oauthRefresh = modelCatalog.list(enabledKeys);
 				// Explicit check waits for all workspaces; picker discovery runs API and OAuth in parallel.
 				if (forceCatalogRefresh) await oauthRefresh;
 				const apiRuntime = getApiModelRuntime(state);
@@ -2246,12 +2245,17 @@ async function handleRequestInner(
 									// Do not let an incomplete API-only success replace the
 									// native client's complete cached catalog for minutes.
 									const missingSubscription = routableKeys.length > 0 && !modelCatalog.cachedList(routableKeys).length;
-									resolve(missingSubscription && !oauthDiscoverySettled ? [] : pickerSnapshot());
+									resolve(missingSubscription && routableKeys.some(key => modelCatalog.snapshot(key).error) ? [] : pickerSnapshot());
 								}, 2000);
 							})]);
 						} finally { if (timer) clearTimeout(timer); }
 					}
 				}
+                // A completed failed fetch is still unknown, not a successful
+                // empty catalog. Never replace native subscription entries with
+                // an API-only success while a routable catalog is unknown.
+                if (!forceCatalogRefresh && !models.some(model => !/^(api|zdr)\//.test(model.slug)) &&
+                    routableKeys.some(key => modelCatalog.snapshot(key).error)) models = [];
 				res.setHeader("etag", setCatalogEtag(state, models));
 
 				writeJson(
@@ -2564,12 +2568,13 @@ async function handleRequestInner(
 					stickyBoostByAccount: rotationStickyBoost,
 					pidOffsetEnabled: state.pidOffsetEnabled,
 					schedulingStrategy: state.schedulingStrategy,
-					// Only on a RETRY pass. The first pass still honors a cooldown
-					// another request left on the pin, so an already-cooling pinned
-					// account 503s immediately as before; from the second pass on,
-					// this request's own retry budget outranks the cooldown it just
-					// created for itself.
-					allowPinnedCooldown: isPinned && transientAttempts > 0,
+					// A shared network cooldown is not evidence that the pinned
+					// credentials cannot serve independent concurrent work. Let each
+					// new request try; its own retries remain bounded and backed off.
+					// Other initial cooldowns still block, as do quota/auth/policy
+					// checks and the circuit admission immediately after selection.
+					allowPinnedCooldown: isPinned && (transientAttempts > 0 ||
+						(typeof pinnedIndex === "number" && accountManager.getAccountByIndex(pinnedIndex)?.cooldownReason === "network-error")),
 				});
     return result;
    };
