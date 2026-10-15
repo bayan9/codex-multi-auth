@@ -142,18 +142,23 @@ async function repeatedDisconnect(g: Awaited<ReturnType<typeof fixture>>, header
 	await disconnect(g, headers, model);
 }
 
-it.each(["before-first-event", "disconnect"])("allows one fresh WebSocket retry before HTTP fallback after %s without replay", async model => {
-	const g = await fixture();
-	await repeatedDisconnect(g, scope, model);
-	expect((await g.connect(scope)).status).toBe(426);
-	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 0 });
-	const response = await fetch(`${g.baseUrl}/responses`, {
-		method: "POST", headers: { ...scope, "content-type": "application/json" },
-		body: JSON.stringify({ model: "fixture", input: [], stream: true }),
-	});
-	expect(response.status).toBe(200);
-	expect(await response.text()).toContain("response.completed");
-	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 1 });
+async function expectHttpRecovery(g: Awaited<ReturnType<typeof fixture>>, headers: Record<string, string> = scope) {
+ const before = g.counts();
+ const {ws, status} = await g.connect(headers);
+ expect(status).toBe(101);
+ await request(ws, "success");
+ expect(g.counts()).toEqual({websocketCreates: before.websocketCreates, httpCreates: before.httpCreates + 1});
+ const closed = once(ws, "close");
+ ws.terminate();
+ await closed;
+}
+
+it.each(["before-first-event", "disconnect"])("allows one fresh WebSocket retry before HTTP recovery after %s without replay", async model => {
+ const g = await fixture();
+ await repeatedDisconnect(g, scope, model);
+ expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 0 });
+ await expectHttpRecovery(g);
+ expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 1 });
 });
 
 async function startControlled(g: Awaited<ReturnType<typeof fixture>>, model: string) {
@@ -175,8 +180,8 @@ it("combines disconnects from concurrent sockets in the same scope without repla
 		startControlled(g, "controlled-second"),
 	]);
 	await Promise.all([first("disconnect"), second("disconnect")]);
-	expect((await g.connect(scope)).status).toBe(426);
-	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 0 });
+	await expectHttpRecovery(g, scope);
+	expect(g.counts()).toEqual({ websocketCreates: 2, httpCreates: 1 });
 });
 
 it.each(["failure-first", "completion-first"])("orders shared failure recovery by concurrent socket events: %s", async order => {
@@ -188,7 +193,7 @@ it.each(["failure-first", "completion-first"])("orders shared failure recovery b
 	]);
 	if (order === "failure-first") {
 		await failed("disconnect");
-		expect((await g.connect(scope)).status).toBe(426);
+		await expectHttpRecovery(g, scope);
 		await completed("complete");
 		expect((await g.connect(scope)).status).toBe(101);
 		// The completion also clears the failure recorded by the other socket.
@@ -201,8 +206,8 @@ it.each(["failure-first", "completion-first"])("orders shared failure recovery b
 		expect((await g.connect(scope)).status).toBe(101);
 	}
 	await disconnect(g);
-	expect((await g.connect(scope)).status).toBe(426);
-	expect(g.counts()).toEqual({ websocketCreates: order === "failure-first" ? 5 : 4, httpCreates: 0 });
+	await expectHttpRecovery(g, scope);
+	expect(g.counts()).toEqual({ websocketCreates: order === "failure-first" ? 5 : 4, httpCreates: order === "failure-first" ? 2 : 1 });
 });
 
 it("isolates fallback by authenticated client and thread, including shared session IDs", async () => {
@@ -210,20 +215,20 @@ it("isolates fallback by authenticated client and thread, including shared sessi
 	await repeatedDisconnect(g);
 	expect((await g.connect({ ...scope, conversation_id: "other-thread" })).status).toBe(101);
 	expect((await g.connect({ ...scope, authorization: "Bearer fixture-b" })).status).toBe(101);
-	expect((await g.connect(scope)).status).toBe(426);
+	await expectHttpRecovery(g, scope);
 });
 
 it("normalizes bearer and API-key client authentication for the same session", async () => {
 	const g = await fixture();
 	await repeatedDisconnect(g, { authorization: "bearer   fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" });
-	expect((await g.connect({ "x-api-key": "fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" })).status).toBe(426);
+	await expectHttpRecovery(g, { "x-api-key": "fixture-a", session_id: "fixture-session", conversation_id: "fixture-thread" });
 });
 
 it.each(["thread-id", "session-id", "session_id", "conversation_id"])("supports a native scope containing only %s", async header => {
 	const g = await fixture();
 	const headers = { authorization: "Bearer fixture-a", [header]: "fixture-scope" };
 	await repeatedDisconnect(g, headers);
-	expect((await g.connect(headers)).status).toBe(426);
+	await expectHttpRecovery(g, headers);
 });
 
 it("prefers native thread-id over conflicting legacy conversation and session aliases", async () => {
@@ -231,7 +236,7 @@ it("prefers native thread-id over conflicting legacy conversation and session al
 	const headers = { ...scope, "thread-id": "native-thread", "session-id": "native-session" };
 	await repeatedDisconnect(g, headers);
 	expect((await g.connect({ ...headers, "thread-id": "sibling-thread" })).status).toBe(101);
-	expect((await g.connect({ ...headers, conversation_id: "different-legacy-thread", "session-id": "different-session", session_id: "different-legacy-session" })).status).toBe(426);
+	await expectHttpRecovery(g, { ...headers, conversation_id: "different-legacy-thread", "session-id": "different-session", session_id: "different-legacy-session" });
 });
 
 it("prefers a legacy conversation over shared session aliases when native thread-id is absent", async () => {
@@ -239,7 +244,7 @@ it("prefers a legacy conversation over shared session aliases when native thread
 	const headers = { ...scope, "session-id": "native-session" };
 	await repeatedDisconnect(g, headers);
 	expect((await g.connect({ ...headers, conversation_id: "sibling-thread" })).status).toBe(101);
-	expect((await g.connect({ ...headers, "session-id": "different-session" })).status).toBe(426);
+	await expectHttpRecovery(g, { ...headers, "session-id": "different-session" });
 });
 
 it("prefers native session-id over conflicting legacy session_id when no thread is provided", async () => {
@@ -247,7 +252,7 @@ it("prefers native session-id over conflicting legacy session_id when no thread 
 	const headers = { authorization: "Bearer fixture-a", "session-id": "native-session", session_id: "legacy-session" };
 	await repeatedDisconnect(g, headers);
 	expect((await g.connect({ ...headers, "session-id": "other-native-session" })).status).toBe(101);
-	expect((await g.connect({ ...headers, session_id: "other-legacy-session" })).status).toBe(426);
+	await expectHttpRecovery(g, { ...headers, session_id: "other-legacy-session" });
 });
 
 it("does not use a global cooldown when the client has no stable scope", async () => {
@@ -264,14 +269,14 @@ it("checks authentication, origin, and path before applying fallback", async () 
 	expect((await g.connect({ ...scope, authorization: "Bearer invalid" })).status).toBe(401);
 	expect((await g.connect({ ...scope, origin: "https://example.com" })).status).toBe(403);
 	expect((await g.connect(scope, "/unknown")).status).toBe(404);
-	expect((await g.connect(scope)).status).toBe(426);
+	await expectHttpRecovery(g, scope);
 });
 
 it("expires fallback after a short cooldown so a recovered transport can be retried", async () => {
 	const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
 	const g = await fixture();
 	await repeatedDisconnect(g);
-	expect((await g.connect(scope)).status).toBe(426);
+	await expectHttpRecovery(g, scope);
 	now.mockReturnValue(160_001);
 	expect((await g.connect(scope)).status).toBe(101);
 });
@@ -282,8 +287,8 @@ it("bounds the number of retained fallback scopes", async () => {
 		await repeatedDisconnect(g, { ...scope, conversation_id: `fixture-thread-${i}` });
 	}
 	expect((await g.connect({ ...scope, conversation_id: "fixture-thread-0" })).status).toBe(101);
-	expect((await g.connect({ ...scope, conversation_id: "fixture-thread-256" })).status).toBe(426);
-	expect(g.counts()).toEqual({ websocketCreates: 514, httpCreates: 0 });
+	await expectHttpRecovery(g, { ...scope, conversation_id: "fixture-thread-256" });
+	expect(g.counts()).toEqual({ websocketCreates: 514, httpCreates: 1 });
 }, 15_000);
 
 it.each([401, 403, 429])("does not downgrade after an explicit upstream %s error", async status => {
@@ -328,8 +333,8 @@ it("does not let successful non-generating prewarm erase a repeated disconnect",
 	await request(ws, "prewarm", false);
 	await request(ws);
 	ws.terminate();
-	expect((await g.connect(scope)).status).toBe(426);
-	expect(g.counts()).toEqual({ websocketCreates: 3, httpCreates: 0 });
+	await expectHttpRecovery(g, scope);
+	expect(g.counts()).toEqual({ websocketCreates: 3, httpCreates: 1 });
 });
 
 it("does not combine failures that are separated by the cooldown window", async () => {
@@ -339,4 +344,24 @@ it("does not combine failures that are separated by the cooldown window", async 
 	now.mockReturnValue(160_001);
 	await disconnect(g);
 	expect((await g.connect(scope)).status).toBe(101);
+});
+
+it("keeps the native socket open during HTTP recovery and automatically returns upstream to WebSockets", async () => {
+ const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
+ const g = await fixture();
+ await repeatedDisconnect(g);
+ expect(g.counts()).toEqual({websocketCreates: 2, httpCreates: 0});
+ const recovered = await g.connect(scope);
+ expect(recovered.status).toBe(101);
+ await request(recovered.ws, "prewarm", false);
+ expect(g.counts()).toEqual({websocketCreates: 2, httpCreates: 0});
+ await request(recovered.ws, "success");
+ expect(g.counts()).toEqual({websocketCreates: 2, httpCreates: 1});
+ // HTTP success must not prematurely clear the upstream recovery cooldown.
+ await request(recovered.ws, "success");
+ expect(g.counts()).toEqual({websocketCreates: 2, httpCreates: 2});
+ now.mockReturnValue(160_001);
+ await request(recovered.ws, "success");
+ expect(g.counts()).toEqual({websocketCreates: 3, httpCreates: 2});
+ expect(recovered.ws.readyState).toBe(WebSocket.OPEN);
 });

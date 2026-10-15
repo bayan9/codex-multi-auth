@@ -83,6 +83,16 @@ subscription priming, or request-program setting is migrated.
 WebSocket disconnect details. This helps investigate interruptions without
 replaying a generation that may already have started upstream.
 
+### Subscription Models In The Picker
+
+When subscription discovery is still loading for a new client version, picker
+requests wait up to two seconds before responding. If no subscription catalog is
+ready by then, the router returns a temporary unavailable response rather than
+letting a cached API-only list replace the native catalog. Discovery continues
+in the background; a later request can return the subscription and API models
+together. Completed discovery with no eligible subscription models still permits
+an API-only catalog.
+
 ### WebSocket Compatibility And Recovery
 
 WebSocket forwarding preserves the native client's beta flags without adding the
@@ -92,11 +102,24 @@ that decline compression still use WebSockets; decompressed messages retain the
 same size limits.
 
 After an unexpected upstream disconnect, native Codex can retry on one fresh
-WebSocket. A second disconnect within 60 seconds makes the router request HTTP
-recovery on that authenticated conversation's next connection. A completed
-generation clears the failure count; a warm-up does not. Codex may keep HTTP
-fallback for the rest of that session. The router never automatically replays a
-request whose generation outcome is uncertain.
+WebSocket. A second disconnect within 60 seconds routes newly submitted creates
+through HTTP for a 60-second cooldown while keeping the local WebSocket open.
+After the cooldown, the next create tries upstream WebSockets automatically.
+A completed upstream WebSocket generation clears the failure count; HTTP recovery
+and warm-up completions do not. Refused API/ZDR WebSocket handshakes also get a
+60-second cooldown before another attempt. The router never automatically replays
+a request whose generation outcome is uncertain.
+
+Creates larger than 8 MiB of serialized UTF-8, after connection-local delta
+reduction, use HTTP for that request while retaining the local WebSocket. This
+conservative guard is below observed upstream size rejections, not a statement of
+the upstream's exact limit. A later request that fits can use WebSockets again.
+During HTTP recovery, non-generating prewarm completes locally without inference;
+its input remains available for the next create through the local response chain.
+
+A native Codex session that already selected HTTP before this recovery behavior
+was installed can keep that choice until the native session is reinitialized.
+The router cannot reset the native client's transport flag.
 
 At the 64-connection limit, a valid new connection can reclaim an idle setup or
 warm-up connection. Queued work, active requests and generated response history

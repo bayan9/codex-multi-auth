@@ -2156,7 +2156,8 @@ async function handleRequestInner(
 				const scopes = discovery.flatMap(workspaceModelScopes);
 				const enabledKeys = scopes.filter(scope => scope.enabled).map(scope => scope.id);
 				const routableKeys = scopes.filter(scope => scope.routable).map(scope => scope.id);
-				const oauthRefresh = modelCatalog.list(enabledKeys);
+				let oauthDiscoverySettled = false;
+				const oauthRefresh = modelCatalog.list(enabledKeys).finally(() => { oauthDiscoverySettled = true; });
 				// Explicit check waits for all workspaces; picker discovery runs API and OAuth in parallel.
 				if (forceCatalogRefresh) await oauthRefresh;
 				const apiRuntime = getApiModelRuntime(state);
@@ -2232,12 +2233,21 @@ async function handleRequestInner(
 				if (forceCatalogRefresh) models = await refresh;
 				else {
 					const cached = pickerSnapshot();
-					if (cached.length) models = cached;
+					// An API cache can be warm while this client-version's OAuth
+					// catalog is still cold. Give subscription discovery the same
+					// bounded opportunity as an entirely empty picker.
+					const oauthReady = routableKeys.length === 0 || modelCatalog.cachedList(routableKeys).length > 0;
+					if (cached.length && oauthReady) models = cached;
 					else {
 						let timer: ReturnType<typeof setTimeout> | undefined;
 						try {
 							models = await Promise.race([refresh, new Promise<RouteModel[]>(resolve => {
-								timer = setTimeout(() => resolve(pickerSnapshot()), 2000);
+								timer = setTimeout(() => {
+									// Do not let an incomplete API-only success replace the
+									// native client's complete cached catalog for minutes.
+									const missingSubscription = routableKeys.length > 0 && !modelCatalog.cachedList(routableKeys).length;
+									resolve(missingSubscription && !oauthDiscoverySettled ? [] : pickerSnapshot());
+								}, 2000);
 							})]);
 						} finally { if (timer) clearTimeout(timer); }
 					}

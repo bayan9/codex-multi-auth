@@ -1022,13 +1022,21 @@ immediately instead of retrying five rejected WebSocket handshakes.
 
 WebSocket forwarding preserves the client's beta flags without injecting the
 HTTP-only Responses beta. After an unexpected upstream disconnect, native Codex
-can retry on a fresh WebSocket. A second disconnect within 60 seconds makes the
-router ask that authenticated conversation to use HTTP on its next connection,
-without exhausting all five retries. A completed generation clears the failure
-count; a warm-up does not. Other conversations remain eligible for WebSockets,
-and the router never replays a request whose generation outcome is uncertain.
-Codex may retain HTTP fallback for the rest of its current session even after
-the router's temporary fallback hint expires.
+can retry on a fresh WebSocket. After a second disconnect within 60 seconds,
+newly submitted creates use HTTP upstream during a 60-second cooldown while the
+local WebSocket stays open. The next create after expiry tries upstream WebSockets
+automatically. Successful WebSocket generation clears the failure count; HTTP
+recovery and warm-up do not. API/ZDR handshake refusals use the same cooldown.
+Other conversations remain eligible for WebSockets, and the router never replays
+a request whose generation outcome is uncertain.
+
+An upstream create larger than 8 MiB of serialized UTF-8 after delta reduction
+uses HTTP for that request, retaining the local WebSocket. This is a conservative
+local guard, not the upstream's documented limit. Subsequent requests can use
+WebSockets when they fit. Non-generating prewarm during HTTP recovery completes
+locally without inference. At capacity, recovery can still reject the native
+upgrade; an already-fallen-back native session can retain HTTP until it is
+reinitialized because the router cannot reset native transport state.
 
 API model entries require explicit selection and never serve as automatic paid
 fallbacks; see [model route pools](../design/model-route-pools.md) for setup

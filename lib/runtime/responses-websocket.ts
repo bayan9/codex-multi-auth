@@ -52,6 +52,9 @@ const HTTP_FALLBACK_COOLDOWN_MS = 60_000;
 const MAX_HTTP_FALLBACK_SCOPES = 256;
 const HTTP_FALLBACK_FAILURE_THRESHOLD = 2;
 const MAX_CLIENT_SESSIONS = 64;
+// Conservative request ceiling below observed upstream 1009 rejections. This
+// is a local routing guard, not a claim about the upstream's undocumented cap.
+const MAX_UPSTREAM_WEBSOCKET_REQUEST_BYTES = 8 * 1024 * 1024;
 const terminal = new Set([
 	"response.completed",
 	"response.failed",
@@ -144,8 +147,8 @@ class SocketSession {
 	private readonly transportEvidence = new WeakMap<WebSocket, SocketTransportEvidence>();
 	readonly owners = new Map<string, WebSocket>();
 	readonly chains = new Map<string, Chain>();
-	/** Credentials whose WebSocket handshake was refused; they use HTTP for the session. */
-	private readonly httpOnly = new Set<string>();
+	/** Temporary handshake backoff, bounded by the session channel limit. */
+	private readonly httpOnly = new Map<string, number>();
 	bytes = 0;
 	controller: AbortController | undefined;
 	closed = false;
@@ -155,6 +158,7 @@ class SocketSession {
 		private readonly httpFetch: typeof fetch = fetch,
 		private readonly onDisconnect?: () => void,
 		private readonly onComplete?: () => void,
+		private readonly needsHttpRecovery: () => boolean = () => false,
 	) {}
 	close() {
 		this.closed = true;
@@ -162,6 +166,7 @@ class SocketSession {
 		for (const socket of this.channels.values()) socket.terminate();
 		this.channels.clear();
 		this.owners.clear();
+		this.httpOnly.clear();
 		this.chains.clear();
 		this.bytes = 0;
 	}
@@ -181,6 +186,20 @@ class SocketSession {
 			this.chains.delete(first);
 			this.owners.delete(first);
 		}
+	}
+	private httpRecovery(input: string | URL | Request, init: RequestInit, body: Json): Promise<Response> {
+		// generate=false is a WebSocket-only prewarm control. Never turn a
+		// transport warmup into a generating HTTP request. The local chain is
+		// remembered by serve(), so the next create can reconstruct its input.
+		if (body.generate === false) {
+			return Promise.resolve(new Response(`data: ${JSON.stringify({
+				type: "response.completed",
+				response: { id: `resp_local_prewarm_${randomUUID()}`, object: "response", status: "completed", output: [] },
+			})}\n\n`, { headers: { "content-type": "text/event-stream" } }));
+		}
+		// This is a newly submitted create. Never retry a create already sent
+		// over a WebSocket; its generation outcome can be ambiguous.
+		return this.httpFetch(input, init);
 	}
 	async fetch(
 		input: string | URL | Request,
@@ -204,11 +223,14 @@ class SocketSession {
 			.update("\0")
 			.update(headers.get("chatgpt-account-id") ?? "")
 			.digest("hex");
-		// API/ZDR credentials are not ChatGPT workspaces: when their WebSocket
-		// handshake is refused, the turn (and the session) uses plain HTTP.
 		const apiCredential = !headers.has("chatgpt-account-id");
-		if (apiCredential && this.httpOnly.has(key)) return this.httpFetch(input, init);
 		const body = bodyJson(init.body);
+		for (const [credential, until] of this.httpOnly) {
+			if (until <= Date.now()) this.httpOnly.delete(credential);
+		}
+		if (this.needsHttpRecovery() || (apiCredential && this.httpOnly.has(key))) {
+			return this.httpRecovery(input, init, body);
+		}
 		delete body.stream;
 		delete body.background;
 		body.store = false;
@@ -229,6 +251,12 @@ class SocketSession {
 		}
 		else if (context.previousId && hasOrphanToolResult(body.input)) {
 			return Response.json(wireError("previous_response_not_found"), {status: 400});
+		}
+		const serializedBody = JSON.stringify(body);
+		// Measure the actual UTF-8 create after connection-local delta reduction.
+		// HTTP receives the original reconstructed request, never a WS-only delta.
+		if (Buffer.byteLength(serializedBody) > MAX_UPSTREAM_WEBSOCKET_REQUEST_BYTES) {
+			return this.httpRecovery(input, init, body);
 		}
 		const reusedConnection = !!socket;
 		let handshakeHeaders: Record<string, string> | undefined;
@@ -328,14 +356,17 @@ class SocketSession {
 			);
 			if (rejected) {
 				if (!apiCredential) return rejected;
-				this.httpOnly.add(key);
-				return this.httpFetch(input, init);
+				if (this.httpOnly.size >= 16) {
+					const oldest = this.httpOnly.keys().next().value;
+					if (oldest) this.httpOnly.delete(oldest);
+				}
+				this.httpOnly.set(key, Date.now() + HTTP_FALLBACK_COOLDOWN_MS);
+				return this.httpRecovery(input, init, body);
 			}
 			this.openedAt.set(socket, Date.now());
 			this.channels.set(key, socket);
 		}
 		const active = socket;
-		const serializedBody = JSON.stringify(body);
 		return new Promise<Response>((resolve, reject) => {
 			let accepted = false,
 				finished = false;
@@ -656,11 +687,10 @@ export class ResponsesWebSocketGateway {
 					reject(404);
 					return;
 				}
-                // Allow one fresh native WebSocket attempt after a disconnect.
-                // The failed create is never replayed here. Native Codex handles
-                // a 426 on its next connection by rebuilding the request over HTTP,
-                // without spending its remaining WebSocket retry budget.
-                if (this.needsHttpFallback(req)) {
+                // Keep native transport on WebSocket during temporary upstream
+                // HTTP recovery. At capacity, preserve admission behavior rather
+                // than evicting another session just to serve a recovery scope.
+                if (this.needsHttpFallback(req) && this.sessions.size >= MAX_CLIENT_SESSIONS) {
                     rejectAdmission("repeated_disconnect", 426);
                     return;
                 }
@@ -678,6 +708,7 @@ export class ResponsesWebSocketGateway {
 			this.maxBytes, this.stats, this.upstreamFetch,
 			() => this.rememberDisconnect(scope),
 			() => { if (scope) this.websocketFailures.delete(scope); },
+			() => this.needsHttpFallback(req),
 		);
 		let queue = Promise.resolve(),
 			queued = 0,

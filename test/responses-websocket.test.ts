@@ -439,13 +439,14 @@ async function customGateway(options: {
 	upstream: Server;
 	auth?: (req: IncomingMessage) => number | null;
 	outboundHeaders?: Record<string, string>;
+	maxPayloadBytes?: number;
 }) {
 	const upstreamUrl = await listen(options.upstream);
 	cleanups.push(async () => {
 		options.upstream.closeAllConnections();
 		await new Promise<void>((r) => options.upstream.close(() => r()));
 	});
-	const gateway = new ResponsesWebSocketGateway(fetch, { maxPayloadBytes: 16384 });
+	const gateway = new ResponsesWebSocketGateway(fetch, { maxPayloadBytes: options.maxPayloadBytes ?? 16384 });
 	const responses: Response[] = [];
 	const server = createServer((req, res) => {
 		gateway.handle(req, async () => {
@@ -849,4 +850,91 @@ it("enforces the decompressed upstream payload limit without replay or HTTP fall
 	expect(requests).toBe(1);
 	expect(posts).toBe(0);
 	expect(g.stats.lastDisconnect).toMatchObject({ cause: "transport_error", stage: "awaiting_first_event", eventCount: 0 });
+});
+
+
+it("routes oversized UTF-8 creates over HTTP without downgrading the client socket or generating prewarm", async () => {
+ const posts: string[] = [];
+ const upstream = createServer(async (req, res) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  posts.push(Buffer.concat(chunks).toString());
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  res.end(`data: ${JSON.stringify({type: "response.completed", response: {id: "resp_http_large", output: []}})}\n\n`);
+ });
+ const wss = new WebSocketServer({server: upstream});
+ cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+ const creates: Record<string, unknown>[] = [];
+ wss.on("connection", ws => ws.on("message", raw => {
+  creates.push(JSON.parse(raw.toString()));
+  ws.send(JSON.stringify({type: "response.completed", response: {id: "resp_small", output: []}}));
+ }));
+ const g = await customGateway({upstream, maxPayloadBytes: 12 * 1024 * 1024, outboundHeaders: {"chatgpt-account-id": "fixture-workspace"}});
+ const ws = await g.connect();
+ const input = [{role: "user", content: "é".repeat(4 * 1024 * 1024)}];
+ expect((await turn(ws, {model: "fixture", input, generate: false})).at(-1)).toMatchObject({type: "response.completed"});
+ expect(posts).toHaveLength(0);
+ expect(creates).toHaveLength(0);
+ expect((await turn(ws, {model: "fixture", input})).at(-1)).toMatchObject({type: "response.completed"});
+ expect(posts).toHaveLength(1);
+ expect(JSON.parse(posts[0]!)).toMatchObject({input, stream: true});
+ expect(creates).toHaveLength(0);
+ expect((await turn(ws, {model: "fixture", input: []})).at(-1)).toMatchObject({type: "response.completed"});
+ expect(creates).toHaveLength(1);
+ expect(posts).toHaveLength(1);
+ expect(ws.readyState).toBe(WebSocket.OPEN);
+});
+
+
+it("retries API WebSocket support after a temporary handshake rejection", async () => {
+ const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
+ let upgrades = 0;
+ let posts = 0;
+ const upstream = rejectingUpstream(404, {}, () => { posts++; });
+ upstream.on("upgrade", () => { upgrades++; });
+ const g = await customGateway({upstream});
+ const ws = await g.connect();
+ await turn(ws, {model: "api/fixture", input: []});
+ await turn(ws, {model: "api/fixture", input: []});
+ expect(upgrades).toBe(1);
+ now.mockReturnValue(160_001);
+ await turn(ws, {model: "api/fixture", input: []});
+ expect(upgrades).toBe(2);
+ expect(posts).toBe(3);
+});
+
+
+it("restores WebSockets with complete tool history after HTTP recovery without replaying failed creates", async () => {
+ const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
+ const posts: Record<string, unknown>[] = [];
+ const creates: Record<string, unknown>[] = [];
+ const call = {type: "function_call", call_id: "call_recovery", name: "fixture", arguments: "{}"};
+ const upstream = createServer(async (req, res) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  posts.push(JSON.parse(Buffer.concat(chunks).toString()));
+  res.writeHead(200, {"content-type": "text/event-stream"});
+  res.end(`data: ${JSON.stringify({type: "response.completed", response: {id: "resp_recovery", output: [call]}})}\n\n`);
+ });
+ const wss = new WebSocketServer({server: upstream});
+ cleanups.push(async () => { for (const ws of wss.clients) ws.terminate(); wss.close(); });
+ wss.on("connection", ws => ws.on("message", raw => {
+  creates.push(JSON.parse(raw.toString()));
+  if (creates.length <= 2) ws.close(1011);
+  else ws.send(JSON.stringify({type: "response.completed", response: {id: "resp_restored", output: []}}));
+ }));
+ const g = await customGateway({upstream, outboundHeaders: {"chatgpt-account-id": "fixture-workspace"}});
+ const ws = await g.connect({authorization: "Bearer fixture-local", "thread-id": "fixture-recovery"});
+ for (let i = 0; i < 2; i++) expect((await turn(ws, {model: "fixture", input: []})).at(-1)?.type).toBe("error");
+ expect(posts).toHaveLength(0);
+ const input = [{role: "user", content: "fixture input"}];
+ expect((await turn(ws, {model: "fixture", input})).at(-1)?.type).toBe("response.completed");
+ expect(creates).toHaveLength(2);
+ now.mockReturnValue(160_001);
+ const result = {type: "function_call_output", call_id: "call_recovery", output: "done"};
+ expect((await turn(ws, {model: "fixture", previous_response_id: "resp_recovery", input: [result]})).at(-1)?.type).toBe("response.completed");
+ expect(posts).toHaveLength(1);
+ expect(creates).toHaveLength(3);
+ expect(creates[2]).toMatchObject({input: [...input, call, result]});
+ expect(creates[2]).not.toHaveProperty("previous_response_id");
 });

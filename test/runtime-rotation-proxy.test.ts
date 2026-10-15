@@ -6533,3 +6533,49 @@ describe("Luna Reserve fallback", () => {
 	});
 
 });
+
+it("waits for cold subscription discovery even when API models are already cached", async () => {
+ const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+ let release!: () => void;
+ const gate = new Promise<void>(resolve => { release = resolve; });
+ let discoveryStarted!: () => void;
+ const started = new Promise<void>(resolve => { discoveryStarted = resolve; });
+ const proxy = await startProxy({accountManager: manager, fetchImpl: async input => {
+  const url = new URL(String(input));
+  if (url.hostname === "api.openai.com") return Response.json({data: [{id: "fixture-api"}]});
+  if (url.searchParams.get("client_version") === "2.0") { discoveryStarted(); await gate; }
+  return Response.json({models: [{slug: "fixture-subscription"}]});
+ }, options: {nativeOpenai: true, readApiRoutes: async () => [{id: "fixture", label: "Fixture", kind: "zdr", apiKey: "fixture-key", enabled: true, priority: 0, visibleModels: ["fixture-api"]}]}});
+ await (await getModels(proxy, "/models?client_version=1.0&refresh_capabilities=1")).text();
+ let returned = false;
+ const pending = getModels(proxy, "/models?client_version=2.0").then(r => { returned = true; return r; });
+ await started;
+ try {
+  // Give loopback I/O time to flush a premature API-only response.
+  await new Promise<void>(resolve => setTimeout(resolve, 50));
+  expect(returned).toBe(false);
+ } finally { release(); }
+ const response = await pending;
+ expect((await response.json()).models.map((m: {slug: string}) => m.slug)).toEqual(["fixture-subscription", "zdr/fixture-api"]);
+});
+
+
+it("does not publish an API-only picker cache when cold subscription discovery exceeds the deadline", async () => {
+ const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+ let release!: () => void;
+ const gate = new Promise<void>(resolve => { release = resolve; });
+ const proxy = await startProxy({accountManager: manager, fetchImpl: async input => {
+  const url = new URL(String(input));
+  if (url.hostname === "api.openai.com") return Response.json({data: [{id: "fixture-api"}]});
+  if (url.searchParams.get("client_version") === "2.0") await gate;
+  return Response.json({models: [{slug: "fixture-subscription"}]});
+ }, options: {nativeOpenai: true, readApiRoutes: async () => [{id: "fixture", label: "Fixture", kind: "zdr", apiKey: "fixture-key", enabled: true, priority: 0, visibleModels: ["fixture-api"]}]}});
+ await (await getModels(proxy, "/models?client_version=1.0&refresh_capabilities=1")).text();
+ try {
+  const cold = await getModels(proxy, "/models?client_version=2.0");
+  expect(cold.status).toBe(503);
+  expect(await cold.json()).toMatchObject({error: {code: "account_catalog_unavailable"}});
+ } finally { release(); }
+ const ready = await getModels(proxy, "/models?client_version=2.0");
+ expect((await ready.json()).models.map((m: {slug: string}) => m.slug)).toEqual(["fixture-subscription", "zdr/fixture-api"]);
+});
