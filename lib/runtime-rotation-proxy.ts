@@ -2245,7 +2245,7 @@ async function handleRequestInner(
 									// Do not let an incomplete API-only success replace the
 									// native client's complete cached catalog for minutes.
 									const missingSubscription = routableKeys.length > 0 && !modelCatalog.cachedList(routableKeys).length;
-									resolve(missingSubscription && routableKeys.some(key => modelCatalog.snapshot(key).error) ? [] : pickerSnapshot());
+									resolve(missingSubscription && routableKeys.some(key => !modelCatalog.hasUsablePickerSnapshot(key)) ? [] : pickerSnapshot());
 								}, 2000);
 							})]);
 						} finally { if (timer) clearTimeout(timer); }
@@ -2255,7 +2255,7 @@ async function handleRequestInner(
                 // empty catalog. Never replace native subscription entries with
                 // an API-only success while a routable catalog is unknown.
                 if (!forceCatalogRefresh && !models.some(model => !/^(api|zdr)\//.test(model.slug)) &&
-                    routableKeys.some(key => modelCatalog.snapshot(key).error)) models = [];
+                    routableKeys.some(key => !modelCatalog.hasUsablePickerSnapshot(key))) models = [];
 				res.setHeader("etag", setCatalogEtag(state, models));
 
 				writeJson(

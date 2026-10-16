@@ -147,8 +147,6 @@ class SocketSession {
 	private readonly transportEvidence = new WeakMap<WebSocket, SocketTransportEvidence>();
 	readonly owners = new Map<string, WebSocket>();
 	readonly chains = new Map<string, Chain>();
-	/** Temporary handshake backoff, bounded by the session channel limit. */
-	private readonly httpOnly = new Map<string, number>();
 	bytes = 0;
 	controller: AbortController | undefined;
 	closed = false;
@@ -159,6 +157,7 @@ class SocketSession {
 		private readonly onDisconnect?: () => void,
 		private readonly onComplete?: () => void,
 		private readonly needsHttpRecovery: () => boolean = () => false,
+		private readonly httpOnly: Map<string, number> = new Map(),
 	) {}
 	close() {
 		this.closed = true;
@@ -166,7 +165,6 @@ class SocketSession {
 		for (const socket of this.channels.values()) socket.terminate();
 		this.channels.clear();
 		this.owners.clear();
-		this.httpOnly.clear();
 		this.chains.clear();
 		this.bytes = 0;
 	}
@@ -537,6 +535,8 @@ export class ResponsesWebSocketGateway {
 	private readonly contexts = new Map<string, Context>();
 	private readonly scope = new AsyncLocalStorage<Context>();
 	private readonly sessions = new Map<SocketSession, { socket: WebSocket; canReclaim: () => boolean }>();
+	/** Credential-hashed, bounded API handshake backoff survives local reconnects. */
+	private readonly apiHandshakeBackoff = new Map<string, number>();
 	private readonly websocketFailures = new Map<string, { until: number; count: number }>();
 	private readonly wss: WebSocketServer;
 	private readonly maxBytes: number;
@@ -710,6 +710,7 @@ export class ResponsesWebSocketGateway {
 			() => this.rememberDisconnect(scope),
 			() => { if (scope) this.websocketFailures.delete(scope); },
 			() => this.needsHttpFallback(req),
+			this.apiHandshakeBackoff,
 		);
 		let queue = Promise.resolve(),
 			queued = 0,
@@ -911,6 +912,7 @@ export class ResponsesWebSocketGateway {
 		this.stats.activeConnections = 0;
 		this.contexts.clear();
 		this.websocketFailures.clear();
+		this.apiHandshakeBackoff.clear();
 		this.wss.close();
 		void this.loopback.close().catch(() => undefined);
 	}

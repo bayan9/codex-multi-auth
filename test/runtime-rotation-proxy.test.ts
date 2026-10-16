@@ -6686,3 +6686,37 @@ it.each([429, 503, 200])("does not confuse failed subscription discovery with a 
  if (status === 200) expect((await response.json()).models.map((m: {slug: string}) => m.slug)).toEqual(["zdr/fixture-api"]);
  else expect(await response.json()).toMatchObject({error: {code: "account_catalog_unavailable"}});
 });
+
+it("does not publish an API-only picker cache when stale subscription refresh exceeds the deadline", async () => {
+ let now = Date.now(); let slow = false;
+ const manager = new AccountManager(undefined, createStorage(Date.now(), 1));
+ let release!: () => void;
+ const gate = new Promise<void>(resolve => { release = resolve; });
+ const proxy = await startProxy({accountManager: manager, fetchImpl: async input => {
+  const url = new URL(String(input));
+  if (url.hostname === "api.openai.com") return Response.json({data: [{id: "fixture-api"}]});
+  if (slow) await gate;
+  return Response.json({models: [{slug: "fixture-subscription"}]});
+ }, options: {nativeOpenai: true, now: () => now, readApiRoutes: async () => [{id: "fixture", label: "Fixture", kind: "zdr", apiKey: "fixture-key", enabled: true, priority: 0, visibleModels: ["fixture-api"]}]}});
+ await (await getModels(proxy, "/models?client_version=1.0&refresh_capabilities=1")).text();
+ now += 16 * 60_000; slow = true;
+ vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+ const fakeSetTimeout = globalThis.setTimeout;
+ let deadlineScheduled!: () => void;
+ const waiting = new Promise<void>(resolve => { deadlineScheduled = resolve; });
+ const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback, delay, ...args) => {
+  const timer = fakeSetTimeout(callback, delay, ...args);
+  if (delay === 2000) deadlineScheduled();
+  return timer;
+ }) as typeof setTimeout);
+ try {
+  const pending = getModels(proxy, "/models?client_version=1.0");
+  await waiting;
+  await vi.advanceTimersByTimeAsync(2000);
+  const cold = await pending;
+  expect(cold.status).toBe(503);
+  expect(await cold.json()).toMatchObject({error: {code: "account_catalog_unavailable"}});
+ } finally { release(); timerSpy.mockRestore(); vi.useRealTimers(); }
+ const ready = await getModels(proxy, "/models?client_version=1.0");
+ expect((await ready.json()).models.map((m: {slug: string}) => m.slug)).toEqual(["fixture-subscription", "zdr/fixture-api"]);
+});

@@ -938,3 +938,26 @@ it("restores WebSockets with complete tool history after HTTP recovery without r
  expect(creates[2]).toMatchObject({input: [...input, call, result]});
  expect(creates[2]).not.toHaveProperty("previous_response_id");
 });
+
+it("keeps API handshake backoff across local reconnects and isolates credentials", async () => {
+ const now = vi.spyOn(Date, "now").mockReturnValue(100_000);
+ let upgrades = 0;
+ let posts = 0;
+ const upstream = rejectingUpstream(404, {}, () => { posts++; });
+ upstream.on("upgrade", () => { upgrades++; });
+ const outboundHeaders = {authorization: "Bearer fixture-first"};
+ const g = await customGateway({upstream, outboundHeaders});
+ const ws = await g.connect();
+ await turn(ws, {model: "api/fixture", input: []});
+ const closed = once(ws, "close"); ws.close(); await closed;
+ const replacement = await g.connect();
+ await turn(replacement, {model: "api/fixture", input: []});
+ expect(upgrades).toBe(1);
+ now.mockReturnValue(160_001);
+ await turn(replacement, {model: "api/fixture", input: []});
+ expect(upgrades).toBe(2);
+ expect(posts).toBe(3);
+ outboundHeaders.authorization = "Bearer fixture-second";
+ await turn(replacement, {model: "api/fixture", input: []});
+ expect(upgrades).toBe(3);
+});
