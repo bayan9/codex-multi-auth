@@ -116,6 +116,11 @@ async function fixture(upgrade?: (req: IncomingMessage) => Promise<boolean>) {
 		try {
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(Buffer.from(chunk));
+			if (JSON.parse(Buffer.concat(chunks).toString()).model === "rejected") {
+				res.writeHead(403, { "content-type": "application/json" });
+				res.end(JSON.stringify({ error: { code: "unknown_model" } }));
+				return;
+			}
 			const response = await gateway.fetch(`${upstreamUrl}/responses`, {
 				method: "POST",
 				headers: {
@@ -394,4 +399,24 @@ it("does not reclaim an idle sibling for a scope already requiring HTTP recovery
 		activeConnections: 64, capacityReclaims: 0,
 		lastUpgradeRejection: { reason: "repeated_disconnect", status: 426, activeConnections: 64 },
 	});
+});
+
+it("reclaims rejected creates without evicting retained generation history", async () => {
+	const g = await fixture();
+	const clients = await g.open(64);
+	await complete(clients[0]);
+	for (const client of clients) {
+		const rejected = event(client, "error");
+		send(client, "rejected");
+		expect((await rejected).status).toBe(403);
+	}
+	const closed = once(clients[1], "close");
+	const newcomer = await g.connect();
+	expect(newcomer.status).toBe(101);
+	await closed;
+	expect(clients[0].readyState).toBe(WebSocket.OPEN);
+	await complete(clients[0], { previous_response_id: "resp_completed" });
+	await complete(newcomer.ws);
+	expect(g.stats.capacityReclaims).toBe(1);
+	expect(g.httpCreates()).toBe(0);
 });

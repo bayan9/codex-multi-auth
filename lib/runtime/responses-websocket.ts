@@ -172,7 +172,7 @@ class SocketSession {
 	}
 	remember(id: string, body: Json, output: unknown[], pool: string) {
 		const bytes = Buffer.byteLength(JSON.stringify({ body, output }));
-		if (bytes > this.maxBytes) return;
+		if (bytes > this.maxBytes) return false;
 		const old = this.chains.get(id);
 		if (old) this.bytes -= old.bytes;
 		this.chains.delete(id);
@@ -186,6 +186,7 @@ class SocketSession {
 			this.chains.delete(first);
 			this.owners.delete(first);
 		}
+		return true;
 	}
 	private httpRecovery(input: string | URL | Request, init: RequestInit, body: Json): Promise<Response> {
 		// generate=false is a WebSocket-only prewarm control. Never turn a
@@ -714,10 +715,11 @@ export class ResponsesWebSocketGateway {
 			queued = 0,
 			queuedBytes = 0;
 		let generation = 0;
-		let hasGenerated = false;
+		// Pending work is protected by queued/controller; rejected creates retain no history.
+		let hasGeneratedHistory = false;
 		this.sessions.set(session, {
 			socket: ws,
-			canReclaim: () => !hasGenerated && queued === 0 && !session.controller && !session.closed && ws.readyState === WebSocket.OPEN,
+			canReclaim: () => !hasGeneratedHistory && queued === 0 && !session.controller && !session.closed && ws.readyState === WebSocket.OPEN,
 		});
 		this.stats.activeConnections = this.sessions.size;
 		const send = (event: Json) => {
@@ -816,7 +818,6 @@ export class ResponsesWebSocketGateway {
 							return;
 						}
 						const id = randomUUID();
-						if (body.generate !== false) hasGenerated = true;
 						const controller = new AbortController();
                         session.controller = controller;
                         const clientBeta = req.headers["openai-beta"];
@@ -877,12 +878,12 @@ export class ResponsesWebSocketGateway {
 										typeof parsed.response.id === "string"
 									) {
 										const output = outputHistory.finish(parsed.response.output);
-										if (output) session.remember(
+										if (output && session.remember(
 											parsed.response.id,
 											body,
 											output,
 											pool,
-										);
+										) && body.generate !== false) hasGeneratedHistory = true;
 									}
 									send(parsed);
 								}
