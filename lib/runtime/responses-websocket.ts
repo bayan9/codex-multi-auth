@@ -1,3 +1,4 @@
+import { MAX_API_ROUTES } from "../api-route-store.js";
 import { OPENAI_HEADER_VALUES } from "../constants.js";
 import { ClientCancellationError } from "../request/client-cancellation.js";
 import type { Duplex } from "node:stream";
@@ -355,7 +356,7 @@ class SocketSession {
 			);
 			if (rejected) {
 				if (!apiCredential) return rejected;
-				if (this.httpOnly.size >= 16) {
+				if (!this.httpOnly.has(key) && this.httpOnly.size >= MAX_API_ROUTES) {
 					const oldest = this.httpOnly.keys().next().value;
 					if (oldest) this.httpOnly.delete(oldest);
 				}

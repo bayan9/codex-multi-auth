@@ -2235,7 +2235,8 @@ async function handleRequestInner(
 					// An API cache can be warm while this client-version's OAuth
 					// catalog is still cold. Give subscription discovery the same
 					// bounded opportunity as an entirely empty picker.
-					const oauthReady = routableKeys.length === 0 || modelCatalog.cachedList(routableKeys).length > 0;
+					const oauthReady = modelCatalog.cachedList(routableKeys).length > 0 ||
+                        routableKeys.every(key => modelCatalog.hasUsablePickerSnapshot(key));
 					if (cached.length && oauthReady) models = cached;
 					else {
 						let timer: ReturnType<typeof setTimeout> | undefined;

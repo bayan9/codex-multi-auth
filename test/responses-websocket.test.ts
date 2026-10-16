@@ -961,3 +961,25 @@ it("keeps API handshake backoff across local reconnects and isolates credentials
  await turn(replacement, {model: "api/fixture", input: []});
  expect(upgrades).toBe(3);
 });
+
+it("retains API handshake backoff for all 100 supported route credentials", async () => {
+ vi.spyOn(Date, "now").mockReturnValue(100_000);
+ let upgrades = 0;
+ const upstream = rejectingUpstream(404, {});
+ upstream.on("upgrade", () => { upgrades++; });
+ const outboundHeaders = {authorization: "Bearer fixture-0"};
+ const g = await customGateway({upstream, outboundHeaders});
+ const ws = await g.connect();
+ for (let i = 0; i < 100; i++) {
+  outboundHeaders.authorization = `Bearer fixture-${i}`;
+  await turn(ws, {model: "api/fixture", input: []});
+ }
+ expect(upgrades).toBe(100);
+ const closed = once(ws, "close"); ws.close(); await closed;
+ const replacement = await g.connect();
+ for (let i = 0; i < 100; i++) {
+  outboundHeaders.authorization = `Bearer fixture-${i}`;
+  await turn(replacement, {model: "api/fixture", input: []});
+ }
+ expect(upgrades).toBe(100);
+});

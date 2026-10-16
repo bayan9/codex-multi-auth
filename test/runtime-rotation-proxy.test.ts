@@ -1,3 +1,4 @@
+import * as modelInventory from "../lib/runtime/model-discovery-status.js";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
@@ -6719,4 +6720,29 @@ it("does not publish an API-only picker cache when stale subscription refresh ex
  } finally { release(); timerSpy.mockRestore(); vi.useRealTimers(); }
  const ready = await getModels(proxy, "/models?client_version=1.0");
  expect((await ready.json()).models.map((m: {slug: string}) => m.slug)).toEqual(["fixture-subscription", "zdr/fixture-api"]);
+});
+
+it("returns a cached API picker immediately after successful empty subscription discovery", async () => {
+ const proxy = await startProxy({accountManager: new AccountManager(undefined, createStorage(Date.now(), 1)), fetchImpl: async input => {
+  return new URL(String(input)).hostname === "api.openai.com"
+   ? Response.json({data: [{id: "fixture-api"}]}) : Response.json({models: []});
+ }, options: {nativeOpenai: true, readApiRoutes: async () => [{id: "fixture", label: "Fixture", kind: "zdr", apiKey: "fixture-key", enabled: true, priority: 0, visibleModels: ["fixture-api"]}]}});
+ await (await getModels(proxy, "/models?client_version=1.0&refresh_capabilities=1")).text();
+ let release!: () => void;
+ const gate = new Promise<void>(resolve => { release = resolve; });
+ const saveSpy = vi.spyOn(modelInventory, "saveModelInventory").mockImplementation(async () => { await gate; });
+ let deadlineScheduled!: () => void;
+ const waiting = new Promise<"waiting">(resolve => { deadlineScheduled = () => resolve("waiting"); });
+ const realTimeout = globalThis.setTimeout;
+ const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback, delay, ...args) => {
+  if (delay === 2000) deadlineScheduled();
+  return realTimeout(callback, delay, ...args);
+ }) as typeof setTimeout);
+ const pending = getModels(proxy, "/models?client_version=1.0");
+ try {
+  expect(await Promise.race([waiting, pending.then(() => "response")])).toBe("response");
+ } finally { release(); timerSpy.mockRestore(); saveSpy.mockRestore(); }
+ const response = await pending;
+ expect(response.status).toBe(200);
+ expect((await response.json()).models.map((m: {slug: string}) => m.slug)).toEqual(["zdr/fixture-api"]);
 });
