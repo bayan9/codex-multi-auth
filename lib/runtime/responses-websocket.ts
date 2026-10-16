@@ -572,9 +572,7 @@ export class ResponsesWebSocketGateway {
 				if (this.sessions.size >= MAX_CLIENT_SESSIONS && !this.reclaimIdleSession()) {
 					// Capacity is not an authentication failure. Native Codex handles
 					// 426 immediately instead of retrying five rejected handshakes.
-					this.stats.lastUpgradeRejection = {
-						at: Date.now(), reason: "capacity", status: 426, activeConnections: this.sessions.size,
-					};
+					this.recordUpgradeRejection("capacity", 426);
 					done(false, 426);
 					return;
 				}
@@ -616,6 +614,10 @@ export class ResponsesWebSocketGateway {
 		this.websocketFailures.delete(scope);
 		return false;
 	}
+	/** One writer for the upgrade-rejection diagnostic so the two reject paths cannot drift. */
+	private recordUpgradeRejection(reason: WebSocketUpgradeRejectionDiagnostic["reason"], status: number): void {
+		this.stats.lastUpgradeRejection = { at: Date.now(), reason, status, activeConnections: this.sessions.size };
+	}
 	/** Release idle setup sockets only; active work and generated history stay pinned. */
 	private reclaimIdleSession(): boolean {
 		for (const [session, client] of this.sessions) {
@@ -652,7 +654,7 @@ export class ResponsesWebSocketGateway {
 			};
 			const rejectAdmission = (reason: WebSocketUpgradeRejectionDiagnostic["reason"], status: number) => {
 				if (socket.destroyed) return;
-				this.stats.lastUpgradeRejection = { at: Date.now(), reason, status, activeConnections: this.sessions.size };
+				this.recordUpgradeRejection(reason, status);
 				reject(status);
 			};
 			void (async () => {

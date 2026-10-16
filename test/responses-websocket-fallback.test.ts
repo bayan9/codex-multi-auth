@@ -7,6 +7,9 @@ import { ResponsesWebSocketGateway } from "../lib/runtime/responses-websocket.js
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
 	for (const close of cleanups.splice(0).reverse()) await close();
+	// No global restoreMocks is configured: restore Date.now/spies here so the
+	// cooldown tests cannot leak fake clocks into later cases.
+	vi.restoreAllMocks();
 });
 
 async function listen(server: Server): Promise<string> {
