@@ -603,7 +603,9 @@ warning after a CLI switch can reflect this intentional separation.
 model metadata. Discovery and inference use only each account's selected, enabled
 workspace. A disabled or unavailable selected workspace never falls back to a
 sibling or stored binding; rotation may use another eligible account instead.
-Accounts without tracked workspaces use their stored binding. Each selected
+Saved Personal organization aliases retain the native client's existing identity
+mapping; this does not select or enable sibling workspaces. Accounts without
+tracked workspaces use their stored binding. Each selected
 workspace must support the complete model + reasoning + speed combination.
 Catalogs refresh on demand after
 5 minutes (failed discovery retries after 5 seconds; a throttled catalog honors

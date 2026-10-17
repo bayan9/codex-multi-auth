@@ -7,10 +7,10 @@ it('does not reset a sibling when the selected organization alias is not a nativ
 it('does not redeem a disabled native workspace or an organization ID',()=>{
  const account={accountId:'native-workspace',refreshToken:'secret',addedAt:1,lastUsed:1,workspaces:[{id:'native-workspace',enabled:false}]};expect(resetTargetForStoredAccount(account)).toBeNull();expect(resetTargetForStoredAccount({...account,accountId:'org-fixture'})).toBeNull();
 });
-it('does not substitute the token workspace for an explicitly selected organization alias',()=>{
+it('resolves selected Personal to its native identity without changing preferences',()=>{
  const token='header.'+Buffer.from(JSON.stringify({'https://api.openai.com/auth':{chatgpt_account_id:'native-workspace'}})).toString('base64url')+'.signature';
  const account={recordId:'r',accountId:'org-personal',accessToken:token,refreshToken:'secret',addedAt:1,lastUsed:1,currentWorkspaceIndex:1,workspaces:[{id:'native-workspace'},{id:'org-personal',name:'Personal'}]};
- expect(resetTargetForStoredAccount(account)).toBeNull();expect(account.accountId).toBe('org-personal');expect(account.currentWorkspaceIndex).toBe(1);
+ expect(resetTargetForStoredAccount(account)?.accountId).toBe('native-workspace');expect(account.accountId).toBe('org-personal');expect(account.currentWorkspaceIndex).toBe(1);
 });
 it('revalidates the current native target against persisted enablement',async()=>{
  const {isResetTargetEnabled}=await import('../lib/runtime/account-reset-credits.js');

@@ -5883,6 +5883,33 @@ describe("pre-dispatch eligibility re-read",()=>{
   const part=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString("base64url");
   return `${part({alg:"none"})}.${part({"https://api.openai.com/auth":{chatgpt_account_id:workspace}})}.sig`;
  };
+
+
+ it('rejects a changed Personal selection immediately before dispatch',async()=>{
+  const storage=createStorage(Date.now(),1);const row=storage.accounts[0]!;
+  row.accessToken=tokenFor('native-personal');row.accountId='native-personal';
+  row.workspaces=[{id:'sibling',enabled:true},{id:'org-personal',enabled:true}];row.currentWorkspaceIndex=1;
+  const manager=new AccountManager(undefined,structuredClone(storage));
+  const {calls,fetchImpl}=createRecordingFetch(call=>{
+   if(call.url.includes('/models')){storage.accounts[0]!.currentWorkspaceIndex=0;return Response.json({models:[{slug:'common'}]});}
+   return textEventStream();
+  });
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(storage)}});
+  const r=await postResponses(proxy,{model:'common',input:'fixture'});expect(r.status).toBe(503);await r.text();
+  expect(calls.filter(c=>c.url.endsWith('/responses'))).toHaveLength(0);
+ });
+ it('uses the native identity of selected Personal across catalog, Responses and images',async()=>{
+  const storage=createStorage(Date.now(),1);const row=storage.accounts[0]!;
+  row.accessToken=tokenFor('native-personal');row.accountId='native-personal';
+  row.workspaces=[{id:'native-personal',enabled:true},{id:'org-personal',name:'Personal',enabled:true}];row.currentWorkspaceIndex=1;
+  const manager=new AccountManager(undefined,structuredClone(storage));
+  const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:'common'}]}):call.url.includes('/images/')?Response.json({data:[]}):textEventStream());
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>structuredClone(storage)}});
+  for(const [path,body] of [['/responses',{model:'common',input:'fixture'}],['/images/generations',{model:'gpt-image-2',prompt:'fixture'}]] as const){const r=await postResponses(proxy,body,path);expect(r.status).toBe(200);await r.text();}
+  expect(calls.length).toBeGreaterThanOrEqual(3);
+  expect(calls.every(c=>c.headers.get(OPENAI_HEADERS.ACCOUNT_ID)==='native-personal')).toBe(true);
+  expect(manager.getAccountByIndex(0)?.currentWorkspaceIndex).toBe(1);
+ });
  it.each([["no stored account id",undefined],["a padded account id"," acc_token "]])("routes an account with %s through Responses and images",async(_label,stored)=>{
   const storage=createStorage(Date.now(),1);const account=storage.accounts[0]!;
   account.accessToken=tokenFor("acc_token");

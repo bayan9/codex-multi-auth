@@ -328,3 +328,7 @@ workspace only. Unselected siblings and stored bindings are not fallback routes.
 A disabled selected workspace makes the account unavailable until an enabled
 workspace is selected. Use `workspace <account> <workspace> enable` or `disable`
 to control availability without changing selection.
+
+Saved Personal organization aliases retain their native client identity mapping.
+The selected entry still controls enablement; disabling it never falls back to
+the token entry or another workspace.
