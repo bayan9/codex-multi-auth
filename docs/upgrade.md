@@ -310,3 +310,11 @@ Automatic on first load: legacy worktree-keyed pools merge into the repo-shared 
 - [features.md](features.md)
 - [reference/storage-paths.md](reference/storage-paths.md)
 - [development/CONFIG_FLOW.md](development/CONFIG_FLOW.md)
+
+### Emergency-only account policy compatibility
+
+The `emergencyOnly` account flag reserves subscription accounts until regular
+pool capacity and reset credits are confirmed exhausted. Older policy writers
+do not preserve this flag. Before downgrading, pause reserved accounts or remove
+them from the enabled pool; reapply `account emergency-only <index> on` after
+upgrading. Existing pause and drain flags remain independent.

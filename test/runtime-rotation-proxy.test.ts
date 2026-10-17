@@ -3986,6 +3986,34 @@ describe("runtime rotation proxy", () => {
 		}
 	});
 
+	it("reaches a usable fifth account after four account quota rejections", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now(), 6));
+		const { calls, fetchImpl } = createRecordingFetch((_call, attempt) =>
+			attempt <= 4
+				? new Response(JSON.stringify({error:{code:"usage_limit_reached",message:"Usage limit reached"}}), {status:429})
+				: textEventStream(),
+		);
+		const proxy = await startProxy({accountManager,fetchImpl});
+		const response = await postResponses(proxy,{model:"gpt-5-codex"});
+		await response.text();
+		expect(response.status).toBe(200);
+		expect(calls).toHaveLength(5);
+		expect(new Set(calls.map(call=>call.headers.get(OPENAI_HEADERS.ACCOUNT_ID))).size).toBe(5);
+	});
+
+	it("visits each exhausted account once before returning a quota failure", async () => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now(), 6));
+		const { calls, fetchImpl } = createRecordingFetch(() =>
+			new Response(JSON.stringify({error:{code:"usage_limit_reached",message:"Usage limit reached"}}), {status:429}),
+		);
+		const proxy = await startProxy({accountManager,fetchImpl});
+		const response = await postResponses(proxy,{model:"gpt-5-codex"});
+		await response.text();
+		expect(response.status).toBe(429);
+		expect(calls).toHaveLength(6);
+		expect(new Set(calls.map(call=>call.headers.get(OPENAI_HEADERS.ACCOUNT_ID))).size).toBe(6);
+	});
+
 	it("caps per-request upstream attempts instead of walking a large pool", async () => {
 		const now = Date.now();
 		const accountManager = new AccountManager(undefined, createStorage(now, 6));
@@ -5898,6 +5926,36 @@ describe("request-level capability rejections",()=>{
 });
 
 describe('earned reset last-resort integration',()=>{
+ it.each(['usable','reset','no-credit','unknown','discover-exhaustion','discover-still-limited'] as const)('holds emergency accounts behind primary capacity and credits (%s)',async mode=>{
+  const discovered=mode.startsWith('discover-');
+  vi.spyOn(runtimePolicy,'evaluateRuntimePolicy').mockResolvedValue({allowed:true,statusCode:200,errorCode:null,reasons:[],projectKey:null,blockedAccountIndexes:new Set(),emergencyAccountIndexes:new Set([0]),scoreBoostByAccount:{},priorityByAccount:{0:1,1:2},budgetEvaluations:[]});
+  const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
+  const native=await import('../lib/runtime/native-rate-limits.js');
+  let redeemed=false;const spent:string[]=[];const read:string[]=[];
+  const rpc=vi.spyOn(native,'nativeRateLimitsRpc').mockImplementation(async(auth,method)=>{
+   if(method==='account/rateLimitResetCredit/consume'){redeemed=true;spent.push(auth.accountId);return {outcome:'reset'};}
+   read.push(auth.accountId);
+   const allowed=auth.accountId==='acc_1'||mode==='usable'||redeemed;
+   return {accountId:auth.accountId,ordinaryUsageAllowed:mode==='unknown'&&auth.accountId==='acc_2'?null:allowed,rateLimitResetCredits:{availableCount:(mode==='reset'||discovered)&&!redeemed?1:0},rateLimits:{planType:'promax',primary:{usedPercent:mode==='usable'?100:allowed?0:100,resetsAt:Math.floor(Date.now()/1000)+3600},secondary:{}}};
+  });
+  const fs=await import('node:fs/promises');const os=await import('node:os');const path=await import('node:path');
+  const originalDir=process.env.CODEX_MULTI_AUTH_DIR;const dir=await fs.mkdtemp(path.join(os.tmpdir(),'emergency-pool-'));process.env.CODEX_MULTI_AUTH_DIR=dir;
+  const service=createResetCreditService();await service.setPolicy('last-resort');
+  try{
+   const disk=createStorage(Date.now());const stored=await import('../lib/storage.js');vi.spyOn(stored,'loadAccounts').mockResolvedValue(disk);
+   const manager=new AccountManager(undefined,disk);
+   const {calls,fetchImpl}=createRecordingFetch(call=>call.url.includes('/models')?Response.json({models:[{slug:'chat-fixture'}]}):discovered&&(!redeemed||mode==='discover-still-limited')?Response.json({error:{code:'usage_limit_reached',message:'Usage limit reached'}},{status:429}):textEventStream());
+   const q={updatedAt:Date.now(),status:200,model:'chat-fixture',planType:'promax',primary:{usedPercent:100},secondary:{}};
+   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readSubscriptionQuota:async()=>({byAccountId:{acc_1:{...q,primary:{usedPercent:0}},acc_2:discovered?{...q,primary:{usedPercent:50}}:q},byEmail:{}})}});
+   const response=await postResponses(proxy,{model:'chat-fixture',input:'fixture'});await response.text();
+   const used=calls.filter(c=>c.url.endsWith('/responses')).map(c=>c.headers.get('chatgpt-account-id'));
+   expect(used).toEqual(mode==='unknown'?[]:discovered?['acc_2','acc_2']:[mode==='no-credit'?'acc_1':'acc_2']);
+   expect(response.status).toBe(mode==='unknown'?503:mode==='discover-still-limited'?429:200);
+   expect(spent).toEqual(mode==='reset'||discovered?['acc_2']:[]);
+   expect(read).not.toContain('acc_1');
+  }finally{rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await fs.rm(dir,{recursive:true,force:true,maxRetries:5});}
+ });
+
  it('never redeems or moves traffic off a stored native pin',async()=>{
   vi.spyOn(storageMetaModule,"readStorageMetaFromDisk").mockReturnValue({pinnedAccountIndex:0,affinityGeneration:1});
   const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');

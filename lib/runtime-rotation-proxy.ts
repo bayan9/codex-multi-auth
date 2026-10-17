@@ -6,7 +6,7 @@ import { fetchWithProxy } from "./request/proxy-fetch.js";
 import { createNativeAccountStorageReader } from "./runtime/native-account-storage.js";
 import { resetSnapshotQuota } from "./runtime/reset-credits.js";
 import { createResetCreditService, loadResetCreditState } from "./runtime/account-reset-credits.js";
-import { recoverResetQuota, applyConfirmedReset } from "./runtime/reset-credit-routing.js";
+import { recoverResetQuota, applyConfirmedReset, primaryPoolFullyExhausted } from "./runtime/reset-credit-routing.js";
 import { readSubscriptionQuotaEvent } from "./runtime/subscription-quota-event.js";
 import { loadQuotaCache } from "./quota-cache.js";
 import { findQuotaCacheEntryForAccount } from "./quota-readiness.js";
@@ -1968,7 +1968,7 @@ async function handleRequestInner(
 				}
 			}
 		};
-  const resetCreditState=state.nativeOpenai&&isResponsesRequest ? await cachedRead(state, "reset-credits", loadResetCreditState).catch(()=>null):null;
+  let resetCreditState=state.nativeOpenai&&isResponsesRequest ? await cachedRead(state, "reset-credits", loadResetCreditState).catch(()=>null):null;
   const quotaForScope = (account: ManagedAccount, scope: ReturnType<typeof workspaceModelScopes>[number]) => {
    // Scoped observations belong to this credential and workspace; legacy entries only describe the binding.
    const cached = findQuotaCacheEntryForAccount(subscriptionQuotaCache,account,accountManager.getAccountsSnapshot(),undefined,scope.accountId);
@@ -2318,17 +2318,33 @@ async function handleRequestInner(
      observations:state.subscriptionQuotaObservations ??=new Map(),now:state.now(),clearQuotaScheduler:a=>state.preemptiveQuotaScheduler.clear(buildQuotaScheduleKey(a,context.family,context.model))});
    }
   }
-  if (state.nativeOpenai && isResponsesRequest && context.model && context.model !== LUNA_RESERVE_MODEL && !isPinned) {
+  const primaryWorkspaceCandidates = () => new Map([...workspaceCandidates].filter(([index]) =>
+   !policyDecision?.emergencyAccountIndexes?.has(index) && !policyDecision?.blockedAccountIndexes.has(index),
+  ));
+  const emergencyBackupsAllowed = () => state.nativeOpenai && isResponsesRequest &&
+   context.model !== LUNA_RESERVE_MODEL && primaryPoolFullyExhausted(
+    primaryWorkspaceCandidates(), resetCreditState, state.now(), (index, scope) => {
+     const account = accountManager.getAccountByIndex(index);
+     return account ? quotaForScope(account, scope) : undefined;
+    },
+   );
+  const recoverPrimaryQuota = async (): Promise<boolean> => {
+   if (!state.nativeOpenai || !isResponsesRequest || !context.model || context.model === LUNA_RESERVE_MODEL || isPinned) return false;
    try {
-    await recoverResetQuota({model:context.model,family:context.family,native:true,pinned:false,manager:accountManager,
-     scopes:workspaceCandidates,quotaForScope,priorityByAccount:policyDecision?.priorityByAccount,preferredIndex:storageMeta.pinnedAccountIndex,service:createResetCreditService(accountManager),
+    const recovered=await recoverResetQuota({model:context.model,family:context.family,native:true,pinned:false,manager:accountManager,
+     scopes:primaryWorkspaceCandidates(),quotaForScope,priorityByAccount:policyDecision?.priorityByAccount,preferredIndex:storageMeta.pinnedAccountIndex,service:createResetCreditService(accountManager),
      observations:state.subscriptionQuotaObservations ??= new Map(),now:state.now,
      clearQuotaScheduler:account=>state.preemptiveQuotaScheduler.clear(buildQuotaScheduleKey(account,context.family,context.model)),
     });
-   } catch { state.status.lastError="Subscription reset recovery could not be confirmed; no further automatic redemption attempted."; }
-   // Recovery may have redeemed and written new reset state; the next request re-reads it.
-   state.readCache?.delete("reset-credits");
-  }
+    resetCreditState=await loadResetCreditState();
+    return recovered;
+   } catch {
+    resetCreditState=null;
+    state.status.lastError="Subscription reset recovery could not be confirmed; no further automatic redemption attempted.";
+    return false;
+   } finally { state.readCache?.delete("reset-credits"); }
+  };
+  await recoverPrimaryQuota();
 
 		// A pinned Luna request can arrive after an earlier turn already proved
 		// ordinary subscription quota exhausted. That persisted family marker
@@ -2480,9 +2496,11 @@ async function handleRequestInner(
 		};
 
 		let runtimeSelectionIterations = 0;
+		let recoveryRetriedAfterExhaustion = false;
 		while (
 			(isPinned ||
 				attemptedIndexes.size < accountCount ||
+                (!isPinned && !recoveryRetriedAfterExhaustion) ||
 				(isTranscribeRequest && !state.nativeOpenai && accountCount === 0 && !reloadedAfterNoAccount)) &&
 			transientAttempts < transientAttemptLimit &&
 			(!isPinned ||
@@ -2533,6 +2551,13 @@ async function handleRequestInner(
      }
     }
 				const attemptedForSelection = new Set([...attemptedIndexes, ...catalogExcludedIndexes()]);
+				if (!isPinned && policyDecision?.emergencyAccountIndexes?.size) {
+					const backupsAllowed = emergencyBackupsAllowed();
+					if (!backupsAllowed) for (const index of policyDecision.emergencyAccountIndexes) {
+						attemptedForSelection.add(index);
+						accountSkipReasons.set(index,"policy: emergency backup reserved");
+					}
+				}
 				if (isTranscribeRequest) {
 					const candidate = chooseTranscriptionAccount({
 						accountManager,
@@ -2610,6 +2635,19 @@ async function handleRequestInner(
 					: selectAccount();
             for (const index of catalogExcludedIndexes()) accountSkipReasons.set(index, "model-not-supported");
 			if (!selected) {
+                // A 429 can be the first evidence that cached ordinary capacity is gone.
+                // Recheck once before failing; only an explicit pre-inference rejection
+                // reaches this path, never an ambiguous or already-streaming generation.
+                if (!isPinned && !recoveryRetriedAfterExhaustion) {
+                    recoveryRetriedAfterExhaustion = true;
+                    const backupsWereAllowed = emergencyBackupsAllowed();
+                    if (await recoverPrimaryQuota()) {
+                        attemptedIndexes.clear();
+                        accountSkipReasons.clear();
+                        continue;
+                    }
+                    if (!backupsWereAllowed && emergencyBackupsAllowed()) continue;
+                }
 				if (
 					isTranscribeRequest &&
 					!state.nativeOpenai &&
@@ -3313,7 +3351,10 @@ async function handleRequestInner(
 				}
 				exhaustionReason = "rate-limit";
 				capabilityRejectionIsLatest = false;
-				transientAttempts += 1;
+				// Account-local throttles are bounded by distinct accounts/workspaces.
+				// They must not spend the network/server budget before a usable sibling.
+				// Pins and model-wide capacity failures retain the transient bound.
+				if (isPinned || modelAtCapacity) transientAttempts += 1;
 				transientExhaustionReason = "rate-limit";
 				state.status.retries += 1;
 				noteRotation();

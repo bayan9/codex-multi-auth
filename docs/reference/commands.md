@@ -87,7 +87,7 @@ All governance state is file-backed under `~/.codex/multi-auth`.
 | --- | --- |
 | `codex-multi-auth usage` | Summarize the local usage ledger: `--since --by --json\|--csv --out`; `usage rotate [--if-larger-than-bytes N]` archives the ledger |
 | `codex-multi-auth budget` | Budget guard limits: `limit <key> --window <w>`, `check <key>`, `list` — all `--json` |
-| `codex-multi-auth account` | Local account policy: `tag/untag`, `weight`, `priority`, `auto-prime`, `pause/unpause`, `drain/undrain`, `note`, `policy list [--json]` |
+| `codex-multi-auth account` | Local account policy: `tag/untag`, `weight`, `priority`, `auto-prime`, `emergency-only`, `pause/unpause`, `drain/undrain`, `note`, `policy list [--json]` |
 | `codex-multi-auth models` | Model/capability matrix per account: `--json --model <m>` (repeatable) |
 | `codex-multi-auth monitor` | Aggregate runtime, usage, policy, routing-profile, quota, model, and project state: `--json` |
 | `codex-multi-auth bridge token` | Local bridge bearer tokens: `create [--label]`, `list`, `rotate <id>`, `revoke <id>`; `--json` |
@@ -364,6 +364,7 @@ codex-multi-auth account tag|untag <index> <tag>
 codex-multi-auth account weight <index> <0..10>
 codex-multi-auth account priority <index> <0..9>
 codex-multi-auth account auto-prime <index> on|off
+codex-multi-auth account emergency-only <index> on|off
 codex-multi-auth account pause|unpause|drain|undrain <index>
 codex-multi-auth account note <index> <text>        # ≤500 chars
 codex-multi-auth account policy list [--json]
@@ -385,6 +386,31 @@ codex-multi-auth account policy list [--json]
   at `1`, sequential mode keeps the healthy active cursor.
 - `tag` values normalize to lowercase filesystem-safe labels and interact with
   routing-profile preferred/avoid tags.
+
+### Emergency subscription backups
+
+`account emergency-only <index> on` reserves an account from automatic pool
+selection and background priming. An unpinned native Responses request can use
+it only after every eligible regular subscription workspace for the requested
+model has a fresh, authoritative observation of both blocked ordinary usage and
+zero reset credits. Regular capacity, including its final quota reserve, and
+eligible automatic resets are used first. Unknown, stale, pending, failed, or
+unsupported reset state keeps backups reserved. An empty regular pool does not
+open backups. A newer observation of recovered regular capacity closes them again.
+
+Reset spending still requires `resets policy last-resort` and all existing
+redemption safeguards. With automatic resets disabled, remaining credits keep
+backups reserved until an explicit reset is performed or the policy is changed.
+Explicit account pins retain their existing behavior; pause/drain and model,
+workspace, privacy, authentication, and budget restrictions still apply.
+Automatic backup admission is unavailable for non-native requests and the
+separately metered Reserve model. `account policy list [--json]` reports the flag.
+
+Quota 429s can advance through all distinct eligible accounts/workspaces;
+the transient retry budget still bounds network/server errors, hard pins, and
+model-wide capacity errors. A request that first discovers exhaustion from a
+429 gets one bounded reset-recovery pass before reporting pool exhaustion.
+Streaming or ambiguous submitted generations are not replayed.
 
 ### Automatic subscription priming
 

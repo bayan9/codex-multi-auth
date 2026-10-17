@@ -19,6 +19,8 @@ export interface QuotaCacheWindow {
 }
 
 export interface QuotaCacheEntry {
+	/** Account-validated native usage permission; never inferred from percentages. */
+	ordinaryUsageAllowed?: boolean | null;
 	primingCompleted?: boolean;
 	/** Completion/failure time, independent of the quota header observation. */
 	primingObservedAt?: number;
