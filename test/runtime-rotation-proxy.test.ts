@@ -5982,7 +5982,7 @@ describe('earned reset last-resort integration',()=>{
   vi.spyOn(runtimePolicy,'evaluateRuntimePolicy').mockResolvedValue({allowed:true,statusCode:200,errorCode:null,reasons:[],projectKey:null,blockedAccountIndexes:new Set(),emergencyAccountIndexes:new Set([0]),scoreBoostByAccount:{},priorityByAccount:{0:1,1:2},budgetEvaluations:[]});
   const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
   const native=await import('../lib/runtime/native-rate-limits.js');
-  let redeemed=false;const spent:string[]=[];const read:string[]=[];
+  let redeemed=false;let recoveryReadFailed=false;const spent:string[]=[];const read:string[]=[];
   const rpc=vi.spyOn(native,'nativeRateLimitsRpc').mockImplementation(async(auth,method)=>{
    if(method==='account/rateLimitResetCredit/consume'){redeemed=true;spent.push(auth.accountId);return {outcome:'reset'};}
    read.push(auth.accountId);
@@ -5994,7 +5994,7 @@ describe('earned reset last-resort integration',()=>{
   const service=createResetCreditService();await service.setPolicy('last-resort');
   const resetModule=await import('../lib/runtime/account-reset-credits.js');
   const actualLoad=resetModule.loadResetCreditState;
-  const reload=mode==='reset-read-failure'?vi.spyOn(resetModule,'loadResetCreditState').mockImplementation(async()=>{if(redeemed)throw new Error('fixture read failure');return actualLoad();}):undefined;
+  const reload=mode==='reset-read-failure'?vi.spyOn(resetModule,'loadResetCreditState').mockImplementation(async()=>{if(redeemed){recoveryReadFailed=true;throw Object.assign(new Error('fixture read failure'),{code:'EBUSY'});}return actualLoad();}):undefined;
   try{
    const disk=createStorage(Date.now());const stored=await import('../lib/storage.js');vi.spyOn(stored,'loadAccounts').mockResolvedValue(disk);
    const manager=new AccountManager(undefined,disk);
@@ -6008,6 +6008,7 @@ describe('earned reset last-resort integration',()=>{
    expect(response.status).toBe(mode==='unknown'?503:mode==='discover-still-limited'?429:200);
    expect(spent).toEqual(resetMode||discovered?['acc_2']:[]);
    expect(read).not.toContain('acc_1');
+   if(mode==='reset-read-failure')expect(recoveryReadFailed).toBe(true);
   }finally{reload?.mockRestore();rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await removeWithRetry(dir,{recursive:true,force:true});}
  });
 

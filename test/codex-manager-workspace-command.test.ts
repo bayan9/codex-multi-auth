@@ -213,3 +213,29 @@ describe("runWorkspaceCommand", () => {
 		expect(deps.saveAccounts).not.toHaveBeenCalled();
 	});
 });
+
+it('persists a disabled selection and preserves it through account re-enablement',async()=>{
+ const {mkdtemp}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const {removeWithRetry}=await import('./helpers/remove-with-retry.js');
+ const storageApi=await import('../lib/storage.js');const {AccountManager}=await import('../lib/accounts.js');
+ const dir=await mkdtemp(join(tmpdir(),'workspace-disable-'));
+ storageApi.setStoragePathDirect(join(dir,'accounts.json'));
+ try{
+  await storageApi.saveAccounts(createStorage());
+  const deps=createDeps({setStoragePath:()=>{},loadAccounts:storageApi.loadAccounts,saveAccounts:storageApi.saveAccounts});
+  expect(await runWorkspaceCommand(['1','1','disable'],deps)).toBe(0);
+  const saved=(await storageApi.loadAccounts())!;
+  expect(saved.accounts[0]?.currentWorkspaceIndex??0).toBe(0);
+  expect(saved.accounts[0]?.workspaces?.[0]?.enabled).toBe(false);
+  const manager=new AccountManager(undefined,saved);manager.setAccountEnabled(0,false);manager.setAccountEnabled(0,true);
+  expect(manager.getAccountByIndex(0)?.workspaces?.[0]?.enabled).toBe(false);
+  expect(manager.getAccountByIndex(0)?.currentWorkspaceIndex??0).toBe(0);
+ }finally{storageApi.setStoragePathDirect(null);await removeWithRetry(dir,{recursive:true,force:true});}
+});
+it('does not re-enable an operator-disabled workspace when its account is toggled',async()=>{
+ const storage=createStorage();const deps=createDeps({loadAccounts:async()=>storage});
+ expect(await runWorkspaceCommand(['1','1','disable'],deps)).toBe(0);
+ const {AccountManager}=await import('../lib/accounts.js');const manager=new AccountManager(undefined,storage);
+ manager.setAccountEnabled(0,false);manager.setAccountEnabled(0,true);
+ expect(manager.getAccountByIndex(0)?.workspaces?.[0]?.enabled).toBe(false);
+});

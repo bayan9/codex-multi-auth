@@ -126,8 +126,8 @@ export async function runWorkspaceCommand(
  }
  if (action) {
   target.enabled=action === "enable";
-  if (target.enabled) delete target.disabledAt;
-  else target.disabledAt=Date.now();
+  // Absence of disabledAt distinguishes an operator exclusion from runtime health.
+  delete target.disabledAt;
   await saveAccountsWithRetry(storage,deps.saveAccounts);
   logInfo(`Workspace ${parsedWorkspace} [${targetName}] ${target.enabled ? "enabled" : "disabled"}. Selected workspace unchanged.`);
   return 0;
