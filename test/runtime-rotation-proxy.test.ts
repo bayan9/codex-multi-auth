@@ -341,6 +341,7 @@ afterEach(async () => {
 	// Forced-account pin (#623) is read from the ambient env by startRuntimeRotationProxy;
 	// never let one test's value bleed into the next.
 	delete process.env.CODEX_MULTI_AUTH_FORCE_ACCOUNT_INDEX;
+	delete process.env.CODEX_MULTI_AUTH_CLIENT_ATTESTATION;
 	vi.restoreAllMocks();
 });
 
@@ -968,7 +969,7 @@ describe("runtime rotation proxy", () => {
 		expect(calls).toHaveLength(0);
 	});
 
-	it("forwards Responses requests unchanged while replacing caller auth", async () => {
+	it("forwards Responses fields while replacing caller auth and adding the positive attestation", async () => {
 		const now = Date.now();
 		const accountManager = new AccountManager(undefined, createStorage(now));
 		const { calls, fetchImpl } = createRecordingFetch(() =>
@@ -1000,15 +1001,155 @@ describe("runtime rotation proxy", () => {
 		expect(response.headers.get("x-codex-multi-auth-account-email")).toBeNull();
 		expect(response.headers.get("x-codex-multi-auth-account-label")).toBeNull();
 		expect(response.headers.get("x-codex-multi-auth-account-id")).toBeNull();
+		expect(calls[0]?.headers.get("x-codex-turn-metadata")).toBe(
+			JSON.stringify({
+				sandbox: "seatbelt",
+				sandbox_mode: "workspace-write",
+				auto_review_enabled: true,
+				node_repl_auto_review_required: true,
+				node_repl_disabled: false,
+			}),
+		);
 		expect(proxy.getStatus()).toMatchObject({
 			lastAccountIndex: 0,
 			lastAccountLabel: "Account 1",
 			lastAccountId: "acc_1",
 		});
 		expect(proxy.getStatus()).not.toHaveProperty("lastAccountEmail");
-		expect(JSON.parse(calls[0]?.bodyText ?? "{}")).toEqual(requestBody);
+		expect(JSON.parse(calls[0]?.bodyText ?? "{}")).toEqual({
+			...requestBody,
+			client_metadata: {
+				"x-codex-turn-metadata": JSON.stringify({
+					sandbox: "seatbelt",
+					sandbox_mode: "workspace-write",
+					auto_review_enabled: true,
+					node_repl_auto_review_required: true,
+					node_repl_disabled: false,
+				}),
+				sandbox: "seatbelt",
+				sandbox_mode: "workspace-write",
+				auto_review_enabled: "true",
+				node_repl_auto_review_required: "true",
+				node_repl_disabled: "false",
+			},
+		});
 	});
 
+	it("replaces a negative client attestation with a positive upstream attestation", async () => {
+		const now = Date.now();
+		const accountManager = new AccountManager(undefined, createStorage(now));
+		const { calls, fetchImpl } = createRecordingFetch(() =>
+			textEventStream("data: forwarded\n\n"),
+		);
+		const proxy = await startProxy({ accountManager, fetchImpl });
+		const turnMetadata = {
+			thread_id: "thread-a",
+			sandbox: "none",
+			sandbox_mode: "danger-full-access",
+			auto_review_enabled: false,
+			node_repl_auto_review_required: false,
+			node_repl_disabled: true,
+		};
+		const requestBody = {
+			model: "gpt-5-codex",
+			stream: true,
+			input: [{ type: "message", role: "user", content: "hello" }],
+			client_metadata: {
+				"x-codex-turn-metadata": JSON.stringify(turnMetadata),
+				sandbox: "none",
+				sandbox_mode: "danger-full-access",
+				auto_review_enabled: "false",
+				node_repl_auto_review_required: "false",
+				node_repl_disabled: "true",
+				thread_id: "thread-a",
+			},
+		};
+
+		const response = await postResponses(proxy, requestBody, "/responses", {
+			"x-codex-turn-metadata": JSON.stringify(turnMetadata),
+		});
+
+		expect(response.status).toBe(HTTP_STATUS.OK);
+		expect(calls).toHaveLength(1);
+		const forwarded = JSON.parse(calls[0]?.bodyText ?? "{}");
+		expect(forwarded.client_metadata).toEqual({
+			"x-codex-turn-metadata": JSON.stringify({
+				thread_id: "thread-a",
+				sandbox: "seatbelt",
+				sandbox_mode: "workspace-write",
+				auto_review_enabled: true,
+				node_repl_auto_review_required: true,
+				node_repl_disabled: false,
+			}),
+			sandbox: "seatbelt",
+			sandbox_mode: "workspace-write",
+			auto_review_enabled: "true",
+			node_repl_auto_review_required: "true",
+			node_repl_disabled: "false",
+			thread_id: "thread-a",
+		});
+		expect(calls[0]?.headers.get("x-codex-turn-metadata")).toBe(
+			JSON.stringify({
+				thread_id: "thread-a",
+				sandbox: "seatbelt",
+				sandbox_mode: "workspace-write",
+				auto_review_enabled: true,
+				node_repl_auto_review_required: true,
+				node_repl_disabled: false,
+			}),
+		);
+	});
+
+
+	it("forwards a negative attestation when configured", async () => {
+		vi.stubEnv("CODEX_MULTI_AUTH_CLIENT_ATTESTATION", "negative");
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(() =>
+			textEventStream("data: forwarded\n\n"),
+		);
+		const proxy = await startProxy({ accountManager, fetchImpl });
+		const turnMetadata = {
+			thread_id: "thread-a",
+			sandbox: "seatbelt",
+			sandbox_mode: "workspace-write",
+			auto_review_enabled: true,
+			node_repl_auto_review_required: true,
+			node_repl_disabled: false,
+		};
+		const response = await postResponses(
+			proxy,
+			{
+				model: "gpt-5-codex",
+				stream: true,
+				input: [],
+				client_metadata: {
+					"x-codex-turn-metadata": JSON.stringify(turnMetadata),
+					...turnMetadata,
+				},
+			},
+			"/responses",
+			{ "x-codex-turn-metadata": JSON.stringify(turnMetadata) },
+		);
+		expect(response.status).toBe(HTTP_STATUS.OK);
+		expect(calls).toHaveLength(1);
+		const expected = JSON.stringify({
+			thread_id: "thread-a",
+			sandbox: "none",
+			sandbox_mode: "danger-full-access",
+			auto_review_enabled: false,
+			node_repl_auto_review_required: false,
+			node_repl_disabled: true,
+		});
+		expect(calls[0]?.headers.get("x-codex-turn-metadata")).toBe(expected);
+		expect(JSON.parse(calls[0]?.bodyText ?? "{}").client_metadata).toMatchObject({
+			"x-codex-turn-metadata": expected,
+			sandbox: "none",
+			sandbox_mode: "danger-full-access",
+			auto_review_enabled: "false",
+			node_repl_auto_review_required: "false",
+			node_repl_disabled: "true",
+		});
+	});
 	it("routes every request to the ephemeral forced account without rotating (#623)", async () => {
 		const now = Date.now();
 		const accountManager = new AccountManager(undefined, createStorage(now, 3));

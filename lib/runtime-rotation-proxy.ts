@@ -2,6 +2,7 @@ import { createAutomaticApiCheck, startAutomaticApiChecks } from "./runtime/auto
 import { startAutomaticAccountChecks } from "./runtime/automatic-account-checks.js";
 import { createAutomaticSubscriptionCheck } from "./runtime/automatic-subscription-checks.js";
 import { ClientCancellationError } from "./request/client-cancellation.js";
+import { applyClientAttestation } from "./request/client-attestation.js";
 import { fetchWithProxy } from "./request/proxy-fetch.js";
 import { createNativeAccountStorageReader } from "./runtime/native-account-storage.js";
 import { resetSnapshotQuota } from "./runtime/reset-credits.js";
@@ -922,6 +923,7 @@ function buildResponsesRequestContext(
 ): RequestContext {
 	const headers = headersFromIncoming(req);
 	const parsedBody = parseRequestBody(body);
+	applyClientAttestation({}, headers);
 	const model =
 		typeof parsedBody?.model === "string" && parsedBody.model.trim().length > 0
 			? parsedBody.model.trim()
@@ -1546,8 +1548,9 @@ async function handleRequestInner(
    if(route.kind==="oauth"&&route.serviceTier){
     if(parsed.service_tier&&canonicalServiceTier(String(parsed.service_tier))!==canonicalServiceTier(route.serviceTier))throw createRuntimeProxyHttpError("Conflicting speed selection.",400,"conflicting_service_tier");
     parsed.model=route.upstreamModel;parsed.service_tier=route.serviceTier;
-    requestBody=Buffer.from(JSON.stringify(parsed));
    }
+   applyClientAttestation(parsed, incomingHeaders);
+   requestBody=Buffer.from(JSON.stringify(parsed));
 		}
 		const context = isModelsRequest
 			? buildModelsRequestContext(req)

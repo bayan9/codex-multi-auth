@@ -1,6 +1,7 @@
 import { MAX_API_ROUTES } from "../api-route-store.js";
 import { OPENAI_HEADER_VALUES } from "../constants.js";
 import { ClientCancellationError } from "../request/client-cancellation.js";
+import { applyClientAttestation } from "../request/client-attestation.js";
 import type { Duplex } from "node:stream";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -224,12 +225,19 @@ class SocketSession {
 			.update(headers.get("chatgpt-account-id") ?? "")
 			.digest("hex");
 		const apiCredential = !headers.has("chatgpt-account-id");
-		const body = bodyJson(init.body);
+		const originalBody = bodyJson(init.body);
+		applyClientAttestation(originalBody, headers);
+		const httpInit: RequestInit = {
+			...init,
+			body: JSON.stringify(originalBody),
+			headers,
+		};
+		const body = { ...originalBody };
 		for (const [credential, until] of this.httpOnly) {
 			if (until <= Date.now()) this.httpOnly.delete(credential);
 		}
 		if (this.needsHttpRecovery() || (apiCredential && this.httpOnly.has(key))) {
-			return this.httpRecovery(input, init, body);
+			return this.httpRecovery(input, httpInit, body);
 		}
 		delete body.stream;
 		delete body.background;
@@ -256,7 +264,7 @@ class SocketSession {
 		// Measure the actual UTF-8 create after connection-local delta reduction.
 		// HTTP receives the original reconstructed request, never a WS-only delta.
 		if (Buffer.byteLength(serializedBody) > MAX_UPSTREAM_WEBSOCKET_REQUEST_BYTES) {
-			return this.httpRecovery(input, init, body);
+			return this.httpRecovery(input, httpInit, body);
 		}
 		const reusedConnection = !!socket;
 		let handshakeHeaders: Record<string, string> | undefined;
@@ -361,7 +369,7 @@ class SocketSession {
 					if (oldest) this.httpOnly.delete(oldest);
 				}
 				this.httpOnly.set(key, Date.now() + HTTP_FALLBACK_COOLDOWN_MS);
-				return this.httpRecovery(input, init, body);
+				return this.httpRecovery(input, httpInit, body);
 			}
 			this.openedAt.set(socket, Date.now());
 			this.channels.set(key, socket);

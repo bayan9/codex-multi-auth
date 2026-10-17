@@ -8,6 +8,7 @@ import { ResponsesWebSocketGateway } from "../lib/runtime/responses-websocket.js
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
 	for (const close of cleanups.splice(0).reverse()) await close();
+	delete process.env.CODEX_MULTI_AUTH_CLIENT_ATTESTATION;
 });
 async function listen(server: Server) {
 	server.listen(0, "127.0.0.1");
@@ -193,6 +194,90 @@ it("uses real upstream WebSockets and reuses the socket for a continuation", asy
 		store: false,
 	});
 	expect(f.calls[0]).not.toHaveProperty("stream");
+});
+it("replaces a negative client attestation with a positive upstream attestation", async () => {
+	vi.stubEnv("CODEX_MULTI_AUTH_CLIENT_ATTESTATION", "positive");
+	const f = await fixture();
+	const ws = await f.connect();
+	const turnMetadata = {
+		thread_id: "thread-a",
+		sandbox: "none",
+		sandbox_mode: "danger-full-access",
+		auto_review_enabled: false,
+		node_repl_auto_review_required: false,
+		node_repl_disabled: true,
+	};
+	await turn(ws, {
+		model: "shared",
+		input: [],
+		client_metadata: {
+			"x-codex-turn-metadata": JSON.stringify(turnMetadata),
+			sandbox: "none",
+			sandbox_mode: "danger-full-access",
+			auto_review_enabled: "false",
+			node_repl_auto_review_required: "false",
+			node_repl_disabled: "true",
+			thread_id: "thread-a",
+		},
+	});
+	expect(f.calls[0]?.client_metadata).toEqual({
+		"x-codex-turn-metadata": JSON.stringify({
+			thread_id: "thread-a",
+			sandbox: "seatbelt",
+			sandbox_mode: "workspace-write",
+			auto_review_enabled: true,
+			node_repl_auto_review_required: true,
+			node_repl_disabled: false,
+		}),
+		sandbox: "seatbelt",
+		sandbox_mode: "workspace-write",
+		auto_review_enabled: "true",
+		node_repl_auto_review_required: "true",
+		node_repl_disabled: "false",
+		thread_id: "thread-a",
+	});
+});
+it("replaces a positive client attestation with a negative upstream attestation", async () => {
+	vi.stubEnv("CODEX_MULTI_AUTH_CLIENT_ATTESTATION", "negative");
+	const f = await fixture();
+	const ws = await f.connect();
+	const turnMetadata = {
+		thread_id: "thread-a",
+		sandbox: "seatbelt",
+		sandbox_mode: "workspace-write",
+		auto_review_enabled: true,
+		node_repl_auto_review_required: true,
+		node_repl_disabled: false,
+	};
+	await turn(ws, {
+		model: "shared",
+		input: [],
+		client_metadata: {
+			"x-codex-turn-metadata": JSON.stringify(turnMetadata),
+			sandbox: "seatbelt",
+			sandbox_mode: "workspace-write",
+			auto_review_enabled: "true",
+			node_repl_auto_review_required: "true",
+			node_repl_disabled: "false",
+			thread_id: "thread-a",
+		},
+	});
+	expect(f.calls[0]?.client_metadata).toEqual({
+		"x-codex-turn-metadata": JSON.stringify({
+			thread_id: "thread-a",
+			sandbox: "none",
+			sandbox_mode: "danger-full-access",
+			auto_review_enabled: false,
+			node_repl_auto_review_required: false,
+			node_repl_disabled: true,
+		}),
+		sandbox: "none",
+		sandbox_mode: "danger-full-access",
+		auto_review_enabled: "false",
+		node_repl_auto_review_required: "false",
+		node_repl_disabled: "true",
+		thread_id: "thread-a",
+	});
 });
 it("rejects unknown or cross-pool continuations without sending them upstream", async () => {
 	const f = await fixture();
@@ -603,10 +688,26 @@ it("falls back to HTTP for an API credential whose WebSocket handshake is refuse
 	const posts: string[] = [];
 	const g = await customGateway({ upstream: rejectingUpstream(404, {}, (body) => posts.push(body)) });
 	const ws = await g.connect();
-	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
+	const client_metadata = {
+		"x-codex-turn-metadata": JSON.stringify({
+			sandbox: "none",
+			sandbox_mode: "danger-full-access",
+			auto_review_enabled: false,
+			node_repl_auto_review_required: false,
+		}),
+	};
+	expect((await turn(ws, { model: "api/fixture", input: [], client_metadata })).at(-1)).toMatchObject({ type: "response.completed" });
 	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
 	expect(posts).toHaveLength(2);
-	expect(JSON.parse(posts[0]!)).toMatchObject({ model: "api/fixture", stream: true });
+	expect(JSON.parse(posts[0]!).client_metadata).toMatchObject({
+		"x-codex-turn-metadata": JSON.stringify({
+			sandbox: "seatbelt",
+			sandbox_mode: "workspace-write",
+			auto_review_enabled: true,
+			node_repl_auto_review_required: true,
+			node_repl_disabled: false,
+		}),
+	});
 });
 
 it("does not fall back to HTTP for a ChatGPT workspace whose handshake is refused", async () => {

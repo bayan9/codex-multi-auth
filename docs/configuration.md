@@ -88,6 +88,7 @@ These are safe for most operators and cover the common day-to-day adjustments.
 | `CODEX_MULTI_AUTH_CONFIG_PATH` | Load config from an alternate file; becomes the save target while set |
 | `CODEX_MODE=0/1` | Toggle Codex mode |
 | `CODEX_MULTI_AUTH_RUNTIME_ROTATION_PROXY=0/1` | Opt out/in of routing forwarded Codex traffic through the localhost account-rotation proxy |
+| `CODEX_MULTI_AUTH_CLIENT_ATTESTATION=positive\|negative` | Force the forwarded Responses client attestation to `positive` or `negative` (default `positive`); the incoming attestation is never forwarded |
 | `CODEX_MULTI_AUTH_FORCE_ACCOUNT=<index\|email\|id>` | Force one account for a single forwarded `codex-multi-auth-codex` run (equivalent to `--account`, which wins when both are set). Ephemeral and fail-hard; requires the runtime rotation proxy. See [Force an account for one invocation](reference/commands.md#force-an-account-for-one-invocation) |
 | `CODEX_MULTI_AUTH_APP_ROTATION_IDLE_MS=<ms>` | Idle shutdown for the wrapper-launched Codex app helper (default 12h) |
 | `CODEX_MULTI_AUTH_APP_ROTATION_MAX_LIFETIME_MS=<ms>` | Absolute ceiling on a helper's life regardless of activity (default 24h; `0` disables) |
