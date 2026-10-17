@@ -303,6 +303,16 @@ Automatic on first load: legacy worktree-keyed pools merge into the repo-shared 
 
 ---
 
+## Emergency-only account policy compatibility
+
+The new `account emergency-only` command reserves an account from automatic rotation until regular capacity and reset credits are exhausted.
+
+The `emergencyOnly` account flag reserves subscription accounts until regular
+pool capacity and reset credits are confirmed exhausted. Older policy writers
+do not preserve this flag. Before downgrading, pause reserved accounts or remove
+them from the enabled pool; reapply `account emergency-only <index> on` after
+upgrading. Existing pause and drain flags remain independent.
+
 ## Related
 
 - [getting-started.md](getting-started.md)
@@ -311,10 +321,10 @@ Automatic on first load: legacy worktree-keyed pools merge into the repo-shared 
 - [reference/storage-paths.md](reference/storage-paths.md)
 - [development/CONFIG_FLOW.md](development/CONFIG_FLOW.md)
 
-### Emergency-only account policy compatibility
+## Selected workspace routing
 
-The `emergencyOnly` account flag reserves subscription accounts until regular
-pool capacity and reset credits are confirmed exhausted. Older policy writers
-do not preserve this flag. Before downgrading, pause reserved accounts or remove
-them from the enabled pool; reapply `account emergency-only <index> on` after
-upgrading. Existing pause and drain flags remain independent.
+Native pool requests, model discovery, and reset targets now honor the selected
+workspace only. Unselected siblings and stored bindings are not fallback routes.
+A disabled selected workspace makes the account unavailable until an enabled
+workspace is selected. Use `workspace <account> <workspace> enable` or `disable`
+to control availability without changing selection.

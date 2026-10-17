@@ -318,13 +318,16 @@ applies session affinity and the ephemeral `--account` override. Use
 ```bash
 codex-multi-auth workspace <account>             # list the account's tracked workspaces
 codex-multi-auth workspace <account> <workspace> # set the active workspace for that account
+codex-multi-auth workspace <account> <workspace> enable
+codex-multi-auth workspace <account> <workspace> disable
 ```
 
 Both arguments are 1-based indexes as shown by `codex-multi-auth list` and the
 workspace listing. With only an account index, prints the workspaces the
-account can rotate between (for example a personal Plus seat and a
-business/team seat under the same email, issue #491); with a workspace index,
-persists that selection.
+account can select (for example a personal Plus seat and a business/team seat
+under the same email); with a workspace index, persists that selection.
+`enable` and `disable` preserve the selection. Disabling the selected workspace
+makes that account unavailable; it never silently selects another workspace.
 
 > Authorization vs membership: tracked workspaces come from the token's claims,
 > which advertise **membership**. Codex CLI 0.156.0+ additionally checks
@@ -597,11 +600,12 @@ rotating. Automatic reset-credit redemption never moves traffic off the pin;
 warning after a CLI switch can reflect this intentional separation.
 
 `--native --catalog-account <index>` prefers an enabled reference account's
-model metadata. Discovery unions enabled accounts and their enabled workspaces;
-each request needs one workspace supporting the complete model + reasoning +
-speed combination, preferring the selected workspace, then the stored binding,
-then other enabled workspaces. Workspace choice is per request and never
-changes the desktop login or saved selection. Catalogs refresh on demand after
+model metadata. Discovery and inference use only each account's selected, enabled
+workspace. A disabled or unavailable selected workspace never falls back to a
+sibling or stored binding; rotation may use another eligible account instead.
+Accounts without tracked workspaces use their stored binding. Each selected
+workspace must support the complete model + reasoning + speed combination.
+Catalogs refresh on demand after
 5 minutes (failed discovery retries after 5 seconds; a throttled catalog honors
 `Retry-After` capped at 15 minutes; `check capabilities` retries at once). A
 workspace whose catalog was never fetched is unknown and stays routable; once

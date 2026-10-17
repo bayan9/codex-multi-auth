@@ -13,7 +13,8 @@ export const SUBSCRIPTION_RESERVE_PERCENT = 5;
 export const SUBSCRIPTION_QUOTA_MAX_AGE_MS = 15 * 60_000;
 
 export function hasFreshOrdinaryUsagePermission(entry: QuotaCacheEntry | null | undefined, now: number): boolean {
- return entry?.status === 200 && entry.ordinaryUsageAllowed === true && Number.isFinite(entry.updatedAt) && entry.updatedAt <= now && now-entry.updatedAt <= 60_000;
+ const checkedAt = entry?.ordinaryUsageCheckedAt ?? entry?.updatedAt;
+ return entry?.status === 200 && entry.ordinaryUsageAllowed === true && typeof checkedAt === "number" && Number.isFinite(checkedAt) && checkedAt <= now && now-checkedAt <= 60_000;
 }
 
 /** Scheduling hint only; percentages are not comparable dollar/token balances. */

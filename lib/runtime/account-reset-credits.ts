@@ -12,8 +12,10 @@ import { withCheckProgress } from '../ui/check-progress.js';
 
 export function resetTargetForStoredAccount(account:AccountMetadataV3):ResetTarget|null{
  // Organization display aliases are not native ChatGPT workspace identities.
- const stored=account.accountId?.trim();
- const id=stored?.startsWith("org-") ? extractAccountId(account.accessToken)?.trim() : stored;
+ const selected=account.workspaces?.length ? account.workspaces[account.currentWorkspaceIndex ?? 0] : undefined;
+ if(account.workspaces?.length && (!selected || selected.enabled===false))return null;
+ const stored=(selected?.id ?? account.accountId)?.trim();
+ const id=!account.workspaces?.length && stored?.startsWith("org-") ? extractAccountId(account.accessToken)?.trim() : stored;
  const workspace=account.workspaces?.find(w=>w.id===id);
  if(!id||id.startsWith("org-")||account.enabled===false||workspace?.enabled===false)return null;
  return {key:modelScopeId('oauth',resolveAccountRecordId(account),id),accountId:id};
@@ -22,8 +24,7 @@ export function isResetTargetEnabled(account:AccountMetadataV3,target:ResetTarge
  if(account.enabled===false)return false;
  const canonical=resetTargetForStoredAccount(account);
  if(canonical?.key===target.key&&canonical.accountId===target.accountId)return true;
- const scopeKey=modelScopeId('oauth',resolveAccountRecordId(account),target.accountId);
- return !target.accountId.startsWith('org-')&&scopeKey===target.key&&Boolean(account.workspaces?.some(w=>w.id===target.accountId&&w.enabled!==false));
+ return false;
 }
 
 export function createResetCreditService(manager?:AccountManager):ResetCreditService {

@@ -25,7 +25,9 @@ export function workspaceModelScopes(account: ManagedAccount) {
   // Same record identity as reset-credit targets (resolveAccountRecordId), or their keys diverge.
   id:modelScopeId("oauth",resolveAccountRecordId(account),scope.accountId),
   accountIndex:account.index,
-  routable:scope.enabled && Boolean(scope.accountId),
+  routable:scope.enabled && Boolean(scope.accountId) && ((account.workspaces?.length ?? 0) > 0
+   ? scope.workspaceIndex === (account.currentWorkspaceIndex ?? 0)
+   : scope.accountId === boundId),
   bound:scope.accountId===boundId,
   selected:scope.workspaceIndex >= 0 && scope.workspaceIndex===(account.currentWorkspaceIndex??0),
   label:`Account ${account.index+1}${scope.workspaceIndex>=0?` / Workspace ${scope.workspaceIndex+1}`:candidates.length>1?" / Stored binding":""}`,

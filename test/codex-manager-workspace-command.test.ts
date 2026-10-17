@@ -47,6 +47,26 @@ function createDeps(
 }
 
 describe("runWorkspaceCommand", () => {
+ it("disables the selected workspace without switching to a sibling", async () => {
+  const storage=createStorage(); const deps=createDeps({loadAccounts:async()=>storage});
+  expect(await runWorkspaceCommand(["1","1","disable"],deps)).toBe(0);
+  expect(storage.accounts[0]?.workspaces?.[0]?.enabled).toBe(false);
+  expect(storage.accounts[0]?.currentWorkspaceIndex).toBe(0);
+  expect(deps.saveAccounts).toHaveBeenCalled();
+ });
+ it("enables a workspace without changing selection", async () => {
+  const storage=createStorage(); storage.accounts[0]!.workspaces![1]!.enabled=false;
+  const deps=createDeps({loadAccounts:async()=>storage});
+  expect(await runWorkspaceCommand(["1","2","enable"],deps)).toBe(0);
+  expect(storage.accounts[0]?.workspaces?.[1]?.enabled).toBe(true);
+  expect(storage.accounts[0]?.currentWorkspaceIndex).toBe(0);
+ });
+ it("rejects an unknown workspace action without saving", async () => {
+  const deps=createDeps();
+  expect(await runWorkspaceCommand(["1","2","typo"],deps)).toBe(1);
+  expect(deps.saveAccounts).not.toHaveBeenCalled();
+ });
+
 	it("errors when no accounts are configured", async () => {
 		const deps = createDeps({ loadAccounts: vi.fn(async () => null) });
 		const result = await runWorkspaceCommand(["1"], deps);

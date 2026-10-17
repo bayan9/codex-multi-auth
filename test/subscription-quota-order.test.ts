@@ -54,3 +54,10 @@ it('uses fresh authoritative permission despite rounded 100 percent usage',()=>{
  expect(subscriptionQuotaPreference({...entry,updatedAt:now+1},now).exhausted).toBe(true);
  expect(subscriptionQuotaPreference({...entry,ordinaryUsageAllowed:null},now).exhausted).toBe(true);
 });
+
+it('does not renew native permission when newer quota headers arrive',()=>{
+ const entry={...quota(0,24),ordinaryUsageAllowed:true,ordinaryUsageCheckedAt:now-60001};
+ expect(subscriptionQuotaPreference(entry,now).exhausted).toBe(true);
+ expect(subscriptionQuotaPreference({...entry,ordinaryUsageCheckedAt:now-1000},now).exhausted).toBe(false);
+ expect(subscriptionQuotaPreference({...entry,status:429,ordinaryUsageCheckedAt:now},now).exhausted).toBe(true);
+});

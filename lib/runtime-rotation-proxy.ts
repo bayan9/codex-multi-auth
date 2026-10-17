@@ -10,7 +10,7 @@ import { recoverResetQuota, applyConfirmedReset, primaryPoolFullyExhausted } fro
 import { readSubscriptionQuotaEvent } from "./runtime/subscription-quota-event.js";
 import { loadQuotaCache } from "./quota-cache.js";
 import { findQuotaCacheEntryForAccount } from "./quota-readiness.js";
-import { subscriptionQuotaPreference, compareSubscriptionQuota, type SubscriptionQuotaPreference } from "./runtime/subscription-quota-order.js";
+import { hasFreshOrdinaryUsagePermission, subscriptionQuotaPreference, compareSubscriptionQuota, type SubscriptionQuotaPreference } from "./runtime/subscription-quota-order.js";
 import { inferenceAccountKey } from "./runtime/inference-activity.js";
 import { modelScopeId, workspaceModelScopes } from "./runtime/workspace-model-scopes.js";
 import { RuntimeCapabilityFailures, classifyCapabilityFailure } from "./runtime/runtime-capability-failures.js";
@@ -2091,7 +2091,7 @@ async function handleRequestInner(
                 const retryAt = backoff.get(key) ?? 0;
                 if (retryAt > state.now()) throw new CatalogRetryError(retryAt - state.now());
                 backoff.delete(key);
-				const scope = state.activeAccountManager.getAccountsSnapshot().flatMap(workspaceModelScopes).find(s=>s.id===key && s.enabled);
+				const scope = state.activeAccountManager.getAccountsSnapshot().flatMap(workspaceModelScopes).find(s=>s.id===key && s.routable);
     const account = scope ? state.activeAccountManager.getAccountByIndex(scope.accountIndex) : null;
 				if (!account || account.enabled === false || account.authInvalidatedAt ||
                     (account.cooldownReason === "auth-failure" && (account.coolingDownUntil ?? 0) > state.now())) throw new Error("Account unavailable");
@@ -2155,7 +2155,7 @@ async function handleRequestInner(
 							),
 					);
 				const scopes = discovery.flatMap(workspaceModelScopes);
-				const enabledKeys = scopes.filter(scope => scope.enabled).map(scope => scope.id);
+				const enabledKeys = scopes.filter(scope => scope.routable).map(scope => scope.id);
 				const routableKeys = scopes.filter(scope => scope.routable).map(scope => scope.id);
 				const oauthRefresh = modelCatalog.list(enabledKeys);
 				// Explicit check waits for all workspaces; picker discovery runs API and OAuth in parallel.
@@ -2331,12 +2331,13 @@ async function handleRequestInner(
   const recoverPrimaryQuota = async (): Promise<boolean> => {
    if (!state.nativeOpenai || !isResponsesRequest || !context.model || context.model === LUNA_RESERVE_MODEL || isPinned) return false;
    try {
+    const observations = state.subscriptionQuotaObservations ??= new Map();
     const recovered=await recoverResetQuota({model:context.model,family:context.family,native:true,pinned:false,manager:accountManager,
      scopes:primaryWorkspaceCandidates(),quotaForScope,priorityByAccount:policyDecision?.priorityByAccount,preferredIndex:storageMeta.pinnedAccountIndex,service:createResetCreditService(accountManager),
-     observations:state.subscriptionQuotaObservations ??= new Map(),now:state.now,
+     observations,now:state.now,
      clearQuotaScheduler:account=>state.preemptiveQuotaScheduler.clear(buildQuotaScheduleKey(account,context.family,context.model)),
     });
-    resetCreditState=await loadResetCreditState();
+    try { resetCreditState=await loadResetCreditState(); } catch { resetCreditState=null; }
     return recovered;
    } catch {
     resetCreditState=null;
@@ -2400,8 +2401,10 @@ async function handleRequestInner(
 		// alternative account, so exhausting that local heuristic can only reject a
 		// request that the pinned account could serve. Transcription is not inference
 		// and must not debit the Codex model pool or claim its inference circuit probe.
+		// Native subscriptions use upstream quota for admission; local scoring must
+		// not synthesize a 429 while actual subscription capacity remains.
 		// Transcription uses credential-only admission below.
-		const bypassPoolTokenBucket = isPinned || isTranscribeRequest;
+		const bypassPoolTokenBucket = isPinned || isTranscribeRequest || (state.nativeOpenai && isResponsesRequest);
 		const refundConsumedPoolToken = (account: ManagedAccount): void => {
 			if (!bypassPoolTokenBucket) {
 				accountManager.refundToken(account, context.family, context.model);
@@ -2764,6 +2767,8 @@ async function handleRequestInner(
 				context.family,
 				context.model,
 			);
+			const selectedScope = workspaceCandidates.get(selected.index)?.[0];
+            const nativePermission = selectedScope && hasFreshOrdinaryUsagePermission(quotaForScope(selected,selectedScope),state.now());
 			const preemptiveDeferral = state.preemptiveQuotaScheduler.getDeferral(
 				quotaScheduleKey,
 				state.now(),
@@ -2771,7 +2776,7 @@ async function handleRequestInner(
 			if (
 				!isTranscribeRequest &&
 				context.model !== LUNA_RESERVE_MODEL &&
-				preemptiveDeferral.defer &&
+				!nativePermission && preemptiveDeferral.defer &&
 				preemptiveDeferral.waitMs > 0
 			) {
 				accountSkipReasons.set(
@@ -3190,7 +3195,9 @@ async function handleRequestInner(
 					const observations = state.subscriptionQuotaObservations ??= new Map();
 					const key = JSON.stringify([requestScope.id, context.model]);
 					if (observations.size >= 1000 && !observations.has(key)) observations.delete(observations.keys().next().value ?? "");
-					observations.set(key, { ...merged, model: context.model ?? "unknown", planType: planType ?? previous?.planType });
+					observations.set(key, { ...merged, model: context.model ?? "unknown", planType: planType ?? previous?.planType,
+      ...(snapshot.status === 200 && hasFreshOrdinaryUsagePermission(previous,state.now()) ? {ordinaryUsageAllowed:true,ordinaryUsageCheckedAt:previous?.ordinaryUsageCheckedAt ?? previous?.updatedAt} : {}),
+     });
 				}
 			};
 			const quotaSnapshot = readQuotaSchedulerSnapshot(upstream.headers, upstream.status, state.now());
@@ -3288,6 +3295,7 @@ async function handleRequestInner(
 					}
 					if (outcome === "retry") continue;
 				}
+
 				if (context.model !== LUNA_RESERVE_MODEL && subscriptionQuotaExceeded) {
 					state.preemptiveQuotaScheduler.markRateLimited(
 						quotaScheduleKey,
@@ -3644,7 +3652,7 @@ async function handleRequestInner(
 					state.now(),
 				);
 				const nearExhaustionWaitMs =
-					context.model === LUNA_RESERVE_MODEL
+					(context.model === LUNA_RESERVE_MODEL || (requestScope && hasFreshOrdinaryUsagePermission(quotaForScope(refreshed.account,requestScope),state.now())))
 						? 0
 						: quotaDeferral.defer
 							? quotaDeferral.waitMs
