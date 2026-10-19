@@ -49,3 +49,15 @@ it("rejects client metadata above the attestation match limit", () => {
     `{"model":"shared","client_metadata":{"thread_id":"keep",${duplicates}"extra":1}}`,
   ))).toBeNull();
 });
+
+
+it("preserves unrelated object-valued turn metadata", () => {
+  const headers = new Headers({
+    "x-codex-turn-metadata": '{"thread_id":"keep","client_metadata":{}}',
+  });
+  applyClientAttestation({}, headers);
+  expect(JSON.parse(headers.get("x-codex-turn-metadata")!)).toMatchObject({
+    thread_id: "keep",
+    client_metadata: {},
+  });
+});

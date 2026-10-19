@@ -308,7 +308,7 @@ function parseAttestableObject(
 		const scan = scanJsonObject(text, rewrittenKeys);
 		if (!scan || scan.overflowed) return null;
 		let clientMetadataScan: JsonObjectScan | undefined;
-		if (isRecord(body.client_metadata)) {
+		if (rewrittenKeys.has("client_metadata") && isRecord(body.client_metadata)) {
 			let clientMetadataEntry: JsonObjectEntry | undefined;
 			for (const candidate of scan.entries) {
 				if (candidate.key === "client_metadata") clientMetadataEntry = candidate;
