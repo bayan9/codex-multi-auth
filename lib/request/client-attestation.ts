@@ -64,6 +64,7 @@ interface JsonObjectScan {
 	closeIndex: number;
 	entries: JsonObjectEntry[];
 	hasUnrewrittenEntry: boolean;
+	overflowed: boolean;
 }
 
 const MAX_REWRITTEN_MEMBER_MATCHES = 1_024;
@@ -82,6 +83,13 @@ function jsonStringEnd(text: string, index: number): number {
 		else if (char === '"') return cursor + 1;
 	}
 	return text.length;
+}
+
+function jsonStringHasEscape(text: string, start: number, end: number): boolean {
+	for (let cursor = start + 1; cursor < end - 1; cursor += 1) {
+		if (text.charCodeAt(cursor) === 92) return true;
+	}
+	return false;
 }
 
 function jsonValueEnd(text: string, index: number): number {
@@ -150,6 +158,7 @@ function scanJsonObject(
 	cursor += 1;
 	let commaBefore: number | null = null;
 	let hasUnrewrittenEntry = false;
+	let overflowed = false;
 	const entries: JsonObjectEntry[] = [];
 	const canonicalKeys = [...rewrittenKeys].map((key) => ({
 		key,
@@ -157,16 +166,16 @@ function scanJsonObject(
 	}));
 	for (;;) {
 		cursor = skipJsonWhitespace(text, cursor);
-		if (text.charAt(cursor) === "}") return { closeIndex: cursor, entries, hasUnrewrittenEntry };
+		if (text.charAt(cursor) === "}") return { closeIndex: cursor, entries, hasUnrewrittenEntry, overflowed };
 		if (text.charAt(cursor) !== '"') return null;
 		const entryStart = cursor;
 		const keyStart = cursor;
 		const keyEnd = jsonStringEnd(text, cursor);
 		let key: string | undefined;
-		const escapeIndex = text.indexOf("\\", keyStart + 1);
+		const escapedKey = jsonStringHasEscape(text, keyStart, keyEnd);
 		for (const candidate of canonicalKeys) {
 			const matches =
-				escapeIndex >= 0 && escapeIndex < keyEnd
+				escapedKey
 					? decodedJsonStringEquals(text, keyStart, keyEnd, candidate.key)
 					: candidate.source.length === keyEnd - keyStart &&
 						text.startsWith(candidate.source, keyStart);
@@ -182,8 +191,8 @@ function scanJsonObject(
 		cursor = skipJsonWhitespace(text, valueEnd);
 		const commaAfter = text.charAt(cursor) === "," ? cursor : null;
 		if (key) {
-			if (entries.length >= MAX_REWRITTEN_MEMBER_MATCHES) return null;
-			entries.push({
+			if (entries.length >= MAX_REWRITTEN_MEMBER_MATCHES) overflowed = true;
+			else entries.push({
 				key,
 				start: entryStart,
 				end: valueEnd,
@@ -196,7 +205,7 @@ function scanJsonObject(
 			hasUnrewrittenEntry = true;
 		}
 		if (commaAfter === null) {
-			if (text.charAt(cursor) === "}") return { closeIndex: cursor, entries, hasUnrewrittenEntry };
+			if (text.charAt(cursor) === "}") return { closeIndex: cursor, entries, hasUnrewrittenEntry, overflowed };
 			return null;
 		}
 		commaBefore = commaAfter;
@@ -247,6 +256,7 @@ function rewriteJsonObject(
 	body: Record<string, unknown>,
 	rewrittenKeys: Set<string>,
 	scan = scanJsonObject(text, rewrittenKeys),
+	clientMetadataScan?: JsonObjectScan,
 ): string {
 	const serializedEntries: string[] = [];
 	const serializedKeys = new Set<string>();
@@ -263,7 +273,12 @@ function rewriteJsonObject(
 			const originalValue = original
 				? text.slice(original.valueStart, original.valueEnd)
 				: "{}";
-			serializedValue = rewriteJsonObject(originalValue, value, TURN_ATTESTATION_KEYS);
+			serializedValue = rewriteJsonObject(
+				originalValue,
+				value,
+				TURN_ATTESTATION_KEYS,
+				clientMetadataScan,
+			);
 		} else {
 			serializedValue = JSON.stringify(value);
 		}
@@ -291,10 +306,25 @@ function parseAttestableObject(
 		const body = JSON.parse(text) as unknown;
 		if (!isRecord(body)) return null;
 		const scan = scanJsonObject(text, rewrittenKeys);
-		if (!scan) return null;
+		if (!scan || scan.overflowed) return null;
+		let clientMetadataScan: JsonObjectScan | undefined;
+		if (isRecord(body.client_metadata)) {
+			let clientMetadataEntry: JsonObjectEntry | undefined;
+			for (const candidate of scan.entries) {
+				if (candidate.key === "client_metadata") clientMetadataEntry = candidate;
+			}
+			if (!clientMetadataEntry) return null;
+			clientMetadataScan = scanJsonObject(
+				text.slice(clientMetadataEntry.valueStart, clientMetadataEntry.valueEnd),
+				TURN_ATTESTATION_KEYS,
+			) ?? undefined;
+			if (!clientMetadataScan || clientMetadataScan.overflowed) return null;
+		}
 		return {
 			body,
-			serialize: () => Buffer.from(rewriteJsonObject(text, body, rewrittenKeys, scan)),
+			serialize: () => Buffer.from(
+				rewriteJsonObject(text, body, rewrittenKeys, scan, clientMetadataScan),
+			),
 		};
 	} catch {
 		return null;

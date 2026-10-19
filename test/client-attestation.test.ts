@@ -36,8 +36,16 @@ it("preserves deeply nested unrelated client metadata", () => {
 });
 
 it("handles many duplicate unrelated members without member allocation growth", () => {
-  const duplicates = `"x":0,"\\u0078":0,`.repeat(50_000);
+  const duplicates = `"x":0,`.repeat(200_000);
   const payload = parseAttestableRequestBody(Buffer.from(`{${duplicates}"model":"shared"}`))!;
   applyClientAttestation(payload.body, new Headers());
   expect(payload.serialize().toString()).toContain(duplicates);
 }, 1_000);
+
+
+it("rejects client metadata above the attestation match limit", () => {
+  const duplicates = `"sandbox":"attested",`.repeat(1_025);
+  expect(parseAttestableRequestBody(Buffer.from(
+    `{"model":"shared","client_metadata":{"thread_id":"keep",${duplicates}"extra":1}}`,
+  ))).toBeNull();
+});
