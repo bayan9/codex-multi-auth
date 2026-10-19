@@ -1,12 +1,25 @@
-import { extractAccountId, type AccountManager, type ManagedAccount } from '../accounts.js';
+import type { AccountManager, ManagedAccount } from '../accounts.js';
 import { LUNA_RESERVE_MODEL } from '../constants.js';
 import type { ModelFamily } from '../prompts/codex.js';
 import type { QuotaCacheEntry } from '../quota-cache.js';
 import { parseModelRoute } from '../model-route-policy.js';
 import { subscriptionQuotaPreference } from './subscription-quota-order.js';
 import { resetSnapshotQuota, isResetSubscription, type ResetSnapshot, type ResetCreditService } from './reset-credits.js';
-import type { workspaceModelScopes } from './workspace-model-scopes.js';
+import { workspaceModelScopes } from './workspace-model-scopes.js';
 type Scope=ReturnType<typeof workspaceModelScopes>[number];
+
+/** Account-level quota blockers belong to the currently routed workspace. */
+function clearRecoveredScopeQuota(options:{account:ManagedAccount;scope:Scope;family:ModelFamily;model:string;manager:AccountManager;clearQuotaScheduler:(account:ManagedAccount)=>void}):boolean {
+ const {account,scope,family,model,manager,clearQuotaScheduler}=options;
+ // Recheck selection and enablement: a reset read may outlive a workspace change.
+ if(account.lastRateLimitReason!=='quota'||!workspaceModelScopes(account).some(current=>
+  current.routable&&current.id===scope.id&&current.accountId===scope.accountId))return false;
+ delete account.rateLimitResetTimes[family];delete account.rateLimitResetTimes[`${family}:${model}`];
+ if(account.cooldownReason==='rate-limit')manager.clearAccountCooldown(account);
+ clearQuotaScheduler(account);
+ return true;
+}
+
 export async function recoverResetQuota(options:{
  model:string;family?:ModelFamily;native:boolean;pinned:boolean;manager:AccountManager;
  scopes:Map<number,Scope[]>;priorityByAccount?:Record<number,number>;preferredIndex?:number|null;quotaForScope:(account:ManagedAccount,scope:Scope)=>QuotaCacheEntry|null|undefined;
@@ -35,12 +48,7 @@ export async function recoverResetQuota(options:{
   if(!snapshot||snapshot.updatedAt<(previous?.updatedAt??0)||options.now()-snapshot.updatedAt>60000||snapshot.updatedAt>options.now())continue;
   options.observations.set(JSON.stringify([scope.id,options.model]),resetSnapshotQuota(snapshot));
   if(snapshot.ordinaryUsageAllowed!==true)continue;
-  // Do not clear sibling workspace/model throttles or authentication failures.
-  if((scope.bound || (account.accountId?.startsWith('org-')&&scope.accountId===extractAccountId(account.access)))&&account.lastRateLimitReason==='quota'){
-   delete account.rateLimitResetTimes[family];delete account.rateLimitResetTimes[`${family}:${options.model}`];
-   if(account.cooldownReason==='rate-limit')options.manager.clearAccountCooldown(account);
-   options.clearQuotaScheduler(account);
-  }
+  clearRecoveredScopeQuota({...options,account,scope,family});
   recovered=true;
  }
  if(recovered)options.manager.saveToDiskDebounced();
@@ -53,12 +61,7 @@ export function applyConfirmedReset(options:{account:ManagedAccount;scope:Scope;
  const s=options.snapshot;
  if(!s||options.lastRedemptionAt===undefined||s.updatedAt<options.lastRedemptionAt||s.ordinaryUsageAllowed!==true||s.updatedAt<=(options.previous?.updatedAt??0)||options.now-s.updatedAt>60000||s.updatedAt>options.now)return false;
  options.observations.set(JSON.stringify([options.scope.id,options.model]),resetSnapshotQuota(s));
- if((options.scope.bound || (options.account.accountId?.startsWith('org-')&&options.scope.accountId===extractAccountId(options.account.access)))&&options.account.lastRateLimitReason==='quota'){
-  delete options.account.rateLimitResetTimes[options.family];delete options.account.rateLimitResetTimes[`${options.family}:${options.model}`];
-  if(options.account.cooldownReason==='rate-limit')options.manager.clearAccountCooldown(options.account);
-  options.clearQuotaScheduler(options.account);
-  options.manager.saveToDiskDebounced();
- }
+ if(clearRecoveredScopeQuota(options))options.manager.saveToDiskDebounced();
  return true;
 }
 

@@ -1,16 +1,56 @@
-import { expect, it, vi } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
 import { applyConfirmedReset, recoverResetQuota } from '../lib/runtime/reset-credit-routing.js';
 import { AccountManager } from '../lib/accounts.js';
 import { workspaceModelScopes } from '../lib/runtime/workspace-model-scopes.js';
-function fixture(){
- const manager=new AccountManager(undefined,{version:3,activeIndex:0,accounts:[{recordId:'first',accountId:'workspace',refreshToken:'r',addedAt:1,lastUsed:1}]});
+import { chooseAccount } from '../lib/runtime/rotation-account-selection.js';
+beforeEach(()=>AccountManager.resetVolatileRuntimeState());
+function fixture(selectedWorkspace=false){
+ const manager=new AccountManager(undefined,{version:3,activeIndex:0,accounts:[{recordId:'first',accountId:'workspace',refreshToken:'r',addedAt:1,lastUsed:1,...(selectedWorkspace?{workspaces:[{id:'workspace',enabled:true},{id:'selected-workspace',enabled:true}],currentWorkspaceIndex:1}:{})}]});
  // Recovery schedules a debounced save; never let it write the shared test store after the test.
  const save=vi.spyOn(manager,'saveToDiskDebounced').mockImplementation(()=>{});
- const account=manager.getAccountByIndex(0)!;const scope=workspaceModelScopes(account)[0]!;
+ const account=manager.getAccountByIndex(0)!;const scope=workspaceModelScopes(account).find(candidate=>candidate.routable)!;
  const automatic=vi.fn(async()=>null);const status=vi.fn(async()=>({snapshots:{[scope.id]:{updatedAt:1000,ordinaryUsageAllowed:true,availableCount:1,planType:'pro',primary:{usedPercent:0},secondary:{usedPercent:0}}}}));
  const service={automatic,status};const observations=new Map();const clear=vi.fn();
  return {manager,account,scope,service,observations,clear,save,args:{model:'chat-test',native:true,pinned:false,manager,scopes:new Map([[0,[scope]]]),quotaForScope:()=>({updatedAt:900,status:200,model:'chat-test',planType:'pro',primary:{usedPercent:100},secondary:{}}),service,observations,clearQuotaScheduler:clear,now:()=>1000}};
 }
+
+async function applyFixtureRecovery(f:ReturnType<typeof fixture>,mode:'automatic'|'confirmed'){
+ if(mode==='automatic')return recoverResetQuota(f.args);
+ const snapshot=(await f.service.status()).snapshots[f.scope.id];
+ return applyConfirmedReset({account:f.account,scope:f.scope,model:'chat-test',family:'codex',manager:f.manager,snapshot,lastRedemptionAt:999,previous:undefined,observations:f.observations,clearQuotaScheduler:f.clear,now:1000});
+}
+
+it.each(['automatic','confirmed'] as const)('%s recovery makes the selected workspace eligible when it differs from the stored binding',async mode=>{
+ const f=fixture(true);const until=Date.now()+90000;
+ f.account.lastRateLimitReason='quota';
+ f.account.rateLimitResetTimes={codex:until,'codex:chat-test':until,'codex:other-model':until};
+ f.account.cooldownReason='rate-limit';f.account.coolingDownUntil=until;
+ const choose=()=>chooseAccount({accountManager:f.manager,sessionAffinityStore:null,sessionKey:null,family:'codex',model:'chat-test',attemptedIndexes:new Set(),now:Date.now(),policy:null,pinnedIndex:null});
+ expect(f.scope.bound).toBe(false);expect(f.scope.selected).toBe(true);
+ expect(choose()).toBeNull();
+ expect(await applyFixtureRecovery(f,mode)).toBe(true);
+ expect(choose()?.index).toBe(f.account.index);
+ expect(f.account.rateLimitResetTimes).toEqual({'codex:other-model':until});
+ expect(f.account.coolingDownUntil).toBeUndefined();
+ expect(f.clear).toHaveBeenCalledWith(f.account);expect(f.save).toHaveBeenCalled();
+});
+
+it.each(['automatic','confirmed'] as const)('%s recovery cannot clear a stale bound workspace after selection changes',async mode=>{
+ const f=fixture();const until=Date.now()+90000;
+ f.account.lastRateLimitReason='quota';f.account.rateLimitResetTimes={codex:until};
+ f.account.workspaces=[{id:'workspace',enabled:true},{id:'selected-workspace',enabled:true}];
+ f.account.currentWorkspaceIndex=1;
+ await applyFixtureRecovery(f,mode);
+ expect(f.account.rateLimitResetTimes).toEqual({codex:until});expect(f.clear).not.toHaveBeenCalled();
+});
+
+it.each(['automatic','confirmed'] as const)('%s recovery cannot clear blockers for a disabled selected workspace',async mode=>{
+ const f=fixture();const until=Date.now()+90000;
+ f.account.lastRateLimitReason='quota';f.account.rateLimitResetTimes={codex:until};
+ f.account.workspaces=[{id:'workspace',enabled:false}];f.account.currentWorkspaceIndex=0;
+ await applyFixtureRecovery(f,mode);
+ expect(f.account.rateLimitResetTimes).toEqual({codex:until});expect(f.clear).not.toHaveBeenCalled();
+});
 it.each(['api/chat-test','zdr/chat-test'])('never redeems across the %s privacy pool',async model=>{const f=fixture();await recoverResetQuota({...f.args,model});expect(f.service.automatic).not.toHaveBeenCalled();});
 it.each([5,50,94,99])('uses remaining subscription quota at %s%% used without spending a reset',async used=>{const f=fixture();await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),primary:{usedPercent:used}})});expect(f.service.automatic).not.toHaveBeenCalled();});
 it('does not redeem for an explicit pin or non-native route',async()=>{const f=fixture();await recoverResetQuota({...f.args,pinned:true});await recoverResetQuota({...f.args,native:false});expect(f.service.automatic).not.toHaveBeenCalled();});
