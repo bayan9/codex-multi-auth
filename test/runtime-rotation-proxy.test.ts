@@ -6062,6 +6062,45 @@ describe("request-level capability rejections",()=>{
 });
 
 describe('earned reset last-resort integration',()=>{
+ it.each(['invalidated-before-request','invalidated-during-catalog','usable'] as const)('counts only authenticated primary capacity before emergency routing (%s)',async mode=>{
+  vi.spyOn(runtimePolicy,'evaluateRuntimePolicy').mockResolvedValue({allowed:true,statusCode:200,errorCode:null,reasons:[],projectKey:null,blockedAccountIndexes:new Set(),emergencyAccountIndexes:new Set([0]),scoreBoostByAccount:{},priorityByAccount:{0:1,1:2,2:3},budgetEvaluations:[]});
+  const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
+  const native=await import('../lib/runtime/native-rate-limits.js');
+  const reads:string[]=[];const consumptions:string[]=[];
+  vi.spyOn(native,'nativeRateLimitsRpc').mockImplementation(async(auth,method)=>{
+   if(method==='account/rateLimitResetCredit/consume'){consumptions.push(auth.accountId);return {outcome:'reset'};}
+   reads.push(auth.accountId);
+   return {accountId:auth.accountId,ordinaryUsageAllowed:false,rateLimitResetCredits:{availableCount:0},rateLimits:{planType:'promax',primary:{usedPercent:100,resetsAt:Math.floor(Date.now()/1000)+3600},secondary:{usedPercent:0}}};
+  });
+  const fs=await import('node:fs/promises');const os=await import('node:os');const path=await import('node:path');
+  const previousDir=process.env.CODEX_MULTI_AUTH_DIR;const dir=await fs.mkdtemp(path.join(os.tmpdir(),'emergency-auth-capacity-'));process.env.CODEX_MULTI_AUTH_DIR=dir;
+  try{
+   await createResetCreditService().setPolicy('last-resort');
+   const disk=createStorage(Date.now(),3);
+   if(mode==='invalidated-before-request')disk.accounts[2]!.authInvalidatedAt=Date.now();
+   const stored=await import('../lib/storage.js');vi.spyOn(stored,'loadAccounts').mockResolvedValue(disk);
+   const manager=new AccountManager(undefined,disk);
+   const {calls,fetchImpl}=createRecordingFetch(call=>{
+    if(call.url.includes('/models')){
+     if(mode==='invalidated-during-catalog'&&call.headers.get('chatgpt-account-id')==='acc_3')manager.markAuthInvalidated(manager.getAccountByIndex(2)!);
+     return Response.json({models:[{slug:'chat-fixture'}]});
+    }
+    return textEventStream();
+   });
+   const exhausted={updatedAt:Date.now(),status:200,model:'chat-fixture',planType:'promax',ordinaryUsageAllowed:false,primary:{usedPercent:100},secondary:{usedPercent:0}};
+   const available={...exhausted,ordinaryUsageAllowed:true,primary:{usedPercent:0}};
+   const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readSubscriptionQuota:async()=>({byAccountId:{acc_1:available,acc_2:exhausted,acc_3:available},byEmail:{}})}});
+   const response=await postResponses(proxy,{model:'chat-fixture',input:'fixture'});await response.text();
+   expect(response.status).toBe(200);
+   expect(calls.filter(call=>call.url.endsWith('/responses')).map(call=>call.headers.get('chatgpt-account-id'))).toEqual([mode==='usable'?'acc_3':'acc_1']);
+   expect(consumptions).toEqual([]);
+   expect(reads).toEqual(mode==='usable'?[]:['acc_2']);
+   if(mode!=='usable')expect(manager.getAccountByIndex(2)?.authInvalidatedAt).toBeGreaterThan(0);
+  }finally{
+   if(previousDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=previousDir;
+   await removeWithRetry(dir,{recursive:true,force:true});
+  }
+ });
  it.each(['usable','reset','no-credit','unknown','discover-exhaustion','discover-still-limited','usable-headers','reset-read-failure'] as const)('holds emergency accounts behind primary capacity and credits (%s)',async mode=>{
   const discovered=mode.startsWith('discover-')||mode==='reset-read-failure';
   const resetMode=mode==='reset'||mode==='reset-read-failure';

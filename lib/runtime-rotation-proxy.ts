@@ -2318,9 +2318,12 @@ async function handleRequestInner(
      observations:state.subscriptionQuotaObservations ??=new Map(),now:state.now(),clearQuotaScheduler:a=>state.preemptiveQuotaScheduler.clear(buildQuotaScheduleKey(a,context.family,context.model))});
    }
   }
-  const primaryWorkspaceCandidates = () => new Map([...workspaceCandidates].filter(([index]) =>
-   !policyDecision?.emergencyAccountIndexes?.has(index) && !policyDecision?.blockedAccountIndexes.has(index),
-  ));
+  const primaryWorkspaceCandidates = () => new Map([...workspaceCandidates].filter(([index]) => {
+   const account = accountManager.getAccountByIndex(index);
+   // Catalog candidates can outlive credential invalidation while preparing a request.
+   return account && account.enabled !== false && !account.authInvalidatedAt &&
+    !policyDecision?.emergencyAccountIndexes?.has(index) && !policyDecision?.blockedAccountIndexes.has(index);
+  }));
   const emergencyBackupsAllowed = () => state.nativeOpenai && isResponsesRequest &&
    context.model !== LUNA_RESERVE_MODEL && primaryPoolFullyExhausted(
     primaryWorkspaceCandidates(), resetCreditState, state.now(), (index, scope) => {
