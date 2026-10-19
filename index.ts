@@ -1169,6 +1169,12 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 									);
 								}
 
+								// This host cannot prove ordinary capacity and permitted reset
+								// recovery are exhausted, so emergency accounts stay reserved.
+								const blockedAccountIndexes = new Set([
+									...(runtimePolicyDecision?.blockedAccountIndexes ?? []),
+									...(runtimePolicyDecision?.emergencyAccountIndexes ?? []),
+								]);
 								const abortSignal = requestInit?.signal ?? init?.signal ?? null;
 								const sleep = createAbortableSleep(abortSignal);
 								const poolCooldownRemainingMs =
@@ -1347,7 +1353,7 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 													modelFamily,
 													model,
 												) &&
-												!runtimePolicyDecision?.blockedAccountIndexes.has(
+												!blockedAccountIndexes.has(
 													preferredSessionAccountIndex,
 												)
 											) {
@@ -1374,6 +1380,7 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 												{
 													pidOffsetEnabled,
 													scoreBoostByAccount: capabilityBoostByAccount,
+													blockedAccountIndexes,
 												},
 											);
 										}
@@ -1381,11 +1388,7 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 											break;
 										}
 										attempted.add(account.index);
-										if (
-											runtimePolicyDecision?.blockedAccountIndexes.has(
-												account.index,
-											)
-										) {
+										if (blockedAccountIndexes.has(account.index)) {
 											continue;
 										}
 										// Log account selection for debugging rotation
@@ -2447,7 +2450,9 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 												const streamFallbackCandidateOrder =
 													buildAdaptiveStreamFailoverCandidateOrder(
 														account.index,
-														accountSnapshotList as Array<
+														accountSnapshotList.filter(
+															(candidate) => !blockedAccountIndexes.has(candidate.index),
+														) as Array<
 															Pick<
 																import("./lib/accounts.js").ManagedAccount,
 																| "index"
@@ -2482,6 +2487,7 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 																return null;
 															}
 															if (
+																	blockedAccountIndexes.has(candidateIndex) ||
 																!accountManager.isAccountAvailableForFamily(
 																	candidateIndex,
 																	modelFamily,
