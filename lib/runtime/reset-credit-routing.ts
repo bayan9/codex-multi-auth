@@ -68,7 +68,14 @@ export async function recoverResetQuota(options:{
  for(const {account,scope} of candidates){
   const snapshot=state.snapshots[scope.id];const previous=options.quotaForScope(account,scope);
   const rejectedAt=rejectionForScope(account,scope)?.observedAt??0;
-  if(!snapshot||snapshot.updatedAt<Math.max(previous?.updatedAt??0,rejectedAt)||options.now()-snapshot.updatedAt>60000||snapshot.updatedAt>options.now())continue;
+  // Healthy headers may arrive late from an older in-flight request. Native
+  // permission chronology wins there; unknown, exhausted, and failed reads do not.
+  const healthyHeaders=snapshot?.ordinaryUsageAllowed===true&&previous?.status===200&&
+   (subscriptionQuotaPreference(previous,options.now()).remainingPercent??0)>0;
+  const previousAt=healthyHeaders
+   ?typeof previous?.ordinaryUsageAllowed==='boolean'?previous.ordinaryUsageCheckedAt??previous.updatedAt:0
+   :previous?.updatedAt??0;
+  if(!snapshot||snapshot.updatedAt<Math.max(previousAt,rejectedAt)||options.now()-snapshot.updatedAt>60000||snapshot.updatedAt>options.now())continue;
   options.observations.set(JSON.stringify([scope.id,options.model]),resetSnapshotQuota(snapshot));
   if(snapshot.ordinaryUsageAllowed!==true)continue;
   clearRecoveredScopeQuota({...options,account,scope,family});

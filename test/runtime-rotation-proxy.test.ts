@@ -163,7 +163,11 @@ it.each(["quota headers on 400", "body-only quota 429", "body-only quota 429 wit
   }
 });
 
-it.each([false,true])("keeps body-only quota evidence when an older in-flight response completes (quota headers: %s)", async withHeaders => {
+it.each([
+  { label: "without headers before recheck", withHeaders: false, afterCheck: false },
+  { label: "with headers before recheck", withHeaders: true, afterCheck: false },
+  { label: "with headers after recheck", withHeaders: true, afterCheck: true },
+])("keeps body-only quota evidence when an older in-flight response completes $label", async ({ withHeaders, afterCheck }) => {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
   const path = await import("node:path");
@@ -192,10 +196,21 @@ it.each([false,true])("keeps body-only quota evidence when an older in-flight re
   const actualRecover = recovery.recoverResetQuota;
   let completedOld = false;
   const recover = vi.spyOn(recovery, "recoverResetQuota").mockImplementation(async options => {
-    if (!completedOld && options.quotaRejections?.size) {
+    if (!afterCheck && !completedOld && options.quotaRejections?.size) {
       completedOld = true;
       releaseOld(); await oldBody;
     }
+    if (afterCheck) return actualRecover({ ...options, service: {
+      automatic: (...args) => options.service.automatic(...args),
+      status: async () => {
+        const snapshot = await options.service.status();
+        if (!completedOld && consumeCount > 0) {
+          completedOld = true;
+          releaseOld(); await oldBody;
+        }
+        return snapshot;
+      },
+    } });
     return actualRecover(options);
   });
   try {

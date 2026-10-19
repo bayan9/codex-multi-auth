@@ -3,6 +3,7 @@ import { applyConfirmedReset, recoverResetQuota } from '../lib/runtime/reset-cre
 import { AccountManager } from '../lib/accounts.js';
 import { workspaceModelScopes } from '../lib/runtime/workspace-model-scopes.js';
 import { chooseAccount } from '../lib/runtime/rotation-account-selection.js';
+import type { QuotaCacheEntry } from '../lib/quota-cache.js';
 beforeEach(()=>AccountManager.resetVolatileRuntimeState());
 function fixture(selectedWorkspace=false){
  const manager=new AccountManager(undefined,{version:3,activeIndex:0,accounts:[{recordId:'first',accountId:'workspace',refreshToken:'r',addedAt:1,lastUsed:1,...(selectedWorkspace?{workspaces:[{id:'workspace',enabled:true},{id:'selected-workspace',enabled:true}],currentWorkspaceIndex:1}:{})}]});
@@ -187,4 +188,35 @@ it('uses newer authoritative exhaustion instead of an older body rejection',asyn
  const quotaRejections=new Map([[JSON.stringify([f.scope.id,f.args.model]),proof]]);
  await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),updatedAt:1000,ordinaryUsageAllowed:false}),quotaRejections});
  expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith([{key:f.scope.id,accountId:f.scope.accountId}],[{...proof,observedAt:1000}]);
+});
+
+it.each([true,false])('applies a fresh native permission when older healthy headers arrive after its check (carried native permission: %s)',async carried=>{
+ const f=fixture();
+ let latest:QuotaCacheEntry={...f.args.quotaForScope(),primary:{usedPercent:20},ordinaryUsageAllowed:true};
+ const quotaRejections=new Map([[JSON.stringify([f.scope.id,f.args.model]),{key:f.scope.id,accountId:f.scope.accountId,observedAt:950}]]);
+ f.service.status.mockImplementation(async()=>{
+  // Native permission was checked at 975, then an earlier request's headers arrived.
+  latest={...f.args.quotaForScope(),updatedAt:1000,primary:{usedPercent:20},...(carried?{ordinaryUsageAllowed:true,ordinaryUsageCheckedAt:900}:{})};
+  return {snapshots:{[f.scope.id]:{updatedAt:975,ordinaryUsageAllowed:true,availableCount:1,planType:'pro',primary:{usedPercent:0},secondary:{usedPercent:0}}}};
+ });
+ expect(await recoverResetQuota({...f.args,quotaForScope:()=>latest,quotaRejections})).toBe(true);
+ expect(f.observations.get(JSON.stringify([f.scope.id,f.args.model]))).toMatchObject({updatedAt:975,ordinaryUsageAllowed:true});
+});
+
+it.each(['exhaustion','failure','unknown','native-denial','native-permission','body-rejection'] as const)('does not apply an older native permission over newer %s evidence',async reason=>{
+ const f=fixture();
+ let latest:QuotaCacheEntry={...f.args.quotaForScope(),primary:{usedPercent:20},ordinaryUsageAllowed:true};
+ const proof={key:f.scope.id,accountId:f.scope.accountId,observedAt:950};
+ const quotaRejections=new Map([[JSON.stringify([f.scope.id,f.args.model]),proof]]);
+ f.service.status.mockImplementation(async()=>{
+  latest={...f.args.quotaForScope(),updatedAt:1000,primary:{usedPercent:reason==='exhaustion'?100:20}};
+  if(reason==='failure')latest.status=429;
+  if(reason==='unknown')latest.primary={};
+  if(reason==='native-denial')latest.ordinaryUsageAllowed=false;
+  if(reason==='native-permission')latest.ordinaryUsageAllowed=true;
+  if(reason==='body-rejection')proof.observedAt=1000;
+  return {snapshots:{[f.scope.id]:{updatedAt:975,ordinaryUsageAllowed:true,availableCount:1,planType:'pro',primary:{usedPercent:0},secondary:{usedPercent:0}}}};
+ });
+ expect(await recoverResetQuota({...f.args,quotaForScope:()=>latest,quotaRejections})).toBe(false);
+ expect(f.observations.size).toBe(0);
 });
