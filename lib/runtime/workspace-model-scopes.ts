@@ -1,18 +1,10 @@
 import { createHash } from "node:crypto";
 import { resolveAccountRecordId, type ManagedAccount } from "../accounts.js";
-import { extractAccountId, codexCliAccountIdFor, isOpenAiOrgId } from "../auth/token-utils.js";
+import { extractAccountId, nativeWorkspaceIdentity } from "../auth/token-utils.js";
+export { nativeWorkspaceIdentity } from "../auth/token-utils.js";
 
 export function modelScopeId(...parts: string[]): string {
  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
-}
-
-/** Preserve the native client's org-alias mapping; this is not workspace fallback. */
-export function nativeWorkspaceIdentity(account: Pick<ManagedAccount,"access"|"codexCliMirror">, storedId: string | undefined): string | undefined {
- const id=storedId?.trim();
- if(!id)return undefined;
- if(!isOpenAiOrgId(id))return id;
- const native=codexCliAccountIdFor({accountId:id,codexCliMirror:account.codexCliMirror},account.access);
- return native && !isOpenAiOrgId(native) ? native : undefined;
 }
 
 /** Request scopes are immutable views. Discovery must never switch a saved account. */

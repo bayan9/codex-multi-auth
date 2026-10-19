@@ -230,3 +230,19 @@ it("reserves emergency accounts even if automatic priming was enabled",async()=>
  await runAutomaticAccountChecks(f.options);
  expect(f.check.mock.calls.map(call=>call[1])).toEqual([1]);
 });
+
+it("retains a canonical Personal throttle while its alias is unselected", async () => {
+    const f=fixture();f.enable(0);
+    const account=f.storage.accounts[0]!;
+    account.accessToken=`e30.${Buffer.from(JSON.stringify({"https://api.openai.com/auth":{chatgpt_account_id:"native-personal"}})).toString("base64url")}.fixture`;
+    account.workspaces=[{id:"org-personal",enabled:true},{id:"other",enabled:true}];
+    account.currentWorkspaceIndex=0;
+    await runAutomaticAccountChecks(f.options);
+    const firstKey=automaticAccountCheckKey(account);
+    expect(firstKey).toBe(automaticAccountCheckKey({...account,workspaces:[{id:"native-personal",enabled:true}],currentWorkspaceIndex:0}));
+    account.currentWorkspaceIndex=1;
+    await runAutomaticAccountChecks(f.options);
+    account.currentWorkspaceIndex=0;
+    await runAutomaticAccountChecks(f.options);
+    expect(f.check).toHaveBeenCalledTimes(2);
+});

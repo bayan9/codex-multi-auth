@@ -42,6 +42,27 @@ it("does not prime a disabled saved workspace even when a sibling is enabled", a
     expect(probe).not.toHaveBeenCalled();
 });
 
+it.each(["token", "mirror", "unresolved", "disabled"])("canonicalizes selected Personal quota probes (%s)", async mode => {
+    const accessToken = `e30.${Buffer.from(JSON.stringify({"https://api.openai.com/auth": {chatgpt_account_id: "native-token"}})).toString("base64url")}.fixture`;
+    const account = { recordId: "alias-record", accountId: "other-workspace", refreshToken: "fixture-refresh", accessToken: mode === "unresolved" ? "opaque" : accessToken, expiresAt: Date.now()+3600000, addedAt: 1, lastUsed: 1, currentWorkspaceIndex: 1, workspaces: [{id:"other-workspace",enabled:true},{id:"org-personal",name:"Personal",enabled:mode !== "disabled"}], ...(mode === "mirror" ? {codexCliMirror:{forAccountId:"org-personal",accountId:"native-mirror"}} : {}) };
+    await saveAccounts({version:3, activeIndex:0, accounts:[account]});
+    const before = await fs.readFile(join(dir,"accounts.json"),"utf8");
+    const policies: AccountPolicyStore = {version:1,accounts:{}};
+    upsertAccountPolicy(policies,getAccountPolicyKey(account),p=>{p.autoPrime=true;});
+    await saveAccountPolicyStore(policies);
+    const cache: QuotaCacheData = {byAccountId:{},byEmail:{}};
+    loadQuota.mockResolvedValue(cache);
+    await createAutomaticSubscriptionCheck()(new AbortController().signal);
+    if (mode === "unresolved" || mode === "disabled") expect(probe).not.toHaveBeenCalled();
+    else {
+        const expected = mode === "mirror" ? "native-mirror" : "native-token";
+        expect(probe).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({accountId:expected,accessToken,primeUnusedSubscription:true}));
+        expect(findQuotaCacheEntryForAccount(cache,account,[account])?.status).toBe(200);
+        expect(findQuotaCacheEntryForAccount(cache,account,[account],undefined,"other-workspace")).toBeNull();
+    }
+    expect(await fs.readFile(join(dir,"accounts.json"),"utf8")).toBe(before);
+});
+
 it("does not probe credentials replaced while refreshing the saved account", async () => {
     const account = { recordId: "fixture", accountId: "personal", refreshToken: "fixture-refresh", accessToken: "fixture-access", expiresAt: Date.now() + 3600000, addedAt: 1, lastUsed: 1 };
     await saveAccounts({ version: 3, activeIndex: 0, accounts: [account] });
