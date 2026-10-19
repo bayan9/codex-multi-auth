@@ -2155,6 +2155,89 @@ describe("runtime rotation proxy", () => {
 		});
 	});
 
+	it.each(
+		["/thread/goal/get", "/thread/goal/set", "/codex/thread/goal/get", "/codex/thread/goal/set"]
+			.flatMap((path) => ["GET", "POST"].flatMap((method) => [false, true].map((useStorageReader) => ({ path, method, useStorageReader })))),
+	)("uses the selected workspace for native goal $method $path (storage reader: $useStorageReader)", async ({ path, method, useStorageReader }) => {
+		const storage = createStorage(Date.now(), 1);
+		storage.accounts[0]!.workspaces = [
+			{ id: "acc_1", enabled: true },
+			{ id: "selected-goal-workspace", enabled: true },
+		];
+		storage.accounts[0]!.currentWorkspaceIndex = 1;
+		const accountManager = new AccountManager(undefined, structuredClone(storage));
+		const payload = { threadId: "goal-fixture", goal: "fixture goal" };
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ goal: "fixture goal" }));
+		const proxy = await startProxy({
+			accountManager, fetchImpl,
+			options: {
+				nativeOpenai: true,
+				...(useStorageReader ? { readNativeAccountStorage: async () => structuredClone(storage) } : {}),
+			},
+		});
+		const response = method === "GET"
+			? await getThreadGoal(proxy, `${path}?thread_id=goal-fixture`)
+			: await postThreadGoal(proxy, payload, path);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ goal: "fixture goal" });
+		expect(calls).toHaveLength(1);
+		expect(calls[0]!.url).toBe(`https://example.test/backend-api${path.startsWith("/codex/") ? path : `/codex${path}`}${method === "GET" ? "?thread_id=goal-fixture" : ""}`);
+		expect(calls[0]!.headers.get(OPENAI_HEADERS.ACCOUNT_ID)).toBe("selected-goal-workspace");
+		expect(calls[0]!.headers.get("authorization")).toBe("Bearer access-1");
+		expect(calls[0]!.bodyText).toBe(method === "POST" ? JSON.stringify(payload) : "");
+		expect(accountManager.getAccountByIndex(0)?.accountId).toBe("acc_1");
+		expect(accountManager.getAccountByIndex(0)?.currentWorkspaceIndex).toBe(1);
+	});
+
+	it.each([false, true])("does not use a sibling when the native goal workspace is disabled (storage reader: %s)", async (useStorageReader) => {
+		const storage = createStorage(Date.now(), 1);
+		storage.accounts[0]!.workspaces = [
+			{ id: "acc_1", enabled: true },
+			{ id: "disabled-goal-workspace", enabled: false },
+		];
+		storage.accounts[0]!.currentWorkspaceIndex = 1;
+		const accountManager = new AccountManager(undefined, structuredClone(storage));
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ goal: "must not be reached" }));
+		const proxy = await startProxy({
+			accountManager, fetchImpl,
+			options: {
+				nativeOpenai: true,
+				...(useStorageReader ? { readNativeAccountStorage: async () => structuredClone(storage) } : {}),
+			},
+		});
+		const response = await postThreadGoal(proxy, { threadId: "goal-fixture", goal: "fixture goal" }, "/thread/goal/set");
+		await response.text();
+		expect(calls).toHaveLength(0);
+		expect(accountManager.getAccountByIndex(0)?.currentWorkspaceIndex).toBe(1);
+	});
+
+	it.each(["disabled", "changed"])("rejects a native goal workspace %s during token refresh before dispatch", async (change) => {
+		const now = Date.now();
+		const storage = createStorage(now, 1);
+		storage.accounts[0]!.expiresAt = now - 60_000;
+		storage.accounts[0]!.workspaces = [
+			{ id: "acc_1", enabled: true },
+			{ id: "selected-goal-workspace", enabled: true },
+		];
+		storage.accounts[0]!.currentWorkspaceIndex = 1;
+		const accountManager = new AccountManager(undefined, structuredClone(storage));
+		refreshAccessTokenMock.mockImplementationOnce(async () => {
+			if (change === "disabled") storage.accounts[0]!.workspaces![1]!.enabled = false;
+			else storage.accounts[0]!.currentWorkspaceIndex = 0;
+			return { type: "success", access: "fresh-goal-access", refresh: "refresh-1", expires: now + 3_600_000 };
+		});
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ goal: "must not be reached" }));
+		const proxy = await startProxy({
+			accountManager, fetchImpl,
+			options: { nativeOpenai: true, readNativeAccountStorage: async () => structuredClone(storage) },
+		});
+		const response = await postThreadGoal(proxy, { threadId: "goal-fixture", goal: "fixture goal" }, "/thread/goal/set");
+		expect(response.status).toBe(503);
+		expect((await response.json()).error.code).toBe("routing_configuration_changed");
+		expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1);
+		expect(calls).toHaveLength(0);
+	});
+
 	it("keeps the thread goal fallback when a transport failure exhausts the pool", async () => {
 		const now = Date.UTC(2099, 0, 1);
 		const accountManager = new AccountManager(undefined, createStorage(now));

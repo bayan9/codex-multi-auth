@@ -2945,7 +2945,7 @@ async function handleRequestInner(
 
 			let pendingScopes = workspaceCandidates.get(refreshed.account.index);
 			// Routes without model-catalog preparation still use the selected enabled workspace.
-			if (isImageRequest || isTranscribeRequest) {
+			if (isImageRequest || isTranscribeRequest || isThreadGoalRequest) {
 				pendingScopes = workspaceModelScopes(refreshed.account)
 					.filter((scope) => scope.routable)
 					.sort((a, b) => Number(b.selected) - Number(a.selected) || Number(b.bound) - Number(a.bound));
