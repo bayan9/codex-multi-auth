@@ -1041,11 +1041,14 @@ describe("runtime rotation proxy", () => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
 		const { calls, fetchImpl } = createRecordingFetch(() => textEventStream("data: forwarded\n\n"));
 		const proxy = await startProxy({ accountManager, fetchImpl });
-		const raw = '{"model":"gpt-5-codex","input":[],"maximum":9007199254740993,"ratio":1.2300e+4}';
+		const raw = '{"model":"speed/accelerated/common","input":"\\u005f\\u005fcma_raw_number_0","maximum":9007199254740993,"ratio":1.2300e+4}';
 		const response = await fetch(`${proxy.baseUrl}/responses`, {method: "POST", headers: {authorization: `Bearer ${DEFAULT_CLIENT_API_KEY}`, "content-type": "application/json"}, body: raw});
 		expect(response.status).toBe(HTTP_STATUS.OK);
 		expect(calls[0]?.bodyText).toContain('"maximum":9007199254740993');
 		expect(calls[0]?.bodyText).toContain('"ratio":1.2300e+4');
+		expect(calls[0]?.bodyText).toContain('"model":"common"');
+		expect(calls[0]?.bodyText).toContain('"service_tier":"accelerated"');
+		expect(JSON.parse(calls[0]?.bodyText ?? "{}").input).toBe("__cma_raw_number_0");
 	});
 
 	it("replaces a negative client attestation with a positive upstream attestation", async () => {

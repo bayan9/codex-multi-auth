@@ -1538,15 +1538,14 @@ async function handleRequestInner(
 				: Buffer.alloc(0);
 		if (isResponsesRequest) {
 			requestBody = await decodeRequestBody(requestBody, incomingHeaders.get("content-encoding"), state.maxRequestBodyBytes);
-			const parsed = parseRequestBody(requestBody);
+			const attestable = parseAttestableRequestBody(requestBody);
+			const parsed = attestable?.body;
 			if (!parsed || typeof parsed.model !== "string" || !parsed.model.trim()) {
 				throw createRuntimeProxyHttpError("Responses requests require a JSON object with a model.", 400, "invalid_request_body");
 			}
    let route;
    try { route=parseModelRoute(parsed.model); } catch { throw createRuntimeProxyHttpError("Invalid model route.",400,"invalid_model_route"); }
    if(route.kind==="oauth") {
-    const attestable = parseAttestableRequestBody(requestBody);
-    if (!attestable) throw createRuntimeProxyHttpError("Responses requests require a JSON object with a model.", 400, "invalid_request_body");
     if(route.serviceTier){
      if(parsed.service_tier&&canonicalServiceTier(String(parsed.service_tier))!==canonicalServiceTier(route.serviceTier))throw createRuntimeProxyHttpError("Conflicting speed selection.",400,"conflicting_service_tier");
      attestable.body.model=route.upstreamModel;attestable.body.service_tier=route.serviceTier;

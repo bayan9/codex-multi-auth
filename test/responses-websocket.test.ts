@@ -590,7 +590,7 @@ function rejectingUpstream(status: number, headers: Record<string, string>, onPo
 	const upstream = createServer(async (req, res) => {
 		const chunks: Buffer[] = [];
 		for await (const chunk of req) chunks.push(Buffer.from(chunk));
-		onPost?.(Buffer.concat(chunks).toString("utf8"));
+		onPost?.(Buffer.concat(chunks).toString("utf8"), req.headers);
 		res.writeHead(200, { "content-type": "text/event-stream" });
 		res.end(`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_http", output: [] } })}\n\n`);
 	});
@@ -686,7 +686,7 @@ it("does not send the HTTP routing beta to the OAuth WebSocket endpoint", async 
 
 it("falls back to HTTP for an API credential whose WebSocket handshake is refused", async () => {
 	const posts: Array<{body: string; contentType?: string}> = [];
-	const g = await customGateway({ upstream: rejectingUpstream(404, {}, (body, headers) => posts.push({body, contentType: headers["content-type"]})) });
+	const g = await customGateway({ upstream: rejectingUpstream(404, {}, (body, headers) => posts.push({body, contentType: headers?.["content-type"]})) });
 	const ws = await g.connect();
 	const client_metadata = {
 		"x-codex-turn-metadata": JSON.stringify({
@@ -699,8 +699,11 @@ it("falls back to HTTP for an API credential whose WebSocket handshake is refuse
 	expect((await turn(ws, { model: "api/fixture", input: [], client_metadata })).at(-1)).toMatchObject({ type: "response.completed" });
 	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
 	expect(posts).toHaveLength(2);
-	expect(posts[0]?.contentType).toBe("application/json");
-	expect(JSON.parse(posts[0]!.body)).not.toHaveProperty("client_metadata");
+	for (const post of posts) {
+		expect(post.contentType).toBe("application/json");
+		expect(JSON.parse(post.body)).toMatchObject({ stream: true });
+		expect(JSON.parse(post.body)).not.toHaveProperty("client_metadata");
+	}
 });
 
 it("does not fall back to HTTP for a ChatGPT workspace whose handshake is refused", async () => {

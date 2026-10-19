@@ -11,10 +11,15 @@ it("keeps attested turn metadata header ASCII-safe", () => {
 });
 
 
-it("preserves exact JSON number tokens through attestation", () => {
-  const payload = parseAttestableRequestBody(Buffer.from('{"model":"shared","input":[],"maximum":9007199254740993,"ratio":1.2300e+4}'))!;
+it("preserves escaped user strings and exact numbers through attestation", () => {
+  const payload = parseAttestableRequestBody(Buffer.from('{"model":"shared","input":"\\u005f\\u005fcma_raw_number_0","\\u005f\\u005fcma_raw_number_1":1,"client_metadata":{"limit":9007199254740993},"enum":[0,0,0],"sandbox":9007199254740993,"maximum":9007199254740993,"ratio":1.2300e+4}'))!;
   applyClientAttestation(payload.body, new Headers());
   const serialized = payload.serialize().toString();
+  expect(JSON.parse(serialized).input).toBe("__cma_raw_number_0");
+  expect(JSON.parse(serialized).__cma_raw_number_1).toBe(1);
+  expect(serialized).toContain('"client_metadata":{"limit":9007199254740993');
+  expect(serialized).toContain('"enum":[0,0,0]');
+  expect(serialized).toContain('"sandbox":9007199254740993');
   expect(serialized).toContain('"maximum":9007199254740993');
   expect(serialized).toContain('"ratio":1.2300e+4');
 });

@@ -40,57 +40,147 @@ function asciiHeaderValue(value: string): string {
 	);
 }
 
-/** Parse JSON while retaining every numeric token for lossless serialization. */
-export function parseAttestableRequestBody(source: Buffer): {
+const REQUEST_ATTESTATION_KEYS = new Set([
+	"client_metadata",
+	"model",
+	"service_tier",
+]);
+const TURN_ATTESTATION_KEYS = new Set([
+	...CLIENT_ATTESTATION_METADATA_KEYS,
+	TURN_METADATA_HEADER,
+]);
+
+interface JsonObjectEntry {
+	key: string;
+	start: number;
+	end: number;
+	valueStart: number;
+	valueEnd: number;
+}
+
+function skipJsonWhitespace(text: string, index: number): number {
+	while (/\s/.test(text.charAt(index))) index += 1;
+	return index;
+}
+
+function jsonStringEnd(text: string, index: number): number {
+	let escaped = false;
+	for (let cursor = index + 1; cursor < text.length; cursor += 1) {
+		const char = text.charAt(cursor);
+		if (escaped) escaped = false;
+		else if (char === "\\") escaped = true;
+		else if (char === '"') return cursor + 1;
+	}
+	return text.length;
+}
+
+function jsonValueEnd(text: string, index: number): number {
+	if (text.charAt(index) === '"') return jsonStringEnd(text, index);
+	let depth = 0;
+	let quoted = false;
+	let escaped = false;
+	for (let cursor = index; cursor < text.length; cursor += 1) {
+		const char = text.charAt(cursor);
+		if (quoted) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') quoted = false;
+			continue;
+		}
+		if (char === '"') quoted = true;
+		else if (char === "{" || char === "[") depth += 1;
+		else if (char === "}" || char === "]") {
+			if (depth === 0) return cursor;
+			depth -= 1;
+			if (depth === 0) return cursor + 1;
+		} else if (char === "," && depth === 0) return cursor;
+	}
+	return text.length;
+}
+
+function jsonObjectEntries(text: string, start = 0): JsonObjectEntry[] | null {
+	let cursor = skipJsonWhitespace(text, start);
+	if (text.charAt(cursor) !== "{") return null;
+	cursor += 1;
+	const entries: JsonObjectEntry[] = [];
+	for (;;) {
+		cursor = skipJsonWhitespace(text, cursor);
+		if (text.charAt(cursor) === "}") return entries;
+		if (text.charAt(cursor) !== '"') return null;
+		const entryStart = cursor;
+		const keyEnd = jsonStringEnd(text, cursor);
+		let key: unknown;
+		try {
+			key = JSON.parse(text.slice(cursor, keyEnd));
+		} catch {
+			return null;
+		}
+		cursor = skipJsonWhitespace(text, keyEnd);
+		if (text.charAt(cursor) !== ":") return null;
+		const valueStart = skipJsonWhitespace(text, cursor + 1);
+		const valueEnd = jsonValueEnd(text, valueStart);
+		entries.push({ key: String(key), start: entryStart, end: valueEnd, valueStart, valueEnd });
+		cursor = skipJsonWhitespace(text, valueEnd);
+		if (text.charAt(cursor) === "}") return entries;
+		if (text.charAt(cursor) !== ",") return null;
+		cursor += 1;
+	}
+}
+
+function rewriteJsonObject(
+	text: string,
+	body: Record<string, unknown>,
+	rewrittenKeys: Set<string>,
+): string {
+	const entries = jsonObjectEntries(text) ?? [];
+	const preserved = entries
+		.filter((entry) => !rewrittenKeys.has(entry.key))
+		.map((entry) => text.slice(entry.start, entry.end));
+	for (const key of Object.keys(body).filter((key) => rewrittenKeys.has(key))) {
+		const value = body[key];
+		let serializedValue = JSON.stringify(value);
+		if (key === "client_metadata" && isRecord(value)) {
+			const original = [...entries].reverse().find((entry) => entry.key === key);
+			const originalValue = original
+				? text.slice(original.valueStart, original.valueEnd)
+				: "{}";
+			serializedValue = rewriteJsonObject(
+				originalValue,
+				value,
+				new Set([...CLIENT_ATTESTATION_METADATA_KEYS, TURN_METADATA_HEADER]),
+			);
+		}
+		preserved.push(`${JSON.stringify(key)}:${serializedValue}`);
+	}
+	return `{${preserved.join(",")}}`;
+}
+
+function parseAttestableObject(
+	source: Buffer,
+	rewrittenKeys: Set<string>,
+): {
 	body: Record<string, unknown>;
 	serialize: () => Buffer;
 } | null {
 	const text = source.toString("utf8");
-	let prefix = "__cma_raw_number_";
-	while (text.includes(prefix)) prefix = `_${prefix}`;
-	const numbers: string[] = [];
-	let protectedText = "";
-	let quoted = false;
-	let escaped = false;
-	for (let index = 0; index < text.length;) {
-		const char = text.charAt(index);
-		if (quoted) {
-			protectedText += char;
-			if (escaped) escaped = false;
-			else if (char === "\\") escaped = true;
-			else if (char === '"') quoted = false;
-			index += 1;
-			continue;
-		}
-		if (char === '"') {
-			quoted = true;
-			protectedText += char;
-			index += 1;
-			continue;
-		}
-		const match = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
-		if (match) {
-			protectedText += JSON.stringify(`${prefix}${numbers.length}`);
-			numbers.push(match[0]);
-			index += match[0].length;
-		} else {
-			protectedText += char;
-			index += 1;
-		}
-	}
 	try {
-		const body = JSON.parse(protectedText) as unknown;
-		if (!isRecord(body)) return null;
+		const body = JSON.parse(text) as unknown;
+		if (!isRecord(body) || !jsonObjectEntries(text)) return null;
 		return {
 			body,
-			serialize: () => Buffer.from(
-				JSON.stringify(body).replace(new RegExp(`"${prefix}(\\d+)"`, "g"),
-					(whole, index: string) => numbers[Number(index)] ?? whole),
-			),
+			serialize: () => Buffer.from(rewriteJsonObject(text, body, rewrittenKeys)),
 		};
 	} catch {
 		return null;
 	}
+}
+
+/** Parse a Responses object and retain unrelated JSON source lexemes. */
+export function parseAttestableRequestBody(source: Buffer): {
+	body: Record<string, unknown>;
+	serialize: () => Buffer;
+} | null {
+	return parseAttestableObject(source, REQUEST_ATTESTATION_KEYS);
 }
 
 function clientMetadataAttestation(attestation: ClientAttestation) {
@@ -123,7 +213,7 @@ function attestedTurnMetadata(
 	attestation: ClientAttestation,
 ): string {
 	const attestable = typeof value === "string"
-		? parseAttestableRequestBody(Buffer.from(value))
+		? parseAttestableObject(Buffer.from(value), TURN_ATTESTATION_KEYS)
 		: null;
 	const parsed = attestable?.body ?? {};
 	removeClientAttestationMetadata(parsed);
