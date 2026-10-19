@@ -5,16 +5,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountManager } from "../lib/accounts.js";
 import {
 	getAccountPolicyKey,
+	getAccountPolicyPath,
 	saveAccountPolicyStore,
 	upsertAccountPolicy,
 	type AccountPolicyStore,
 } from "../lib/account-policy.js";
 import { clearCircuitBreakers } from "../lib/circuit-breaker.js";
+import * as logger from "../lib/logger.js";
+import * as runtimePolicy from "../lib/policy/runtime-policy.js";
 import { resetRuntimePolicyCacheForTests } from "../lib/policy/runtime-policy-cache.js";
 import { resetTrackers } from "../lib/rotation.js";
 import { resetRequestResilienceStateForTests } from "../lib/request/request-resilience.js";
 import { SessionAffinityStore } from "../lib/session-affinity.js";
 import { setStoragePath, type AccountStorageV3 } from "../lib/storage.js";
+import { readUsageLedgerRows } from "../lib/usage/index.js";
 import { removeWithRetry } from "./helpers/remove-with-retry.js";
 
 vi.mock("@codex-ai/plugin/tool", () => {
@@ -79,7 +83,8 @@ describe("exported plugin emergency admission", () => {
 
 	async function request(mode:
 		| "ordinary" | "only-emergency" | "affinity" | "paused"
-		| "invalid-auth" | "disabled-workspace" | "stream" | "stream-policy",
+		| "invalid-auth" | "disabled-workspace" | "stream" | "stream-policy"
+		| "malformed-policy" | "load-failure" | "evaluation-failure" | "missing-policy",
 	) {
 		const now = Date.now();
 		const account = (index: number): AccountStorageV3["accounts"][number] => ({
@@ -118,7 +123,23 @@ describe("exported plugin emergency admission", () => {
 				policy.paused = true;
 			});
 		}
-		await saveAccountPolicyStore(policies);
+		if (mode !== "missing-policy") await saveAccountPolicyStore(policies);
+		if (mode === "malformed-policy") {
+			await fs.writeFile(getAccountPolicyPath(), JSON.stringify({
+				version: 1,
+				accounts: {
+					[getAccountPolicyKey(accounts[0]!, 0)]: { emergencyOnly: "true" },
+				},
+			}));
+		}
+		if (mode === "load-failure") {
+			vi.spyOn(runtimePolicy, "loadRuntimePolicyState")
+				.mockRejectedValueOnce(new Error("synthetic-sensitive-policy-details"));
+		}
+		if (mode === "evaluation-failure") {
+			vi.spyOn(runtimePolicy, "evaluateRuntimePolicy")
+				.mockRejectedValueOnce(new Error("synthetic-sensitive-policy-details"));
+		}
 		if (mode === "affinity") {
 			vi.spyOn(SessionAffinityStore.prototype, "getPreferredAccountIndex").mockReturnValue(0);
 		}
@@ -182,5 +203,28 @@ describe("exported plugin emergency admission", () => {
 		const { response, upstream } = await request(mode);
 		expect(response.status).toBe(503);
 		expect(upstream).not.toHaveBeenCalled();
+	});
+
+	it.each(["malformed-policy", "load-failure", "evaluation-failure"] as const)("fails closed and records a sanitized policy error (%s)", async (mode) => {
+		const warning = vi.spyOn(logger, "logWarn");
+		const { response, upstream } = await request(mode);
+		expect(response.status).toBe(503);
+		expect(await response.json()).toMatchObject({
+			error: { code: "runtime_policy_unavailable" },
+		});
+		expect(upstream).not.toHaveBeenCalled();
+		expect(JSON.stringify(warning.mock.calls)).not.toContain("synthetic-sensitive-policy-details");
+		expect(await readUsageLedgerRows()).toEqual([
+			expect.objectContaining({
+				source: "plugin-host", operation: "responses", outcome: "blocked",
+				statusCode: 503, errorCode: "runtime_policy_unavailable", account: null,
+			}),
+		]);
+	});
+
+	it("retains the valid empty policy when the policy file does not exist", async () => {
+		const { response, upstream } = await request("missing-policy");
+		expect(response.status).toBe(200);
+		expect(upstream).toHaveBeenCalledTimes(1);
 	});
 });

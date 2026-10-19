@@ -1120,13 +1120,8 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 										model: model ?? null,
 										capabilityPolicy: capabilityPolicyStore,
 									});
-								} catch (policyError) {
-									logWarn("Runtime policy evaluation failed open.", {
-										error:
-											policyError instanceof Error
-												? policyError.message
-												: String(policyError),
-									});
+								} catch {
+									logWarn("Runtime policy evaluation failed; request blocked.");
 								}
 								usageRecorder = createRuntimeUsageRecorder({
 									source: "plugin-host",
@@ -1141,6 +1136,28 @@ export const OpenAIOAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 									statusCode: null,
 									errorCode: "plugin_host_request_failed",
 								};
+								if (!runtimePolicyDecision) {
+									runtimeMetrics.failedRequests += 1;
+									runtimeMetrics.lastError = "Runtime policy unavailable";
+									syncRuntimeObservability(requestTraceId);
+									usageCompletion = {
+										outcome: "blocked",
+										statusCode: 503,
+										errorCode: "runtime_policy_unavailable",
+									};
+									return new Response(
+										JSON.stringify({
+											error: {
+												message: "Runtime policy could not be loaded for this local request.",
+												code: "runtime_policy_unavailable",
+											},
+										}),
+										{
+											status: 503,
+											headers: { "content-type": "application/json; charset=utf-8" },
+										},
+									);
+								}
 								if (runtimePolicyDecision && !runtimePolicyDecision.allowed) {
 									runtimeMetrics.failedRequests += 1;
 									runtimeMetrics.lastError = "Runtime policy blocked request";
