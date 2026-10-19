@@ -27,7 +27,9 @@ const byId = (rows: Workspace[] | undefined) => new Map((rows ?? []).map(row => 
 /**
  * Merge workspaces by id, never by array position. Fields changed on one side
  * win; enabled/disabledAt move as one unit, and when both sides changed it an
- * intentional re-enable wins over a disable. Other two-sided edits conflict.
+ * intentional re-enable wins over a disable. Concurrent disables preserve an
+ * operator exclusion (no disabledAt) over a recoverable runtime health marker.
+ * Other two-sided edits conflict.
  * Removal follows the account rule: a record removed on either side stays
  * removed.
  */
@@ -44,7 +46,13 @@ function mergeWorkspaces(base: AccountMetadataV3, disk: AccountMetadataV3, local
             continue;
         }
         const state = (row: Workspace | undefined) => ({ enabled: row?.enabled, disabledAt: row?.disabledAt });
-        const stateSource = equal(state(b), state(l)) ? d : equal(state(b), state(d)) ? l : d.enabled !== false ? d : l.enabled !== false ? l : (d.disabledAt ?? 0) >= (l.disabledAt ?? 0) ? d : l;
+        const stateSource = equal(state(b), state(l)) ? d
+            : equal(state(b), state(d)) ? l
+            : d.enabled !== false ? d
+            : l.enabled !== false ? l
+            : d.disabledAt === undefined ? d
+            : l.disabledAt === undefined ? l
+            : d.disabledAt >= l.disabledAt ? d : l;
         const pick = (row: Workspace) => ({ ...row, enabled: stateSource.enabled, disabledAt: stateSource.disabledAt });
         const merged = mergeValue(b ? pick(b) : undefined, pick(d), pick(l)) as Workspace;
         if (merged.disabledAt === undefined) delete merged.disabledAt;
