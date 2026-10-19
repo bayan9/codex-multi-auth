@@ -56,7 +56,17 @@ interface JsonObjectEntry {
 	end: number;
 	valueStart: number;
 	valueEnd: number;
+	commaBefore: number | null;
+	commaAfter: number | null;
 }
+
+interface JsonObjectScan {
+	closeIndex: number;
+	entries: JsonObjectEntry[];
+	hasUnrewrittenEntry: boolean;
+}
+
+const MAX_REWRITTEN_MEMBER_MATCHES = 1_024;
 
 function skipJsonWhitespace(text: string, index: number): number {
 	while (/\s/.test(text.charAt(index))) index += 1;
@@ -98,61 +108,175 @@ function jsonValueEnd(text: string, index: number): number {
 	return text.length;
 }
 
-function jsonObjectEntries(text: string, start = 0): JsonObjectEntry[] | null {
+function decodedJsonStringEquals(
+	text: string,
+	start: number,
+	end: number,
+	expected: string,
+): boolean {
+	let expectedIndex = 0;
+	for (let cursor = start + 1; cursor < end - 1; cursor += 1) {
+		let charCode = text.charCodeAt(cursor);
+		if (charCode === 92) {
+			cursor += 1;
+			const escape = text.charAt(cursor);
+			if (escape === "u") {
+				charCode = 0;
+				for (let offset = 1; offset <= 4; offset += 1) {
+					const digit = text.charCodeAt(cursor + offset);
+					charCode = charCode * 16 + (digit >= 97 ? digit - 87 : digit >= 65 ? digit - 55 : digit - 48);
+				}
+				cursor += 4;
+			} else if (escape === "b") charCode = 8;
+			else if (escape === "f") charCode = 12;
+			else if (escape === "n") charCode = 10;
+			else if (escape === "r") charCode = 13;
+			else if (escape === "t") charCode = 9;
+			else charCode = escape.charCodeAt(0);
+		}
+		if (charCode !== expected.charCodeAt(expectedIndex)) return false;
+		expectedIndex += 1;
+	}
+	return expectedIndex === expected.length;
+}
+
+function scanJsonObject(
+	text: string,
+	rewrittenKeys: Set<string>,
+	start = 0,
+): JsonObjectScan | null {
 	let cursor = skipJsonWhitespace(text, start);
 	if (text.charAt(cursor) !== "{") return null;
 	cursor += 1;
+	let commaBefore: number | null = null;
+	let hasUnrewrittenEntry = false;
 	const entries: JsonObjectEntry[] = [];
+	const canonicalKeys = [...rewrittenKeys].map((key) => ({
+		key,
+		source: JSON.stringify(key),
+	}));
 	for (;;) {
 		cursor = skipJsonWhitespace(text, cursor);
-		if (text.charAt(cursor) === "}") return entries;
+		if (text.charAt(cursor) === "}") return { closeIndex: cursor, entries, hasUnrewrittenEntry };
 		if (text.charAt(cursor) !== '"') return null;
 		const entryStart = cursor;
+		const keyStart = cursor;
 		const keyEnd = jsonStringEnd(text, cursor);
-		let key: unknown;
-		try {
-			key = JSON.parse(text.slice(cursor, keyEnd));
-		} catch {
-			return null;
+		let key: string | undefined;
+		const escapeIndex = text.indexOf("\\", keyStart + 1);
+		for (const candidate of canonicalKeys) {
+			const matches =
+				escapeIndex >= 0 && escapeIndex < keyEnd
+					? decodedJsonStringEquals(text, keyStart, keyEnd, candidate.key)
+					: candidate.source.length === keyEnd - keyStart &&
+						text.startsWith(candidate.source, keyStart);
+			if (matches) {
+				key = candidate.key;
+				break;
+			}
 		}
 		cursor = skipJsonWhitespace(text, keyEnd);
 		if (text.charAt(cursor) !== ":") return null;
 		const valueStart = skipJsonWhitespace(text, cursor + 1);
 		const valueEnd = jsonValueEnd(text, valueStart);
-		entries.push({ key: String(key), start: entryStart, end: valueEnd, valueStart, valueEnd });
 		cursor = skipJsonWhitespace(text, valueEnd);
-		if (text.charAt(cursor) === "}") return entries;
-		if (text.charAt(cursor) !== ",") return null;
+		const commaAfter = text.charAt(cursor) === "," ? cursor : null;
+		if (key) {
+			if (entries.length >= MAX_REWRITTEN_MEMBER_MATCHES) return null;
+			entries.push({
+				key,
+				start: entryStart,
+				end: valueEnd,
+				valueStart,
+				valueEnd,
+				commaBefore,
+				commaAfter,
+			});
+		} else {
+			hasUnrewrittenEntry = true;
+		}
+		if (commaAfter === null) {
+			if (text.charAt(cursor) === "}") return { closeIndex: cursor, entries, hasUnrewrittenEntry };
+			return null;
+		}
+		commaBefore = commaAfter;
 		cursor += 1;
 	}
+}
+
+function removeEntryRanges(text: string, scan: JsonObjectScan): string {
+	const entries = [...scan.entries].sort((left, right) => left.start - right.start);
+	const ranges: Array<{ start: number; end: number }> = [];
+	let trailingStart = entries.length;
+	if (entries.at(-1)?.commaAfter === null) {
+		trailingStart = entries.length - 1;
+		while (
+			trailingStart > 0 &&
+			entries[trailingStart]?.commaBefore ===
+				entries[trailingStart - 1]?.commaAfter
+		) {
+			trailingStart -= 1;
+		}
+	}
+	for (let index = 0; index < trailingStart; index += 1) {
+		const entry = entries[index];
+		if (entry) {
+			ranges.push({ start: entry.start, end: (entry.commaAfter ?? entry.end - 1) + 1 });
+		}
+	}
+	const firstTrailing = entries[trailingStart];
+	const lastEntry = entries.at(-1);
+	if (firstTrailing && lastEntry) {
+		ranges.push({
+			start: firstTrailing.commaBefore ?? firstTrailing.start,
+			end: lastEntry.end,
+		});
+	}
+	const chunks: string[] = [];
+	let cursor = 0;
+	for (const range of ranges) {
+		if (range.start > cursor) chunks.push(text.slice(cursor, range.start));
+		cursor = range.end;
+	}
+	chunks.push(text.slice(cursor));
+	return chunks.join("");
 }
 
 function rewriteJsonObject(
 	text: string,
 	body: Record<string, unknown>,
 	rewrittenKeys: Set<string>,
+	scan = scanJsonObject(text, rewrittenKeys),
 ): string {
-	const entries = jsonObjectEntries(text) ?? [];
-	const preserved = entries
-		.filter((entry) => !rewrittenKeys.has(entry.key))
-		.map((entry) => text.slice(entry.start, entry.end));
-	for (const key of Object.keys(body).filter((key) => rewrittenKeys.has(key))) {
+	const serializedEntries: string[] = [];
+	const serializedKeys = new Set<string>();
+	const appendKey = (key: string): void => {
+		if (serializedKeys.has(key) || !Object.hasOwn(body, key)) return;
+		serializedKeys.add(key);
 		const value = body[key];
-		let serializedValue = JSON.stringify(value);
+		let serializedValue: string;
 		if (key === "client_metadata" && isRecord(value)) {
-			const original = [...entries].reverse().find((entry) => entry.key === key);
+			let original: JsonObjectEntry | undefined;
+			for (const entry of scan?.entries ?? []) {
+				if (entry.key === key) original = entry;
+			}
 			const originalValue = original
 				? text.slice(original.valueStart, original.valueEnd)
 				: "{}";
-			serializedValue = rewriteJsonObject(
-				originalValue,
-				value,
-				new Set([...CLIENT_ATTESTATION_METADATA_KEYS, TURN_METADATA_HEADER]),
-			);
+			serializedValue = rewriteJsonObject(originalValue, value, TURN_ATTESTATION_KEYS);
+		} else {
+			serializedValue = JSON.stringify(value);
 		}
-		preserved.push(`${JSON.stringify(key)}:${serializedValue}`);
-	}
-	return `{${preserved.join(",")}}`;
+		serializedEntries.push(`${JSON.stringify(key)}:${serializedValue}`);
+	};
+	for (const entry of scan?.entries ?? []) appendKey(entry.key);
+	for (const key of rewrittenKeys) appendKey(key);
+	if (!scan) return `{${serializedEntries.join(",")}}`;
+	const preserved = removeEntryRanges(text, scan);
+	const closeIndex = scan.closeIndex - (text.length - preserved.length);
+	const beforeClose = preserved.slice(0, closeIndex);
+	const separator = scan.hasUnrewrittenEntry ? "," : "";
+	return `${beforeClose}${separator}${serializedEntries.join(",")}${preserved.slice(closeIndex)}`;
 }
 
 function parseAttestableObject(
@@ -165,10 +289,12 @@ function parseAttestableObject(
 	const text = source.toString("utf8");
 	try {
 		const body = JSON.parse(text) as unknown;
-		if (!isRecord(body) || !jsonObjectEntries(text)) return null;
+		if (!isRecord(body)) return null;
+		const scan = scanJsonObject(text, rewrittenKeys);
+		if (!scan) return null;
 		return {
 			body,
-			serialize: () => Buffer.from(rewriteJsonObject(text, body, rewrittenKeys)),
+			serialize: () => Buffer.from(rewriteJsonObject(text, body, rewrittenKeys, scan)),
 		};
 	} catch {
 		return null;

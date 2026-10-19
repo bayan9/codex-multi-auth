@@ -23,3 +23,21 @@ it("preserves escaped user strings and exact numbers through attestation", () =>
   expect(serialized).toContain('"maximum":9007199254740993');
   expect(serialized).toContain('"ratio":1.2300e+4');
 });
+
+
+it("preserves deeply nested unrelated client metadata", () => {
+  const nested = "[".repeat(5000) + "0" + "]".repeat(5000);
+  const payload = parseAttestableRequestBody(Buffer.from(
+    `{"model":"shared","client_metadata":{"extra":${nested}}}`,
+  ))!;
+  applyClientAttestation(payload.body, new Headers());
+  const serialized = payload.serialize().toString();
+  expect(serialized).toContain(`"extra":${nested}`);
+});
+
+it("handles many duplicate unrelated members without member allocation growth", () => {
+  const duplicates = `"x":0,"\\u0078":0,`.repeat(50_000);
+  const payload = parseAttestableRequestBody(Buffer.from(`{${duplicates}"model":"shared"}`))!;
+  applyClientAttestation(payload.body, new Headers());
+  expect(payload.serialize().toString()).toContain(duplicates);
+}, 1_000);
