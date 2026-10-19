@@ -449,6 +449,65 @@ describe("runtime rotation proxy", () => {
 		expect(calls[0].headers.get(OPENAI_HEADERS.ACCOUNT_ID)).toMatch(/^acc_/);
 		expect(calls[0].headers.get("cookie")).toBeNull();
 	});
+	it.each([
+		["/images/generations", true],
+		["/images/edits", true],
+		["/v1/images/generations", false],
+		["/v1/images/edits", false],
+	] as const)("uses the selected workspace for native image route %s (storage reader: %s)", async (path, useStorageReader) => {
+		const storage = createStorage(Date.now(), 1);
+		storage.accounts[0]!.workspaces = [
+			{ id: "acc_1", enabled: true },
+			{ id: "selected-image-workspace", enabled: true },
+		];
+		storage.accounts[0]!.currentWorkspaceIndex = 1;
+		const accountManager = new AccountManager(undefined, structuredClone(storage));
+		const payload = { model: "gpt-image-2", prompt: "fixture" };
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ data: [] }));
+		const proxy = await startProxy({
+			accountManager, fetchImpl,
+			options: {
+				nativeOpenai: true,
+				...(useStorageReader ? { readNativeAccountStorage: async () => structuredClone(storage) } : {}),
+			},
+		});
+		const response = await postResponses(proxy, payload, path);
+		expect(response.status).toBe(200);
+		await response.text();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]!.headers.get(OPENAI_HEADERS.ACCOUNT_ID)).toBe("selected-image-workspace");
+		expect(calls[0]!.bodyText).toBe(JSON.stringify(payload));
+		expect(accountManager.getAccountByIndex(0)?.accountId).toBe("acc_1");
+		expect(accountManager.getAccountByIndex(0)?.currentWorkspaceIndex).toBe(1);
+	});
+
+	it.each(["disabled", "changed"])("rejects an image workspace %s during token refresh before dispatch", async (change) => {
+		const now = Date.now();
+		const storage = createStorage(now, 1);
+		storage.accounts[0]!.expiresAt = now - 60_000;
+		storage.accounts[0]!.workspaces = [
+			{ id: "acc_1", enabled: true },
+			{ id: "selected-image-workspace", enabled: true },
+		];
+		storage.accounts[0]!.currentWorkspaceIndex = 1;
+		const accountManager = new AccountManager(undefined, structuredClone(storage));
+		refreshAccessTokenMock.mockImplementationOnce(async () => {
+			if (change === "disabled") storage.accounts[0]!.workspaces![1]!.enabled = false;
+			else storage.accounts[0]!.currentWorkspaceIndex = 0;
+			return { type: "success", access: "fresh-image-access", refresh: "refresh-1", expires: now + 3_600_000 };
+		});
+		const { calls, fetchImpl } = createRecordingFetch(() => Response.json({ data: [] }));
+		const proxy = await startProxy({
+			accountManager, fetchImpl,
+			options: { nativeOpenai: true, readNativeAccountStorage: async () => structuredClone(storage) },
+		});
+		const response = await postResponses(proxy, { model: "gpt-image-2", prompt: "fixture" }, "/images/edits");
+		expect(response.status).toBe(503);
+		expect((await response.json()).error.code).toBe("routing_configuration_changed");
+		expect(refreshAccessTokenMock).toHaveBeenCalledTimes(1);
+		expect(calls).toHaveLength(0);
+	});
+
 	it.each([400, 403, 500])("does not replay image error %s", async (status) => {
 		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
 		const { calls, fetchImpl } = createRecordingFetch(() => new Response('{"error":{"code":"image_test_error"}}', { status, headers: { "content-type": "application/json" } }));
