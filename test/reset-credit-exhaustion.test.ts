@@ -118,9 +118,167 @@ describe('new exhaustion after a healthy native reset check', () => {
   await Promise.resolve(); await Promise.resolve();
   f.advance(); f.exhaust();
   const second = f.service.automatic(targets, [{ ...f.evidence(), observedAt: newer ? f.io.now() : start }]);
-  release(); expect(await first).toBeNull();
+  release(); expect(await first).toEqual(newer ? { key: 'a', outcome: 'reset' } : null);
   expect(await second).toEqual(newer ? { key: 'a', outcome: 'reset' } : null);
   expect(f.consume).toHaveBeenCalledTimes(newer ? 1 : 0);
   expect(f.read).toHaveBeenCalledTimes(newer ? 5 : 2);
  });
+});
+
+
+it.each([
+ ['stale then fresh', [false, true]],
+ ['fresh then stale', [true, false]],
+ ['many stale before fresh', [false, false, false, true]],
+ ['fresh among stale', [false, true, false, false]],
+ ['high fan-in', Array.from({ length: 60 }, (_unused, index) => index > 20 && index % 3 === 0)],
+] as const)('retains newest evidence from concurrent waiters: %s', async (_name, order) => {
+ const f = fixture(); await f.service.setPolicy('last-resort');
+ let release!: () => void; let entered!: () => void;
+ const gate = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { entered = r; });
+ let parked = false;
+ f.read.mockImplementation(async t => {
+  if (t.key === 'b' && !parked) { parked = true; entered(); await gate; }
+  return f.payload(t, t.key === 'b' ? false : undefined);
+ });
+ const targets = [target('a'), target('b')];
+ const first = f.service.automatic(targets); await started;
+ await Promise.resolve(); await Promise.resolve();
+ f.advance(); f.exhaust();
+ const waiters = order.map(fresh => f.service.automatic(targets, [{ ...f.evidence(), observedAt: fresh ? f.io.now() : start }]));
+ release();
+ const results = await Promise.all([first, ...waiters]);
+ expect(results).toEqual(Array.from({ length: order.length + 1 }, () => ({ key: 'a', outcome: 'reset' })));
+ expect(f.consume).toHaveBeenCalledTimes(1);
+ expect(f.read).toHaveBeenCalledTimes(5);
+});
+
+it('retains newer evidence that arrives during the first coalesced recheck', async () => {
+ const f = fixture(); await f.service.setPolicy('last-resort');
+ const releases: Array<() => void> = [];
+ const entries: Array<() => void> = [];
+ const gates = Array.from({ length: 2 }, () => new Promise<void>(r => releases.push(r)));
+ const started = Array.from({ length: 2 }, () => new Promise<void>(r => entries.push(r)));
+ let bReads = 0;
+ f.read.mockImplementation(async t => {
+  if (t.key === 'b' && bReads < 2) {
+   const index = bReads++; entries[index]!(); await gates[index];
+  }
+  return f.payload(t, t.key === 'b' ? false : undefined);
+ });
+ const targets = [target('a'), target('b')];
+ const first = f.service.automatic(targets); await started[0];
+ await Promise.resolve(); await Promise.resolve();
+ f.advance();
+ const second = f.service.automatic(targets, [f.evidence()]);
+ releases[0]!(); await started[1];
+ await Promise.resolve(); await Promise.resolve();
+ f.advance(); f.exhaust();
+ const third = f.service.automatic(targets, [f.evidence()]);
+ releases[1]!();
+ await first; await second;
+ expect(await third).toEqual({ key: 'a', outcome: 'reset' });
+ expect(f.read).toHaveBeenCalledTimes(7); expect(f.consume).toHaveBeenCalledTimes(1);
+});
+
+it('coalesces repeated identical evidence without a native read storm', async () => {
+ const f = fixture(); await f.service.setPolicy('last-resort');
+ const releases: Array<() => void> = [];
+ const entries: Array<() => void> = [];
+ const gates = Array.from({ length: 2 }, () => new Promise<void>(r => releases.push(r)));
+ const started = Array.from({ length: 2 }, () => new Promise<void>(r => entries.push(r)));
+ let bReads = 0;
+ f.read.mockImplementation(async t => {
+  if (t.key === 'b' && bReads < 2) {
+   const index = bReads++; entries[index]!(); await gates[index];
+  }
+  return f.payload(t, t.key === 'b' ? false : undefined);
+ });
+ const targets = [target('a'), target('b')];
+ const first = f.service.automatic(targets); await started[0];
+ await Promise.resolve(); await Promise.resolve();
+ f.advance(); const evidence = [f.evidence()];
+ const waiters = Array.from({ length: 20 }, () => f.service.automatic(targets, evidence));
+ releases[0]!(); await started[1];
+ waiters.push(...Array.from({ length: 20 }, () => f.service.automatic(targets, evidence)));
+ releases[1]!();
+ expect(await Promise.all([first, ...waiters])).toEqual(Array(41).fill(null));
+ expect(f.read).toHaveBeenCalledTimes(4); expect(f.consume).not.toHaveBeenCalled();
+});
+
+it('keeps valid joined proof when later waiters supply invalid newer evidence', async () => {
+ const f = fixture(); await f.service.setPolicy('last-resort');
+ let release!: () => void; let entered!: () => void;
+ const gate = new Promise<void>(r => { release = r; }); const started = new Promise<void>(r => { entered = r; });
+ let parked = false;
+ f.read.mockImplementation(async t => {
+  if (t.key === 'b' && !parked) { parked = true; entered(); await gate; }
+  return f.payload(t, t.key === 'b' ? false : undefined);
+ });
+ const targets = [target('a'), target('b')];
+ const first = f.service.automatic(targets); await started;
+ await Promise.resolve(); await Promise.resolve();
+ f.advance(); f.exhaust();
+ const fresh = f.service.automatic(targets, [f.evidence()]);
+ const invalid = [
+  { ...f.evidence(), observedAt: f.io.now() + 1 },
+  { ...f.evidence(), accountId: 'other', observedAt: f.io.now() },
+  { ...f.evidence(), key: 'other' },
+  { ...f.evidence(), observedAt: Infinity },
+  { ...f.evidence(), observedAt: NaN },
+ ].map(proof => f.service.automatic(targets, [proof]));
+ release(); await first; await Promise.all(invalid);
+ expect(await fresh).toEqual({ key: 'a', outcome: 'reset' });
+ expect(f.read).toHaveBeenCalledTimes(5); expect(f.consume).toHaveBeenCalledTimes(1);
+});
+
+it('bounds continuously newer evidence to three passes before a later request retries', async () => {
+ const f = fixture(); await f.service.setPolicy('last-resort');
+ const releases: Array<() => void> = [];
+ const entries: Array<() => void> = [];
+ const gates = Array.from({ length: 3 }, () => new Promise<void>(r => releases.push(r)));
+ const started = Array.from({ length: 3 }, () => new Promise<void>(r => entries.push(r)));
+ let bReads = 0;
+ f.read.mockImplementation(async t => {
+  if (t.key === 'b' && bReads < 3) {
+   const index = bReads++; entries[index]!(); await gates[index];
+  }
+  return f.payload(t, t.key === 'b' ? false : undefined);
+ });
+ const targets = [target('a'), target('b')];
+ const first = f.service.automatic(targets); const waiters = [first];
+ for (let pass = 0; pass < 3; pass++) {
+  await started[pass]; await Promise.resolve(); await Promise.resolve();
+  f.advance();
+  if (pass === 2) f.exhaust();
+  waiters.push(f.service.automatic(targets, [f.evidence()]));
+  releases[pass]!();
+ }
+ expect(await Promise.all(waiters)).toEqual(Array(4).fill(null));
+ expect(f.read).toHaveBeenCalledTimes(6); expect(f.consume).not.toHaveBeenCalled();
+ expect(await f.service.automatic(targets, [f.evidence()])).toEqual({ key: 'a', outcome: 'reset' });
+ expect(f.read).toHaveBeenCalledTimes(9); expect(f.consume).toHaveBeenCalledTimes(1);
+});
+
+it('starts a new batch when proof arrives after completion but before promise cleanup', async () => {
+ const f = fixture();
+ let finish!: (result: null) => void;
+ const finished = new Promise<null>(resolve => { finish = resolve; });
+ // Control only the locked-check boundary; exercise the real batch scheduler.
+ let finishSecond!: (result: { key: string; outcome: 'reset' }) => void;
+ const secondFinished = new Promise<{ key: string; outcome: 'reset' }>(resolve => { finishSecond = resolve; });
+ const locked = vi.fn().mockImplementationOnce(() => finished)
+  .mockImplementationOnce(() => secondFinished)
+  .mockResolvedValue(null);
+ Reflect.set(f.service, 'automaticLocked', locked);
+ const first = f.service.automatic([target('a')]);
+ finish(null);
+ await Promise.resolve();
+ const second = f.service.automatic([target('a')], [f.evidence()]);
+ expect(await first).toBeNull();
+ const third = f.service.automatic([target('a')], [f.evidence()]);
+ finishSecond({ key: 'a', outcome: 'reset' });
+ expect(await second).toEqual({ key: 'a', outcome: 'reset' });
+ expect(await third).toEqual({ key: 'a', outcome: 'reset' });
+ expect(locked).toHaveBeenCalledTimes(2);
 });

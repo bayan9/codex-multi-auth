@@ -43,17 +43,40 @@ export interface ResetCreditIO {
 /** A stored time further ahead than this came from a clock that has since stepped back: treat it as expired. */
 const FUTURE_SKEW_MS=5*60000;
 const within=(at:number|undefined,now:number,windowMs:number)=>at!==undefined&&at<=now+FUTURE_SKEW_MS&&now-at<windowMs;
+function validExhaustionEvidence(targets:ResetTarget[],proof:ResetExhaustionEvidence,now:number):boolean {
+ return targets.some(target=>target.key===proof.key&&target.accountId===proof.accountId)&&
+  Number.isFinite(proof.observedAt)&&proof.observedAt<=now&&now-proof.observedAt<=60000;
+}
 function hasNewExhaustion(state:State,targets:ResetTarget[],evidence:ResetExhaustionEvidence[],now:number):boolean {
  return evidence.some(proof=>{
   const snapshot=state.snapshots[proof.key];
-  return targets.some(target=>target.key===proof.key&&target.accountId===proof.accountId)&&
-   Number.isFinite(proof.observedAt)&&proof.observedAt<=now&&now-proof.observedAt<=60000&&
+  return validExhaustionEvidence(targets,proof,now)&&
    state.lastAutomaticCheckAt!==undefined&&proof.observedAt>state.lastAutomaticCheckAt&&
    snapshot?.ordinaryUsageAllowed===true&&Number.isFinite(snapshot.updatedAt)&&
    snapshot.updatedAt<=now&&proof.observedAt>snapshot.updatedAt;
  });
 }
-const automaticChecks = new Map<string, {targets:string; promise:Promise<{key:string;outcome:ResetOutcome}|null>}>();
+type AutomaticResult={key:string;outcome:ResetOutcome}|null;
+interface AutomaticCheck {
+ targets:string;
+ accepting:boolean;
+ evidence:Map<string,ResetExhaustionEvidence>;
+ version:number;
+ promise:Promise<AutomaticResult>;
+}
+const automaticChecks = new Map<string,AutomaticCheck>();
+// Stop even if failures keep advancing. New evidence after the final pass can
+// be retried by a later request; no batch can hold callers indefinitely.
+const MAX_AUTOMATIC_CHECK_PASSES=3;
+function mergeExhaustionEvidence(check:AutomaticCheck,targets:ResetTarget[],evidence:ResetExhaustionEvidence[],now:number):void {
+ for(const proof of evidence){
+  if(!validExhaustionEvidence(targets,proof,now))continue;
+  const key=JSON.stringify([proof.key,proof.accountId]), previous=check.evidence.get(key);
+  if(previous&&previous.observedAt>=proof.observedAt)continue;
+  check.evidence.set(key,{key:proof.key,accountId:proof.accountId,observedAt:proof.observedAt});
+  check.version++;
+ }
+}
 export class ResetCreditService {
  constructor(private readonly path:string,private readonly io:ResetCreditIO){}
  private now(){return this.io.now?.()??Date.now();}
@@ -94,22 +117,36 @@ export class ResetCreditService {
    return this.consumeLocked(state,target);
   });
  }
- automatic(targets:ResetTarget[],evidence:ResetExhaustionEvidence[]=[]):Promise<{key:string;outcome:ResetOutcome}|null>{
-  return this.startAutomatic(targets,evidence,true);
- }
- private startAutomatic(targets:ResetTarget[],evidence:ResetExhaustionEvidence[],recheckJoined:boolean):Promise<{key:string;outcome:ResetOutcome}|null>{
+ automatic(targets:ResetTarget[],evidence:ResetExhaustionEvidence[]=[]):Promise<AutomaticResult>{
   const key=resolve(this.path), signature=JSON.stringify(targets), pending=automaticChecks.get(key);
-  if(pending){
+  if(pending?.accepting){
    if(pending.targets!==signature)return pending.promise.then(()=>null);
-   // A newer observation can arrive while an older negative check is in flight.
-   // Reevaluate at most once; the persisted timestamps reject reused evidence.
-   return pending.promise.then(result=>result===null&&recheckJoined&&evidence.length>0
-    ?this.startAutomatic(targets,evidence,false):result);
+   mergeExhaustionEvidence(pending,targets,evidence,this.now());
+   return pending.promise;
   }
   if(automaticChecks.size>=1000)return Promise.resolve(null);
-  const promise=this.automaticLocked(targets,evidence).finally(()=>{automaticChecks.delete(key);});
-  automaticChecks.set(key,{targets:signature,promise});
-  return promise;
+  const currentTargets=targets.map(target=>({key:target.key,accountId:target.accountId}));
+  const check:AutomaticCheck={targets:signature,accepting:true,evidence:new Map(),version:0,promise:Promise.resolve(null)};
+  mergeExhaustionEvidence(check,currentTargets,evidence,this.now());
+  check.promise=this.automaticBatch(currentTargets,check).finally(()=>{
+   if(automaticChecks.get(key)===check)automaticChecks.delete(key);
+  });
+  automaticChecks.set(key,check);
+  return check.promise;
+ }
+ private async automaticBatch(targets:ResetTarget[],check:AutomaticCheck):Promise<AutomaticResult>{
+  try {
+   for(let pass=0;pass<MAX_AUTOMATIC_CHECK_PASSES;pass++){
+    const version=check.version;
+    const result=await this.automaticLocked(targets,[...check.evidence.values()]);
+    if(result!==null||check.version===version)return result;
+   }
+   return null;
+  } finally {
+   // Close admission before resolving: a late caller must not append evidence
+   // between batch completion and the outer promise's map cleanup.
+   check.accepting=false;
+  }
  }
  private async automaticLocked(targets:ResetTarget[],evidence:ResetExhaustionEvidence[]):Promise<{key:string;outcome:ResetOutcome}|null>{
   if(!targets.length||(await this.status()).policy!=='last-resort')return null;
