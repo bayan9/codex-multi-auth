@@ -136,3 +136,55 @@ it('passes newer exhausted quota evidence for the selected reset target',async()
   [{key:f.scope.id,accountId:f.scope.accountId,observedAt:999}],
  );
 });
+
+
+it('uses body-only rejection evidence to reread a previously healthy selected scope',async()=>{
+ const f=fixture(true);
+ const proof={key:f.scope.id,accountId:f.scope.accountId,observedAt:999};
+ const quotaRejections=new Map([[JSON.stringify([f.scope.id,f.args.model]),proof]]);
+ await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),primary:{usedPercent:20},ordinaryUsageAllowed:true}),quotaRejections});
+ expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith([{key:f.scope.id,accountId:f.scope.accountId}],[proof]);
+});
+
+it.each(['wrong-model','wrong-account','wrong-scope','future','stale','same-time','newer-healthy','disabled','changed'] as const)('does not turn %s rejection evidence into reset admission',async reason=>{
+ const f=fixture();
+ const proof={key:f.scope.id,accountId:f.scope.accountId,observedAt:999};
+ let model=f.args.model,scopeId=f.scope.id,quotaAt=900;
+ if(reason==='wrong-model')model='other-model';
+ if(reason==='wrong-account')proof.accountId='other-account';
+ if(reason==='wrong-scope')scopeId='other-scope';
+ if(reason==='future')proof.observedAt=1001;
+ if(reason==='stale')proof.observedAt=-60000;
+ if(reason==='same-time')proof.observedAt=900;
+ if(reason==='newer-healthy')quotaAt=1000;
+ if(reason==='disabled')f.account.enabled=false;
+ if(reason==='changed'){f.account.workspaces=[{id:'workspace',enabled:true},{id:'other',enabled:true}];f.account.currentWorkspaceIndex=1;}
+ const quotaRejections=new Map([[JSON.stringify([scopeId,model]),proof]]);
+ await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),updatedAt:quotaAt,primary:{usedPercent:20},ordinaryUsageAllowed:true}),quotaRejections});
+ expect(f.service.automatic).not.toHaveBeenCalled();
+});
+
+it('does not apply a native permission snapshot older than body-only quota rejection',async()=>{
+ const f=fixture();
+ f.account.lastRateLimitReason='quota';f.account.rateLimitResetTimes={codex:Date.now()+60000};
+ const quotaRejections=new Map([[JSON.stringify([f.scope.id,f.args.model]),{key:f.scope.id,accountId:f.scope.accountId,observedAt:1000}]]);
+ f.service.status.mockResolvedValue({snapshots:{[f.scope.id]:{updatedAt:999,ordinaryUsageAllowed:true,availableCount:1,planType:'pro',primary:{usedPercent:0},secondary:{usedPercent:0}}}});
+ expect(await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),primary:{usedPercent:20},ordinaryUsageAllowed:true}),quotaRejections})).toBe(false);
+ expect(f.clear).not.toHaveBeenCalled();
+});
+
+it.each([true,false])('does not let later headers hide a quota rejection (carried native permission: %s)',async carried=>{
+ const f=fixture();
+ const proof={key:f.scope.id,accountId:f.scope.accountId,observedAt:999};
+ const quotaRejections=new Map([[JSON.stringify([f.scope.id,f.args.model]),proof]]);
+ await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),updatedAt:1000,...(carried?{ordinaryUsageAllowed:true,ordinaryUsageCheckedAt:900}:{}),primary:{usedPercent:20}}),quotaRejections});
+ expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith([{key:f.scope.id,accountId:f.scope.accountId}],[proof]);
+});
+
+it('uses newer authoritative exhaustion instead of an older body rejection',async()=>{
+ const f=fixture();
+ const proof={key:f.scope.id,accountId:f.scope.accountId,observedAt:999};
+ const quotaRejections=new Map([[JSON.stringify([f.scope.id,f.args.model]),proof]]);
+ await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),updatedAt:1000,ordinaryUsageAllowed:false}),quotaRejections});
+ expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith([{key:f.scope.id,accountId:f.scope.accountId}],[{...proof,observedAt:1000}]);
+});

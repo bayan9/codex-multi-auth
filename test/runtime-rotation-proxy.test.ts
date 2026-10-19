@@ -80,7 +80,7 @@ const openServers: RuntimeRotationProxyServer[] = [];
 const openManagers: AccountManager[] = [];
 const DEFAULT_CLIENT_API_KEY = "runtime-secret";
 
-it("regression: freshly exhausted primary capacity recovers without surfacing 503 after a recent healthy native check", async () => {
+it.each(["quota headers on 400", "body-only quota 429", "body-only quota 429 with native capacity", "generic 429", "model capacity 429"])("recovers freshly exhausted primary capacity after a healthy native check: %s", async rejection => {
   const fs = await import("node:fs/promises");
   const os = await import("node:os");
   const path = await import("node:path");
@@ -121,26 +121,119 @@ it("regression: freshly exhausted primary capacity recovers without surfacing 50
       inferenceCount += 1;
       if (inferenceCount === 1) {
         now += 100;
-        nativeAllowed = false;
+        nativeAllowed = rejection === "body-only quota 429 with native capacity";
+        if (rejection !== "quota headers on 400") return Response.json({ error: {
+          code: rejection.startsWith("body-only quota 429") ? "usage_limit_reached" : rejection === "generic 429" ? "rate_limit_exceeded" : "model_capacity_exceeded",
+          message: "synthetic quota exceeded",
+        } }, { status: 429 });
         return Response.json({ type: "error", error: { code: "context_length_exceeded", message: "synthetic request error" } },
           { status: 400, headers: { "x-codex-primary-used-percent": "100", "x-codex-primary-reset-after-seconds": "3600" } });
+      }
+      if (!nativeAllowed) return Response.json({ error: {
+        code: rejection === "generic 429" ? "rate_limit_exceeded" : rejection === "model capacity 429" ? "model_capacity_exceeded" : "usage_limit_reached",
+        message: "synthetic quota exceeded",
+      } }, { status: 429 });
+      return textEventStream();
+    });
+    const quota = { updatedAt: now - 1, status: 200, model: "chat-fixture", planType: "pro", primary: { usedPercent: 100 }, secondary: {} };
+    const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true, modelCapacityRetryMs: 0,
+      readSubscriptionQuota: async () => ({ byAccountId: { acc_1: { ...quota, primary: { usedPercent: 0 } }, acc_2: quota, acc_3: quota }, byEmail: {} }) } });
+    const first = await postResponses(proxy, { model: "chat-fixture", input: "synthetic request" });
+    if (rejection === "generic 429" || rejection === "model capacity 429") {
+      expect(first.status).toBe(429); await first.text();
+      expect(consumeCount).toBe(0); expect(reads).toEqual(["acc_3"]);
+      return;
+    }
+    if (rejection === "quota headers on 400") {
+      expect(first.status).toBe(400); await first.text();
+      expect(reads).toEqual(["acc_3"]);
+      now += 2000;
+      const second = await postResponses(proxy, { model: "chat-fixture", input: "synthetic compaction" });
+      expect(second.status).toBe(200); await second.text();
+    } else {
+      expect(first.status).toBe(200); await first.text();
+    }
+    expect(reads).toEqual(rejection === "body-only quota 429 with native capacity" ? ["acc_3", "acc_3"] : ["acc_3", "acc_3", "acc_3"]);
+    expect(consumeCount).toBe(rejection === "body-only quota 429 with native capacity" ? 0 : 1);
+    expect(calls.filter(call => call.url.endsWith("/responses")).map(call => call.headers.get("chatgpt-account-id"))).toEqual(["acc_3", "acc_3"]);
+  } finally {
+    rpc.mockRestore(); clock.mockRestore();
+    if (previousDir === undefined) delete process.env.CODEX_MULTI_AUTH_DIR; else process.env.CODEX_MULTI_AUTH_DIR = previousDir;
+    await removeWithRetry(dir, { recursive: true, force: true });
+  }
+});
+
+it.each([false,true])("keeps body-only quota evidence when an older in-flight response completes (quota headers: %s)", async withHeaders => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const previousDir = process.env.CODEX_MULTI_AUTH_DIR;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "quota-rejection-overlap-"));
+  process.env.CODEX_MULTI_AUTH_DIR = dir;
+  let now = 1_800_000_000_000;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  let nativeAllowed = true, consumeCount = 0, inferenceCount = 0;
+  let releaseOld!: () => void, oldEntered!: () => void;
+  const oldGate = new Promise<void>(r => { releaseOld = r; });
+  const entered = new Promise<void>(r => { oldEntered = r; });
+  let oldBody: Promise<string> | undefined;
+  const native = await import("../lib/runtime/native-rate-limits.js");
+  const reads: string[] = [];
+  const rpc = vi.spyOn(native, "nativeRateLimitsRpc").mockImplementation(async (auth, method) => {
+    if (method === "account/rateLimitResetCredit/consume") {
+      consumeCount++; nativeAllowed = true; return { outcome: "reset" };
+    }
+    reads.push(auth.accountId);
+    return { accountId: auth.accountId, ordinaryUsageAllowed: nativeAllowed,
+      rateLimitResetCredits: { availableCount: consumeCount ? 0 : 1 },
+      rateLimits: { planType: "pro", primary: { usedPercent: 100, resetsAt: now / 1000 + 3600 }, secondary: {} } };
+  });
+  const recovery = await import("../lib/runtime/reset-credit-routing.js");
+  const actualRecover = recovery.recoverResetQuota;
+  let completedOld = false;
+  const recover = vi.spyOn(recovery, "recoverResetQuota").mockImplementation(async options => {
+    if (!completedOld && options.quotaRejections?.size) {
+      completedOld = true;
+      releaseOld(); await oldBody;
+    }
+    return actualRecover(options);
+  });
+  try {
+    const { createResetCreditService } = await import("../lib/runtime/account-reset-credits.js");
+    await createResetCreditService().setPolicy("last-resort");
+    const disk = createStorage(now, 1);
+    const storage = await import("../lib/storage.js");
+    vi.spyOn(storage, "loadAccounts").mockResolvedValue(disk);
+    const manager = new AccountManager(undefined, disk);
+    const { calls, fetchImpl } = createRecordingFetch(async call => {
+      if (call.url.includes("/models")) return Response.json({ models: [{ slug: "chat-fixture" }] });
+      inferenceCount++;
+      if (inferenceCount === 1) {
+        oldEntered(); await oldGate; now += 10;
+        const oldResponse = textEventStream();
+        if (withHeaders) oldResponse.headers.set("x-codex-primary-used-percent", "20");
+        return oldResponse;
+      }
+      if (!consumeCount) {
+        nativeAllowed = false;
+        return Response.json({ error: { code: "usage_limit_reached" } }, { status: 429 });
       }
       return textEventStream();
     });
     const quota = { updatedAt: now - 1, status: 200, model: "chat-fixture", planType: "pro", primary: { usedPercent: 100 }, secondary: {} };
     const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true,
-      readSubscriptionQuota: async () => ({ byAccountId: { acc_1: { ...quota, primary: { usedPercent: 0 } }, acc_2: quota, acc_3: quota }, byEmail: {} }) } });
-    const first = await postResponses(proxy, { model: "chat-fixture", input: "synthetic request" });
-    expect(first.status).toBe(400); await first.text();
-    expect(reads).toEqual(["acc_3"]);
-    now += 2000;
-    const second = await postResponses(proxy, { model: "chat-fixture", input: "synthetic compaction" });
-    expect(second.status).toBe(200); await second.text();
-    expect(reads).toEqual(["acc_3", "acc_3", "acc_3"]);
+      readSubscriptionQuota: async () => ({ byAccountId: { acc_1: quota }, byEmail: {} }) } });
+    oldBody = postResponses(proxy, { model: "chat-fixture", input: "older in-flight request" }).then(response => response.text());
+    await entered; now += 100;
+    const response = await postResponses(proxy, { model: "chat-fixture", input: "new quota rejection" });
+    expect(response.status).toBe(200); await response.text();
+    expect(completedOld).toBe(true);
     expect(consumeCount).toBe(1);
-    expect(calls.filter(call => call.url.endsWith("/responses")).map(call => call.headers.get("chatgpt-account-id"))).toEqual(["acc_3", "acc_3"]);
+    expect(reads).toEqual(["acc_1", "acc_1", "acc_1"]);
+    expect(calls.filter(call => call.url.endsWith("/responses"))).toHaveLength(3);
   } finally {
-    rpc.mockRestore(); clock.mockRestore();
+    releaseOld(); await oldBody;
+    recover.mockRestore(); rpc.mockRestore(); clock.mockRestore();
     if (previousDir === undefined) delete process.env.CODEX_MULTI_AUTH_DIR; else process.env.CODEX_MULTI_AUTH_DIR = previousDir;
     await removeWithRetry(dir, { recursive: true, force: true });
   }

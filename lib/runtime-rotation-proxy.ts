@@ -1345,6 +1345,7 @@ export async function startRuntimeRotationProxy(
 			await Promise.all([automaticChecks?.stop(), automaticApiChecks?.stop()]);
 			websocketGateway.close();
 			await closeServer(server, sockets);
+            state.subscriptionQuotaRejections?.clear();
 			await flushRuntimeInferenceActivity();
 			await state.activeAccountManager.flushPendingSave();
 		},
@@ -2337,7 +2338,7 @@ async function handleRequestInner(
     const observations = state.subscriptionQuotaObservations ??= new Map();
     const recovered=await recoverResetQuota({model:context.model,family:context.family,native:true,pinned:false,manager:accountManager,
      scopes:primaryWorkspaceCandidates(),quotaForScope,priorityByAccount:policyDecision?.priorityByAccount,preferredIndex:storageMeta.pinnedAccountIndex,service:createResetCreditService(accountManager),
-     observations,now:state.now,
+     observations,quotaRejections:state.subscriptionQuotaRejections,now:state.now,
      clearQuotaScheduler:account=>state.preemptiveQuotaScheduler.clear(buildQuotaScheduleKey(account,context.family,context.model)),
     });
     try { resetCreditState=await loadResetCreditState(); } catch { resetCreditState=null; }
@@ -3297,6 +3298,16 @@ async function handleRequestInner(
 					if (outcome === "retry") continue;
 				}
 
+                if (state.nativeOpenai && isResponsesRequest && requestScope && context.model !== LUNA_RESERVE_MODEL && subscriptionQuotaExceeded && !modelAtCapacity) {
+                    // A body-only quota rejection is newer evidence than an earlier
+                    // native permission. Record no invented quota percentage or permission.
+                    // An older in-flight success cannot clear this hint; newer native
+                    // permission checks or its bounded lifetime invalidate it during recovery.
+                    const rejections=state.subscriptionQuotaRejections??=new Map();
+                    const key=JSON.stringify([requestScope.id,context.model]);
+                    if(rejections.size>=1000&&!rejections.has(key))rejections.delete(rejections.keys().next().value??"");
+                    rejections.set(key,{key:requestScope.id,accountId:requestScope.accountId,observedAt:state.now()});
+                }
 				if (context.model !== LUNA_RESERVE_MODEL && subscriptionQuotaExceeded) {
 					state.preemptiveQuotaScheduler.markRateLimited(
 						quotaScheduleKey,

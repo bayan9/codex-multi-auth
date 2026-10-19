@@ -24,25 +24,41 @@ export async function recoverResetQuota(options:{
  model:string;family?:ModelFamily;native:boolean;pinned:boolean;manager:AccountManager;
  scopes:Map<number,Scope[]>;priorityByAccount?:Record<number,number>;preferredIndex?:number|null;quotaForScope:(account:ManagedAccount,scope:Scope)=>QuotaCacheEntry|null|undefined;
  service:Pick<ResetCreditService,'automatic'> & {status:()=>Promise<{snapshots:Awaited<ReturnType<ResetCreditService['status']>>['snapshots']}>};
+ quotaRejections?:ReadonlyMap<string,ResetExhaustionEvidence>;
  observations:Map<string,QuotaCacheEntry>;clearQuotaScheduler:(account:ManagedAccount)=>void;now:()=>number;
 }):Promise<boolean>{
  if(options.model===LUNA_RESERVE_MODEL||!options.native||options.pinned||parseModelRoute(options.model).kind!=='oauth')return false;
  const family=options.family??'codex';
  const candidates=[...options.scopes].flatMap(([index,scopes])=>{const account=options.manager.getAccountByIndex(index);return account&&!account.authInvalidatedAt?scopes.map(scope=>({account,scope})):[];});
  if(!candidates.length)return false;
+ const currentScope=(account:ManagedAccount,scope:Scope)=>workspaceModelScopes(account).some(current=>
+  current.routable&&current.id===scope.id&&current.accountId===scope.accountId);
+ const rejectionForScope=(account:ManagedAccount,scope:Scope)=>{
+  const proof=options.quotaRejections?.get(JSON.stringify([scope.id,options.model]));
+  const latest=options.quotaForScope(account,scope),now=options.now();
+  // An older in-flight response can deliver newer percentage headers. Only a
+  // later authoritative native permission check supersedes a body rejection.
+  const checkedAt=typeof latest?.ordinaryUsageAllowed==='boolean'
+   ?latest.ordinaryUsageCheckedAt??latest.updatedAt:0;
+  return proof&&proof.key===scope.id&&proof.accountId===scope.accountId&&
+   Number.isFinite(proof.observedAt)&&proof.observedAt<=now&&now-proof.observedAt<=60000&&
+   proof.observedAt>checkedAt?proof:undefined;
+ };
  // Any usable capacity (including the reserve), unknown quota, or non-quota
  // failure prevents an automatic credit from being spent.
  if(candidates.some(({account,scope})=>{
-  if(account.enabled===false||account.authInvalidatedAt||!scope.routable)return true;
+  if(account.enabled===false||account.authInvalidatedAt||!scope.routable||!currentScope(account,scope))return true;
   const skip=options.manager.getAccountRuntimeSkipReason(account.index,family,options.model);
   if(skip&&!['rate-limited','cooling-down:rate-limit'].includes(skip))return true;
   const quota=subscriptionQuotaPreference(options.quotaForScope(account,scope),options.now());
-  return !quota.exhausted&&!['rate-limited','cooling-down:rate-limit'].includes(skip??'');
+  return !quota.exhausted&&!rejectionForScope(account,scope)&&!['rate-limited','cooling-down:rate-limit'].includes(skip??'');
  }))return false;
  candidates.sort((a,b)=>Number(b.account.index===options.preferredIndex)-Number(a.account.index===options.preferredIndex)||(options.priorityByAccount?.[a.account.index]??1)-(options.priorityByAccount?.[b.account.index]??1));
  const targets=candidates.filter(({scope})=>!scope.accountId.startsWith("org-")).map(({scope})=>({key:scope.id,accountId:scope.accountId}));
  const evidence:ResetExhaustionEvidence[]=candidates.flatMap(({account,scope})=>{
   if(scope.accountId.startsWith("org-"))return [];
+  const rejection=rejectionForScope(account,scope);
+  if(rejection)return [rejection];
   const quota=subscriptionQuotaPreference(options.quotaForScope(account,scope),options.now());
   return quota.exhausted&&quota.observedAt!==null
    ?[{key:scope.id,accountId:scope.accountId,observedAt:quota.observedAt}]:[];
@@ -51,7 +67,8 @@ export async function recoverResetQuota(options:{
  const state=await options.service.status();let recovered=false;
  for(const {account,scope} of candidates){
   const snapshot=state.snapshots[scope.id];const previous=options.quotaForScope(account,scope);
-  if(!snapshot||snapshot.updatedAt<(previous?.updatedAt??0)||options.now()-snapshot.updatedAt>60000||snapshot.updatedAt>options.now())continue;
+  const rejectedAt=rejectionForScope(account,scope)?.observedAt??0;
+  if(!snapshot||snapshot.updatedAt<Math.max(previous?.updatedAt??0,rejectedAt)||options.now()-snapshot.updatedAt>60000||snapshot.updatedAt>options.now())continue;
   options.observations.set(JSON.stringify([scope.id,options.model]),resetSnapshotQuota(snapshot));
   if(snapshot.ordinaryUsageAllowed!==true)continue;
   clearRecoveredScopeQuota({...options,account,scope,family});
