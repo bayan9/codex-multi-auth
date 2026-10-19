@@ -375,6 +375,20 @@ export function buildSelectAccountTraced(): (
 				blockedReasonByAccount[index] = AUTH_INVALIDATION_MARKER;
 			}
 		}
+		// This offline diagnostic cannot establish ordinary-pool exhaustion or
+		// perform permitted reset recovery. Leave emergency capacity reserved;
+		// keep any more specific policy, authentication, or runtime exclusion.
+		for (const account of accountsWithMetrics) {
+			if (
+				policy.emergencyAccountIndexes?.has(account.index) &&
+				account.isAvailable &&
+				!blockedAccountIndexes.has(account.index)
+			) {
+				blockedAccountIndexes.add(account.index);
+				blockedReasonByAccount[account.index] =
+					"emergency-only: reserved until runtime confirms ordinary capacity and permitted resets are exhausted";
+			}
+		}
 		return selectHybridAccountTraced({
 			accounts: accountsWithMetrics,
 			healthTracker,
