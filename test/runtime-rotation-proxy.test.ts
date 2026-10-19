@@ -6324,7 +6324,7 @@ describe('earned reset last-resort integration',()=>{
    const response=await postResponses(proxy,{model:'chat-fixture',input:'hello'});await response.text();
    expect(consumptions).toBe(0);
    expect(calls.filter(c=>c.url.endsWith('/responses')).every(c=>c.headers.get('chatgpt-account-id')==='acc_1')).toBe(true);
-  }finally{await service.setPolicy('manual');rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await fs.rm(testDir,{recursive:true,force:true,maxRetries:5});}
+  }finally{await service.setPolicy('manual');rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await removeWithRetry(testDir,{recursive:true,force:true});}
  });
  it.each([true,false])('refreshes all subscription capacity before spending (other usable=%s)',async otherUsable=>{
   const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
@@ -6347,7 +6347,7 @@ describe('earned reset last-resort integration',()=>{
    diskSpy.mockRestore();
    expect(consumptions).toBe(otherUsable?0:1);
    expect(calls.find(c=>c.url.endsWith('/responses'))?.headers.get('chatgpt-account-id')).toBe(otherUsable?'acc_2':'acc_1');
-  }finally{await service.setPolicy('manual');rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await fs.rm(testDir,{recursive:true,force:true,maxRetries:5});}
+  }finally{await service.setPolicy('manual');rpc.mockRestore();if(originalDir===undefined)delete process.env.CODEX_MULTI_AUTH_DIR;else process.env.CODEX_MULTI_AUTH_DIR=originalDir;await removeWithRetry(testDir,{recursive:true,force:true});}
  });
 });
 
