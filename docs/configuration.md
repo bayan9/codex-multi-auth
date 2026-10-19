@@ -110,6 +110,8 @@ These are safe for most operators and cover the common day-to-day adjustments.
 | `CODEX_AUTH_BACKGROUND_RESPONSES=0/1` | Stateful `background: true` Responses compatibility (default off) |
 | `CODEX_AUTH_NO_BROWSER=1` | Suppress browser launch for headless login |
 
+Upgrade note: the process-wide default is `positive`. Set `CODEX_MULTI_AUTH_CLIENT_ATTESTATION=negative` to retain negative attestation.
+
 ---
 
 ## Advanced and internal overrides

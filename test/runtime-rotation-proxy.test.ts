@@ -970,6 +970,7 @@ describe("runtime rotation proxy", () => {
 	});
 
 	it("forwards Responses fields while replacing caller auth and adding the positive attestation", async () => {
+		vi.stubEnv("CODEX_MULTI_AUTH_CLIENT_ATTESTATION", "positive");
 		const now = Date.now();
 		const accountManager = new AccountManager(undefined, createStorage(now));
 		const { calls, fetchImpl } = createRecordingFetch(() =>
@@ -1033,6 +1034,18 @@ describe("runtime rotation proxy", () => {
 				node_repl_disabled: "false",
 			},
 		});
+	});
+
+	it("preserves JSON number lexemes while adding the attestation", async () => {
+		vi.stubEnv("CODEX_MULTI_AUTH_CLIENT_ATTESTATION", "positive");
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(() => textEventStream("data: forwarded\n\n"));
+		const proxy = await startProxy({ accountManager, fetchImpl });
+		const raw = '{"model":"gpt-5-codex","input":[],"maximum":9007199254740993,"ratio":1.2300e+4}';
+		const response = await fetch(`${proxy.baseUrl}/responses`, {method: "POST", headers: {authorization: `Bearer ${DEFAULT_CLIENT_API_KEY}`, "content-type": "application/json"}, body: raw});
+		expect(response.status).toBe(HTTP_STATUS.OK);
+		expect(calls[0]?.bodyText).toContain('"maximum":9007199254740993');
+		expect(calls[0]?.bodyText).toContain('"ratio":1.2300e+4');
 	});
 
 	it("replaces a negative client attestation with a positive upstream attestation", async () => {
@@ -5406,6 +5419,20 @@ it("clamps a reference catalog's context to the serving pool",async()=>{
 });
 
 describe("explicit API model routes",()=>{
+	it("removes managed attestation before an explicit API request", async () => {
+		const manager = new AccountManager(undefined, createStorage(Date.now()));
+		const routes = [{id: "fixture", label: "Fixture", kind: "api" as const, apiKey: "fixture-api-key", enabled: true, priority: 0, visibleModels: ["exclusive"]}];
+		const {calls, fetchImpl} = createRecordingFetch(call => call.url.endsWith("/models")
+			? Response.json({data: [{id: "exclusive"}]})
+			: textEventStream());
+		const proxy = await startProxy({accountManager: manager, fetchImpl, options: {readApiRoutes: async () => routes}});
+		const response = await postResponses(proxy, {model: "api/exclusive", input: [], client_metadata: {sandbox: "caller"}}, "/responses", {"x-codex-turn-metadata": '{"sandbox":"caller"}'});
+		expect(response.status).toBe(200);
+		await response.text();
+		const inference = calls.find(call => call.url.endsWith("/responses"));
+		expect(inference?.headers.has("x-codex-turn-metadata")).toBe(false);
+		expect(JSON.parse(inference!.bodyText)).not.toHaveProperty("client_metadata");
+	});
 	it.each([
 		["api", "response.completed"], ["api", "response.created"],
 		["zdr", "response.completed"], ["zdr", "response.created"],

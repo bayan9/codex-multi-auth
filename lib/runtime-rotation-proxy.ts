@@ -2,7 +2,7 @@ import { createAutomaticApiCheck, startAutomaticApiChecks } from "./runtime/auto
 import { startAutomaticAccountChecks } from "./runtime/automatic-account-checks.js";
 import { createAutomaticSubscriptionCheck } from "./runtime/automatic-subscription-checks.js";
 import { ClientCancellationError } from "./request/client-cancellation.js";
-import { applyClientAttestation } from "./request/client-attestation.js";
+import { applyClientAttestation, parseAttestableRequestBody } from "./request/client-attestation.js";
 import { fetchWithProxy } from "./request/proxy-fetch.js";
 import { createNativeAccountStorageReader } from "./runtime/native-account-storage.js";
 import { resetSnapshotQuota } from "./runtime/reset-credits.js";
@@ -923,7 +923,6 @@ function buildResponsesRequestContext(
 ): RequestContext {
 	const headers = headersFromIncoming(req);
 	const parsedBody = parseRequestBody(body);
-	applyClientAttestation({}, headers);
 	const model =
 		typeof parsedBody?.model === "string" && parsedBody.model.trim().length > 0
 			? parsedBody.model.trim()
@@ -1545,12 +1544,18 @@ async function handleRequestInner(
 			}
    let route;
    try { route=parseModelRoute(parsed.model); } catch { throw createRuntimeProxyHttpError("Invalid model route.",400,"invalid_model_route"); }
-   if(route.kind==="oauth"&&route.serviceTier){
-    if(parsed.service_tier&&canonicalServiceTier(String(parsed.service_tier))!==canonicalServiceTier(route.serviceTier))throw createRuntimeProxyHttpError("Conflicting speed selection.",400,"conflicting_service_tier");
-    parsed.model=route.upstreamModel;parsed.service_tier=route.serviceTier;
+   if(route.kind==="oauth") {
+    const attestable = parseAttestableRequestBody(requestBody);
+    if (!attestable) throw createRuntimeProxyHttpError("Responses requests require a JSON object with a model.", 400, "invalid_request_body");
+    if(route.serviceTier){
+     if(parsed.service_tier&&canonicalServiceTier(String(parsed.service_tier))!==canonicalServiceTier(route.serviceTier))throw createRuntimeProxyHttpError("Conflicting speed selection.",400,"conflicting_service_tier");
+     attestable.body.model=route.upstreamModel;attestable.body.service_tier=route.serviceTier;
+    }
+    applyClientAttestation(attestable.body, incomingHeaders);
+    requestBody=attestable.serialize();
+   } else {
+    incomingHeaders.delete("x-codex-turn-metadata");
    }
-   applyClientAttestation(parsed, incomingHeaders);
-   requestBody=Buffer.from(JSON.stringify(parsed));
 		}
 		const context = isModelsRequest
 			? buildModelsRequestContext(req)
@@ -1562,6 +1567,9 @@ async function handleRequestInner(
 						? buildTranscribeRequestContext(req, requestBody)
 							: buildResponsesRequestContext(req, requestBody);
 		if (isResponsesRequest) {
+			const contextRoute = context.model ? parseModelRoute(context.model) : null;
+			if (contextRoute?.kind === "oauth") applyClientAttestation({}, context.headers);
+			else context.headers.delete("x-codex-turn-metadata");
 			context.headers.delete("content-encoding");
 			context.headers.delete("content-length");
 		}

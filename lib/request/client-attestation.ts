@@ -34,6 +34,65 @@ const TURN_ATTESTATION = {
 
 type ClientAttestation = keyof typeof TURN_ATTESTATION;
 
+function asciiHeaderValue(value: string): string {
+	return value.replace(/[\u007f-\uffff]/g, (char) =>
+		`\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
+}
+
+/** Parse JSON while retaining every numeric token for lossless serialization. */
+export function parseAttestableRequestBody(source: Buffer): {
+	body: Record<string, unknown>;
+	serialize: () => Buffer;
+} | null {
+	const text = source.toString("utf8");
+	let prefix = "__cma_raw_number_";
+	while (text.includes(prefix)) prefix = `_${prefix}`;
+	const numbers: string[] = [];
+	let protectedText = "";
+	let quoted = false;
+	let escaped = false;
+	for (let index = 0; index < text.length;) {
+		const char = text.charAt(index);
+		if (quoted) {
+			protectedText += char;
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') quoted = false;
+			index += 1;
+			continue;
+		}
+		if (char === '"') {
+			quoted = true;
+			protectedText += char;
+			index += 1;
+			continue;
+		}
+		const match = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+		if (match) {
+			protectedText += JSON.stringify(`${prefix}${numbers.length}`);
+			numbers.push(match[0]);
+			index += match[0].length;
+		} else {
+			protectedText += char;
+			index += 1;
+		}
+	}
+	try {
+		const body = JSON.parse(protectedText) as unknown;
+		if (!isRecord(body)) return null;
+		return {
+			body,
+			serialize: () => Buffer.from(
+				JSON.stringify(body).replace(new RegExp(`"${prefix}(\\d+)"`, "g"),
+					(whole, index: string) => numbers[Number(index)] ?? whole),
+			),
+		};
+	} catch {
+		return null;
+	}
+}
+
 function clientMetadataAttestation(attestation: ClientAttestation) {
 	const value = TURN_ATTESTATION[attestation];
 	return {
@@ -63,18 +122,13 @@ function attestedTurnMetadata(
 	value: unknown,
 	attestation: ClientAttestation,
 ): string {
-	let parsed: Record<string, unknown> = {};
-	if (typeof value === "string") {
-		try {
-			const candidate = JSON.parse(value) as unknown;
-			if (isRecord(candidate)) parsed = candidate;
-		} catch {
-			// A malformed client value cannot suppress the proxy-owned attestation.
-		}
-	}
+	const attestable = typeof value === "string"
+		? parseAttestableRequestBody(Buffer.from(value))
+		: null;
+	const parsed = attestable?.body ?? {};
 	removeClientAttestationMetadata(parsed);
 	Object.assign(parsed, TURN_ATTESTATION[attestation]);
-	return JSON.stringify(parsed);
+	return asciiHeaderValue(attestable?.serialize().toString("utf8") ?? JSON.stringify(parsed));
 }
 
 /** Replace the incoming client attestation with the configured value. */

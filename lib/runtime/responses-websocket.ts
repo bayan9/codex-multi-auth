@@ -226,11 +226,15 @@ class SocketSession {
 			.digest("hex");
 		const apiCredential = !headers.has("chatgpt-account-id");
 		const originalBody = bodyJson(init.body);
-		applyClientAttestation(originalBody, headers);
+		if (context.routeKind === "oauth") applyClientAttestation(originalBody, headers);
+		else {
+			delete originalBody.client_metadata;
+			headers.delete("x-codex-turn-metadata");
+		}
 		const httpInit: RequestInit = {
 			...init,
 			body: JSON.stringify(originalBody),
-			headers,
+			headers: new Headers(headers),
 		};
 		const body = { ...originalBody };
 		for (const [credential, until] of this.httpOnly) {
