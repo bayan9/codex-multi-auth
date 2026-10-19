@@ -1,8 +1,9 @@
 import {
 	formatAccountLabel,
 	formatWorkspaceLines,
+	resolveAccountRecordId,
 } from "../../accounts.js";
-import type { AccountStorageV3 } from "../../storage.js";
+import type { AccountStorageV3, withAccountStorageTransaction } from "../../storage.js";
 import { saveAccountsWithRetry } from "../forecast-report-shared.js";
 
 type LoadedStorage = AccountStorageV3 | null;
@@ -11,6 +12,7 @@ export interface WorkspaceCommandDeps {
 	setStoragePath: (path: string | null) => void;
 	loadAccounts: () => Promise<LoadedStorage>;
 	saveAccounts: (storage: AccountStorageV3) => Promise<void>;
+	withAccountStorageTransaction: typeof withAccountStorageTransaction;
 	logError?: (message: string) => void;
 	logInfo?: (message: string) => void;
 }
@@ -125,12 +127,29 @@ export async function runWorkspaceCommand(
   return 1;
  }
  if (action) {
-  target.enabled=action === "enable";
-  // Absence of disabledAt distinguishes an operator exclusion from runtime health.
-  delete target.disabledAt;
-  await saveAccountsWithRetry(storage,deps.saveAccounts);
-  logInfo(`Workspace ${parsedWorkspace} [${targetName}] ${target.enabled ? "enabled" : "disabled"}. Selected workspace unchanged.`);
-  return 0;
+  const recordId = resolveAccountRecordId(account);
+  const workspaceId = target.id;
+  return deps.withAccountStorageTransaction(async (current, persist) => {
+   // An explicit command is an operation, even if its initial snapshot already
+   // had that value. Apply it to the latest row under the storage lock.
+   const matches = current?.accounts.filter(row => resolveAccountRecordId(row) === recordId) ?? [];
+   const latest = matches.length === 1 ? matches[0] : undefined;
+   const latestWorkspaces = latest?.workspaces ?? [];
+   const workspaceMatches = latestWorkspaces.filter(row => row.id === workspaceId);
+   const workspace = workspaceMatches.length === 1 ? workspaceMatches[0] : undefined;
+   if (!current || !latest || !workspace) {
+    logError("Account or workspace changed concurrently; reload before changing workspace availability.");
+    return 1;
+   }
+   workspace.enabled = action === "enable";
+   // Absence of disabledAt distinguishes an operator exclusion from runtime health.
+   delete workspace.disabledAt;
+   await saveAccountsWithRetry(current, persist);
+   const currentIndex = latestWorkspaces.indexOf(workspace) + 1;
+   const currentName = workspace.name?.trim() || "(unnamed)";
+   logInfo(`Workspace ${currentIndex} [${currentName}] ${workspace.enabled ? "enabled" : "disabled"}. Selected workspace unchanged.`);
+   return 0;
+  });
  }
 
 	if (target.enabled === false) {

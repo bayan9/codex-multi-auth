@@ -36,17 +36,40 @@ function createStorage(): AccountStorageV3 {
 function createDeps(
 	overrides: Partial<WorkspaceCommandDeps> = {},
 ): WorkspaceCommandDeps {
-	return {
+	const deps: WorkspaceCommandDeps = {
 		setStoragePath: vi.fn(),
 		loadAccounts: vi.fn(async () => createStorage()),
 		saveAccounts: vi.fn(async () => {}),
+		withAccountStorageTransaction: async handler => handler(await deps.loadAccounts(), deps.saveAccounts),
 		logError: vi.fn(),
 		logInfo: vi.fn(),
 		...overrides,
 	};
+	return deps;
 }
 
 describe("runWorkspaceCommand", () => {
+ it("follows the account identity when the fresh transaction changes account ordering", async () => {
+  const selected=createStorage();const fresh=createStorage();fresh.accounts.reverse();
+  fresh.accounts[1]!.workspaces![0]!.enabled=false;
+  const deps=createDeps({loadAccounts:async()=>selected,
+   withAccountStorageTransaction:async handler=>handler(fresh,async()=>{})});
+  expect(await runWorkspaceCommand(["1","1","enable"],deps)).toBe(0);
+  expect(fresh.accounts[0]!.email).toBe("solo@example.com");
+  expect(fresh.accounts[0]!.workspaces).toBeUndefined();
+  expect(fresh.accounts[1]!.workspaces![0]!.enabled).toBe(true);
+ });
+ it("rejects ambiguous account identities instead of updating either row", async () => {
+  const selected=createStorage();const fresh=createStorage();
+  fresh.accounts.push(structuredClone(fresh.accounts[0]!));
+  const persist=vi.fn(async()=>{});
+  const deps=createDeps({loadAccounts:async()=>selected,
+   withAccountStorageTransaction:async handler=>handler(fresh,persist)});
+  expect(await runWorkspaceCommand(["1","1","disable"],deps)).toBe(1);
+  expect(persist).not.toHaveBeenCalled();
+  expect(fresh.accounts[0]!.workspaces![0]!.enabled).toBe(true);
+  expect(fresh.accounts[2]!.workspaces![0]!.enabled).toBe(true);
+ });
  it("disables the selected workspace without switching to a sibling", async () => {
   const storage=createStorage(); const deps=createDeps({loadAccounts:async()=>storage});
   expect(await runWorkspaceCommand(["1","1","disable"],deps)).toBe(0);
@@ -222,7 +245,7 @@ it('persists a disabled selection and preserves it through account re-enablement
  storageApi.setStoragePathDirect(join(dir,'accounts.json'));
  try{
   await storageApi.saveAccounts(createStorage());
-  const deps=createDeps({setStoragePath:()=>{},loadAccounts:storageApi.loadAccounts,saveAccounts:storageApi.saveAccounts});
+  const deps=createDeps({setStoragePath:()=>{},loadAccounts:storageApi.loadAccounts,saveAccounts:storageApi.saveAccounts,withAccountStorageTransaction:storageApi.withAccountStorageTransaction});
   expect(await runWorkspaceCommand(['1','1','disable'],deps)).toBe(0);
   const saved=(await storageApi.loadAccounts())!;
   expect(saved.accounts[0]?.currentWorkspaceIndex??0).toBe(0);

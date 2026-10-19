@@ -159,6 +159,7 @@ import {
 	loadFlaggedAccounts,
 	saveAccounts,
 	setStoragePath,
+	withAccountStorageTransaction,
 } from "./storage.js";
 
 // Formatter implementations moved to lib/codex-manager/formatters/ (audit
@@ -522,6 +523,7 @@ const CLI_COMMAND_HANDLERS: ReadonlyMap<string, CliCommandHandler> = new Map<
 				setStoragePath,
 				loadAccounts,
 				saveAccounts,
+				withAccountStorageTransaction,
 			}),
 	],
 	["check", (rest) => runCheckCommand({
