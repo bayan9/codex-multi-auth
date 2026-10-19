@@ -80,6 +80,72 @@ const openServers: RuntimeRotationProxyServer[] = [];
 const openManagers: AccountManager[] = [];
 const DEFAULT_CLIENT_API_KEY = "runtime-secret";
 
+it("regression: freshly exhausted primary capacity recovers without surfacing 503 after a recent healthy native check", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const previousDir = process.env.CODEX_MULTI_AUTH_DIR;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "compact-503-sequence-"));
+  process.env.CODEX_MULTI_AUTH_DIR = dir;
+  let now = 1_800_000_000_000;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+  let nativeAllowed = true;
+  let inferenceCount = 0;
+  let consumeCount = 0;
+  const native = await import("../lib/runtime/native-rate-limits.js");
+  const reads: string[] = [];
+  const rpc = vi.spyOn(native, "nativeRateLimitsRpc").mockImplementation(async (auth, method) => {
+    if (method === "account/rateLimitResetCredit/consume") {
+      consumeCount += 1;
+      nativeAllowed = true;
+      return { outcome: "reset" };
+    }
+    reads.push(auth.accountId);
+    return { accountId: auth.accountId, ordinaryUsageAllowed: nativeAllowed,
+      rateLimitResetCredits: { availableCount: consumeCount ? 0 : 1 },
+      rateLimits: { planType: "pro", primary: { usedPercent: 100, resetsAt: now / 1000 + 3600 }, secondary: {} } };
+  });
+  try {
+    const { createResetCreditService } = await import("../lib/runtime/account-reset-credits.js");
+    await createResetCreditService().setPolicy("last-resort");
+    vi.spyOn(runtimePolicy, "evaluateRuntimePolicy").mockResolvedValue({ allowed: true, statusCode: 200,
+      errorCode: null, reasons: [], projectKey: null, blockedAccountIndexes: new Set(),
+      emergencyAccountIndexes: new Set([0]), scoreBoostByAccount: {},
+      priorityByAccount: { 0: 1, 1: 2, 2: 3 }, budgetEvaluations: [] });
+    const disk = createStorage(now, 3);
+    const storage = await import("../lib/storage.js");
+    vi.spyOn(storage, "loadAccounts").mockResolvedValue(disk);
+    const manager = new AccountManager(undefined, disk);
+    const { calls, fetchImpl } = createRecordingFetch(call => {
+      if (call.url.includes("/models")) return Response.json({ models: [{ slug: call.headers.get("chatgpt-account-id") === "acc_2" ? "unrelated-model" : "chat-fixture" }] });
+      inferenceCount += 1;
+      if (inferenceCount === 1) {
+        now += 100;
+        nativeAllowed = false;
+        return Response.json({ type: "error", error: { code: "context_length_exceeded", message: "synthetic request error" } },
+          { status: 400, headers: { "x-codex-primary-used-percent": "100", "x-codex-primary-reset-after-seconds": "3600" } });
+      }
+      return textEventStream();
+    });
+    const quota = { updatedAt: now - 1, status: 200, model: "chat-fixture", planType: "pro", primary: { usedPercent: 100 }, secondary: {} };
+    const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true,
+      readSubscriptionQuota: async () => ({ byAccountId: { acc_1: { ...quota, primary: { usedPercent: 0 } }, acc_2: quota, acc_3: quota }, byEmail: {} }) } });
+    const first = await postResponses(proxy, { model: "chat-fixture", input: "synthetic request" });
+    expect(first.status).toBe(400); await first.text();
+    expect(reads).toEqual(["acc_3"]);
+    now += 2000;
+    const second = await postResponses(proxy, { model: "chat-fixture", input: "synthetic compaction" });
+    expect(second.status).toBe(200); await second.text();
+    expect(reads).toEqual(["acc_3", "acc_3", "acc_3"]);
+    expect(consumeCount).toBe(1);
+    expect(calls.filter(call => call.url.endsWith("/responses")).map(call => call.headers.get("chatgpt-account-id"))).toEqual(["acc_3", "acc_3"]);
+  } finally {
+    rpc.mockRestore(); clock.mockRestore();
+    if (previousDir === undefined) delete process.env.CODEX_MULTI_AUTH_DIR; else process.env.CODEX_MULTI_AUTH_DIR = previousDir;
+    await removeWithRetry(dir, { recursive: true, force: true });
+  }
+});
+
 function createStorage(now: number, count = 2): AccountStorageV3 {
 	return {
 		version: 3,

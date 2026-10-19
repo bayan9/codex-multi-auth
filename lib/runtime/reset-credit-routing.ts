@@ -4,7 +4,7 @@ import type { ModelFamily } from '../prompts/codex.js';
 import type { QuotaCacheEntry } from '../quota-cache.js';
 import { parseModelRoute } from '../model-route-policy.js';
 import { subscriptionQuotaPreference } from './subscription-quota-order.js';
-import { resetSnapshotQuota, isResetSubscription, type ResetSnapshot, type ResetCreditService } from './reset-credits.js';
+import { resetSnapshotQuota, isResetSubscription, type ResetSnapshot, type ResetCreditService, type ResetExhaustionEvidence } from './reset-credits.js';
 import { workspaceModelScopes } from './workspace-model-scopes.js';
 type Scope=ReturnType<typeof workspaceModelScopes>[number];
 
@@ -41,7 +41,13 @@ export async function recoverResetQuota(options:{
  }))return false;
  candidates.sort((a,b)=>Number(b.account.index===options.preferredIndex)-Number(a.account.index===options.preferredIndex)||(options.priorityByAccount?.[a.account.index]??1)-(options.priorityByAccount?.[b.account.index]??1));
  const targets=candidates.filter(({scope})=>!scope.accountId.startsWith("org-")).map(({scope})=>({key:scope.id,accountId:scope.accountId}));
- await options.service.automatic(targets);
+ const evidence:ResetExhaustionEvidence[]=candidates.flatMap(({account,scope})=>{
+  if(scope.accountId.startsWith("org-"))return [];
+  const quota=subscriptionQuotaPreference(options.quotaForScope(account,scope),options.now());
+  return quota.exhausted&&quota.observedAt!==null
+   ?[{key:scope.id,accountId:scope.accountId,observedAt:quota.observedAt}]:[];
+ });
+ await options.service.automatic(targets,evidence);
  const state=await options.service.status();let recovered=false;
  for(const {account,scope} of candidates){
   const snapshot=state.snapshots[scope.id];const previous=options.quotaForScope(account,scope);

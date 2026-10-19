@@ -91,7 +91,7 @@ it("excludes invalidated credentials from last-resort capacity gating",async()=>
  vi.spyOn(manager,"saveToDiskDebounced").mockImplementation(()=>{});
  const invalidScope=workspaceModelScopes(manager.getAccountByIndex(1)!)[0]!;
  expect(await recoverResetQuota({...f.args,manager,scopes:new Map([[0,[f.scope]],[1,[invalidScope]]])})).toBe(true);
- expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith([{key:f.scope.id,accountId:f.scope.accountId}]);
+ expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith([{key:f.scope.id,accountId:f.scope.accountId}],[{key:f.scope.id,accountId:f.scope.accountId,observedAt:900}]);
 });
 
 it("keys a workspace scope and its reset target the same way when no recordId is stored",async()=>{
@@ -125,4 +125,14 @@ it('keeps backups reserved when a newer quota observation restores primary capac
  const scopes=new Map([[0,[f.scope]]]);
  expect(primaryPoolFullyExhausted(scopes,state,1100,()=>({updatedAt:1050,status:200,model:"fixture",primary:{usedPercent:10},secondary:{}}))).toBe(false);
  expect(primaryPoolFullyExhausted(scopes,state,1100,()=>({updatedAt:1050,status:429,model:"fixture",primary:{usedPercent:100},secondary:{}}))).toBe(true);
+});
+
+
+it('passes newer exhausted quota evidence for the selected reset target',async()=>{
+ const f=fixture(true);
+ await recoverResetQuota({...f.args,quotaForScope:()=>({...f.args.quotaForScope(),status:400,updatedAt:999})});
+ expect(f.service.automatic).toHaveBeenCalledExactlyOnceWith(
+  [{key:f.scope.id,accountId:f.scope.accountId}],
+  [{key:f.scope.id,accountId:f.scope.accountId,observedAt:999}],
+ );
 });

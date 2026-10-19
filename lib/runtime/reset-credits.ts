@@ -9,6 +9,8 @@ import type { QuotaCacheEntry } from '../quota-cache.js';
 import { MAX_RATE_LIMIT_DELAY_MS } from '../constants.js';
 
 export interface ResetTarget { key: string; accountId: string }
+/** A routing observation may invalidate a healthy check, never authorize spending. */
+export interface ResetExhaustionEvidence extends ResetTarget { observedAt: number }
 const windowSchema=z.object({usedPercent:z.number().min(0).max(100).optional(),resetsAt:z.number().nonnegative().nullish(),windowDurationMins:z.number().nonnegative().nullish()});
 const snapshotSchema=z.object({updatedAt:z.number(),availableCount:z.number().int().nonnegative().nullable(),ordinaryUsageAllowed:z.boolean().nullable(),planType:z.string().nullable(),primary:windowSchema,secondary:windowSchema});
 export type ResetSnapshot=z.infer<typeof snapshotSchema>;
@@ -41,6 +43,16 @@ export interface ResetCreditIO {
 /** A stored time further ahead than this came from a clock that has since stepped back: treat it as expired. */
 const FUTURE_SKEW_MS=5*60000;
 const within=(at:number|undefined,now:number,windowMs:number)=>at!==undefined&&at<=now+FUTURE_SKEW_MS&&now-at<windowMs;
+function hasNewExhaustion(state:State,targets:ResetTarget[],evidence:ResetExhaustionEvidence[],now:number):boolean {
+ return evidence.some(proof=>{
+  const snapshot=state.snapshots[proof.key];
+  return targets.some(target=>target.key===proof.key&&target.accountId===proof.accountId)&&
+   Number.isFinite(proof.observedAt)&&proof.observedAt<=now&&now-proof.observedAt<=60000&&
+   state.lastAutomaticCheckAt!==undefined&&proof.observedAt>state.lastAutomaticCheckAt&&
+   snapshot?.ordinaryUsageAllowed===true&&Number.isFinite(snapshot.updatedAt)&&
+   snapshot.updatedAt<=now&&proof.observedAt>snapshot.updatedAt;
+ });
+}
 const automaticChecks = new Map<string, {targets:string; promise:Promise<{key:string;outcome:ResetOutcome}|null>}>();
 export class ResetCreditService {
  constructor(private readonly path:string,private readonly io:ResetCreditIO){}
@@ -82,20 +94,31 @@ export class ResetCreditService {
    return this.consumeLocked(state,target);
   });
  }
- automatic(targets:ResetTarget[]):Promise<{key:string;outcome:ResetOutcome}|null>{
+ automatic(targets:ResetTarget[],evidence:ResetExhaustionEvidence[]=[]):Promise<{key:string;outcome:ResetOutcome}|null>{
+  return this.startAutomatic(targets,evidence,true);
+ }
+ private startAutomatic(targets:ResetTarget[],evidence:ResetExhaustionEvidence[],recheckJoined:boolean):Promise<{key:string;outcome:ResetOutcome}|null>{
   const key=resolve(this.path), signature=JSON.stringify(targets), pending=automaticChecks.get(key);
-  if(pending)return pending.targets===signature?pending.promise:pending.promise.then(()=>null);
+  if(pending){
+   if(pending.targets!==signature)return pending.promise.then(()=>null);
+   // A newer observation can arrive while an older negative check is in flight.
+   // Reevaluate at most once; the persisted timestamps reject reused evidence.
+   return pending.promise.then(result=>result===null&&recheckJoined&&evidence.length>0
+    ?this.startAutomatic(targets,evidence,false):result);
+  }
   if(automaticChecks.size>=1000)return Promise.resolve(null);
-  const promise=this.automaticLocked(targets).finally(()=>{automaticChecks.delete(key);});
+  const promise=this.automaticLocked(targets,evidence).finally(()=>{automaticChecks.delete(key);});
   automaticChecks.set(key,{targets:signature,promise});
   return promise;
  }
- private async automaticLocked(targets:ResetTarget[]):Promise<{key:string;outcome:ResetOutcome}|null>{
+ private async automaticLocked(targets:ResetTarget[],evidence:ResetExhaustionEvidence[]):Promise<{key:string;outcome:ResetOutcome}|null>{
   if(!targets.length||(await this.status()).policy!=='last-resort')return null;
   return withFileTransactionLock(this.path,async()=>{
    const state=await this.status();
-   if(state.policy!=='last-resort'||state.pending||within(state.lastAutomaticCheckAt,this.now(),60000)||within(state.lastRedemptionAt,this.now(),300000))return null;
-   state.lastAutomaticCheckAt=this.now();await this.save(state);
+   const now=this.now();
+   if(state.policy!=='last-resort'||state.pending||within(state.lastRedemptionAt,now,300000))return null;
+   if(within(state.lastAutomaticCheckAt,now,60000)&&!hasNewExhaustion(state,targets,evidence,now))return null;
+   state.lastAutomaticCheckAt=now;await this.save(state);
    // Missing/failed reads prevent spending. A scheduled reset that has arrived
    // is confirmed by ordinaryUsageAllowed, never inferred from a clock or %.
    const reads=await mapWithConcurrency(targets,3,async t=>{try{return await this.read(t)}catch{return null}});
