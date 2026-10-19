@@ -27,6 +27,8 @@ export function workspaceModelScopes(account: ManagedAccount) {
   seen.add(scope.accountId); return true;
  }).map(scope=>({
   ...scope,
+  // Keep the stored identity across async inventory syncs, including Personal aliases.
+  storedWorkspaceId:account.workspaces?.[scope.workspaceIndex]?.id,
   // Same record identity as reset-credit targets (resolveAccountRecordId), or their keys diverge.
   id:modelScopeId("oauth",resolveAccountRecordId(account),scope.accountId),
   accountIndex:account.index,

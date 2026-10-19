@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import WebSocket, { WebSocketServer } from "ws";
 import * as nativeStorageReader from "../lib/runtime/native-account-storage.js";
+import { syncNativeAccountCredentials } from "../lib/runtime/native-account-sync.js";
 import * as tokenRefreshRuntime from "../lib/runtime/rotation-token-refresh.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { request } from "node:http";
@@ -5816,6 +5817,89 @@ it("disables only the rejected workspace and preserves the credential without sw
  expect(requests).toEqual(["acc_1"]);
  expect(accountManager.getAccountByIndex(0)?.enabled).not.toBe(false);
  expect(accountManager.getAccountByIndex(0)?.workspaces?.map(w=>w.enabled)).toEqual([false,true]);
+});
+
+describe("workspace-disabled responses during native workspace sync", () => {
+	const cases = [402, 403].flatMap(status => [false, true].flatMap(personal =>
+		["refresh", "upstream"].map(phase => ({ status, personal, phase }))));
+
+	it.each(cases)("disables the original workspace after $phase reorder ($status, Personal: $personal)", async ({ status, personal, phase }) => {
+		const storage = createStorage(Date.now(), 1);
+		const storedWorkspaceId = personal ? "org-personal" : "acc_1";
+		storage.accounts[0]!.workspaces = [
+			{ id: storedWorkspaceId, name: personal ? "Personal" : "Selected", enabled: true },
+			{ id: "healthy-sibling", enabled: true },
+		];
+		storage.accounts[0]!.currentWorkspaceIndex = 0;
+		if (personal) storage.accounts[0]!.accessToken = `header.${Buffer.from(JSON.stringify({
+			"https://api.openai.com/auth": { chatgpt_account_id: "acc_1" },
+		})).toString("base64url")}.sig`;
+		const manager = new AccountManager(undefined, storage);
+		const original = manager.getAccountByIndex(0)!;
+		let syncCount = 0;
+		const reorder = () => {
+			const disk = structuredClone(storage);
+			disk.accounts[0]!.workspaces!.reverse();
+			disk.accounts[0]!.currentWorkspaceIndex = 1;
+			expect(syncNativeAccountCredentials(manager, disk)).toBe(true);
+			expect(manager.getAccountByIndex(0)).toBe(original);
+			syncCount++;
+		};
+		if (phase === "refresh") {
+			const ensureFresh = tokenRefreshRuntime.ensureFreshAccessToken;
+			vi.spyOn(tokenRefreshRuntime, "ensureFreshAccessToken").mockImplementation(async options => {
+				const result = await ensureFresh(options);
+				if (syncCount === 0 && options.model === "workspace-model") reorder();
+				return result;
+			});
+		}
+		const { calls, fetchImpl } = createRecordingFetch(call => {
+			if (call.url.includes("/models")) return Response.json({ models: [{ slug: "workspace-model" }] });
+			if (phase === "upstream") reorder();
+			return Response.json({ error: { code: status === 402 ? "deactivated_workspace" : "workspace_disabled" } }, { status });
+		});
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await postResponses(proxy, { model: "workspace-model", input: "fixture" });
+		expect(response.status).toBe(503);
+		await response.text();
+		expect(syncCount).toBe(1);
+		expect(calls.filter(call => call.url.endsWith("/responses")).map(call => call.headers.get(OPENAI_HEADERS.ACCOUNT_ID))).toEqual(["acc_1"]);
+		expect(original.workspaces?.find(workspace => workspace.id === storedWorkspaceId)).toMatchObject({ enabled: false, disabledAt: expect.any(Number) });
+		expect(original.workspaces?.find(workspace => workspace.id === "healthy-sibling")).toMatchObject({ enabled: true });
+		expect(original.enabled).toBe(true);
+		expect(original.currentWorkspaceIndex).toBe(1);
+	});
+
+	it.each([402, 403].flatMap(status => [false, true].flatMap(personal =>
+		[false, true].map(removeAll => ({ status, personal, removeAll })))))
+	("does not disable remaining state when the request workspace disappears ($status, Personal: $personal, all: $removeAll)", async ({ status, personal, removeAll }) => {
+		const storage = createStorage(Date.now(), 1);
+		storage.accounts[0]!.workspaces = [
+			{ id: personal ? "org-personal" : "acc_1", enabled: true },
+			{ id: "healthy-sibling", enabled: true },
+		];
+		storage.accounts[0]!.currentWorkspaceIndex = 0;
+		if (personal) storage.accounts[0]!.accessToken = `header.${Buffer.from(JSON.stringify({
+			"https://api.openai.com/auth": { chatgpt_account_id: "acc_1" },
+		})).toString("base64url")}.sig`;
+		const manager = new AccountManager(undefined, storage);
+		const disable = vi.spyOn(manager, "setAccountEnabled");
+		const { calls, fetchImpl } = createRecordingFetch(call => {
+			if (call.url.includes("/models")) return Response.json({ models: [{ slug: "workspace-model" }] });
+			const disk = structuredClone(storage);
+			disk.accounts[0]!.workspaces = removeAll ? [] : [{ id: "healthy-sibling", enabled: true }];
+			expect(syncNativeAccountCredentials(manager, disk)).toBe(true);
+			return Response.json({ error: { code: status === 402 ? "deactivated_workspace" : "workspace_disabled" } }, { status });
+		});
+		const proxy = await startProxy({ accountManager: manager, fetchImpl, options: { nativeOpenai: true } });
+		const response = await postResponses(proxy, { model: "workspace-model", input: "fixture" });
+		expect(response.status).toBe(503);
+		await response.text();
+		expect(calls.filter(call => call.url.endsWith("/responses")).map(call => call.headers.get(OPENAI_HEADERS.ACCOUNT_ID))).toEqual(["acc_1"]);
+		expect(disable).not.toHaveBeenCalled();
+		expect(manager.getAccountByIndex(0)?.enabled).toBe(true);
+		expect(manager.getAccountByIndex(0)?.workspaces).toEqual(removeAll ? [] : [{ id: "healthy-sibling", enabled: true, disabledAt: undefined }]);
+	});
 });
 
 it("records actual inference dispatch separately from selection and catalog checks",async()=>{

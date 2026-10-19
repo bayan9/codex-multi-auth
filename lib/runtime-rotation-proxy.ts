@@ -3374,9 +3374,9 @@ async function handleRequestInner(
 				const bodyText = await readErrorBody(upstream, state.streamStallTimeoutMs);
 				const errorCode = extractErrorCodeFromBody(bodyText);
 				if (isWorkspaceDisabledError(upstream.status, errorCode, bodyText)) {
-     if(requestScope && refreshed.account.workspaces?.length) {
+     if(requestScope?.storedWorkspaceId !== undefined) {
       const workspaceState = responseStateTarget();
-      if(workspaceState.accountManager.disableWorkspace(workspaceState.account,refreshed.account.workspaces[requestScope.workspaceIndex]?.id ?? requestScope.accountId)) workspaceState.accountManager.saveToDiskDebounced();
+      if(workspaceState.accountManager.disableWorkspace(workspaceState.account,requestScope.storedWorkspaceId)) workspaceState.accountManager.saveToDiskDebounced();
       pendingScopes?.shift();
       refundConsumedPoolToken(refreshed.account);
       if(pendingScopes?.length) attemptedIndexes.delete(refreshed.account.index);
