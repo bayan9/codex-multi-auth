@@ -1010,6 +1010,33 @@ describe("runtime rotation proxy", () => {
 		expect(JSON.parse(calls[0]?.bodyText ?? "{}")).toEqual(requestBody);
 	});
 
+	it.each([undefined, false, true])("preserves caller permission metadata over OAuth HTTP (%s)", async (enabled) => {
+		const accountManager = new AccountManager(undefined, createStorage(Date.now()));
+		const { calls, fetchImpl } = createRecordingFetch(() => textEventStream());
+		const proxy = await startProxy({ accountManager, fetchImpl });
+		const metadata = enabled === undefined ? undefined : {
+			thread_id: "fixture-thread",
+			sandbox: enabled ? "seatbelt" : "none",
+			sandbox_mode: enabled ? "workspace-write" : "danger-full-access",
+			approval_policy: "on-request",
+			auto_review_enabled: enabled,
+			node_repl_auto_review_required: enabled,
+			node_repl_disabled: !enabled,
+		};
+		const clientMetadata = metadata === undefined ? undefined : {
+			"x-codex-turn-metadata": JSON.stringify(metadata),
+			...metadata,
+		};
+		const body = { model: "gpt-5-codex", input: [], client_metadata: clientMetadata };
+		const response = await postResponses(proxy, body, "/responses", metadata === undefined
+			? {} : { "x-codex-turn-metadata": JSON.stringify(metadata) });
+		expect(response.status).toBe(200);
+		await response.text();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.headers.get("x-codex-turn-metadata")).toBe(metadata === undefined ? null : JSON.stringify(metadata));
+		expect(JSON.parse(calls[0]?.bodyText ?? "{}").client_metadata).toEqual(clientMetadata);
+	});
+
 	it("routes every request to the ephemeral forced account without rotating (#623)", async () => {
 		const now = Date.now();
 		const accountManager = new AccountManager(undefined, createStorage(now, 3));
