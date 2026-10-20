@@ -1,29 +1,30 @@
 import { join } from 'node:path';
-import { AccountManager, extractAccountId, resolveAccountRecordId, sanitizeEmail } from '../accounts.js';
+import { AccountManager, resolveAccountRecordId, sanitizeEmail } from '../accounts.js';
 import { loadAccounts, type AccountMetadataV3 } from '../storage.js';
 import { getCodexMultiAuthDir } from '../runtime-paths.js';
 import { ensureFreshAccessToken } from './rotation-token-refresh.js';
-import { modelScopeId, workspaceModelScopes } from './workspace-model-scopes.js';
+import { modelScopeId, workspaceModelScopes, nativeWorkspaceIdentity } from './workspace-model-scopes.js';
 import { nativeRateLimitsRpc } from './native-rate-limits.js';
 import { codexCliAccountIdFor } from '../auth/token-utils.js';
 import { isRecord } from '../utils.js';
-import { ResetCreditService, type ResetTarget } from './reset-credits.js';
+import { ResetCreditService, type ResetCreditDetail, type ResetTarget } from './reset-credits.js';
 import { withCheckProgress } from '../ui/check-progress.js';
 
 export function resetTargetForStoredAccount(account:AccountMetadataV3):ResetTarget|null{
  // Organization display aliases are not native ChatGPT workspace identities.
- const stored=account.accountId?.trim();
- const id=stored?.startsWith("org-") ? extractAccountId(account.accessToken)?.trim() : stored;
+ const selected=account.workspaces?.length ? account.workspaces[account.currentWorkspaceIndex ?? 0] : undefined;
+ if(account.workspaces?.length && (!selected || selected.enabled===false))return null;
+ const stored=(selected?.id ?? account.accountId)?.trim();
+ const id=nativeWorkspaceIdentity({access:account.accessToken,codexCliMirror:account.codexCliMirror},stored);
  const workspace=account.workspaces?.find(w=>w.id===id);
- if(!id||id.startsWith("org-")||account.enabled===false||workspace?.enabled===false)return null;
+ if(!id||id.startsWith("org-")||account.enabled===false||(!selected && workspace?.enabled===false))return null;
  return {key:modelScopeId('oauth',resolveAccountRecordId(account),id),accountId:id};
 }
 export function isResetTargetEnabled(account:AccountMetadataV3,target:ResetTarget):boolean {
  if(account.enabled===false)return false;
  const canonical=resetTargetForStoredAccount(account);
  if(canonical?.key===target.key&&canonical.accountId===target.accountId)return true;
- const scopeKey=modelScopeId('oauth',resolveAccountRecordId(account),target.accountId);
- return !target.accountId.startsWith('org-')&&scopeKey===target.key&&Boolean(account.workspaces?.some(w=>w.id===target.accountId&&w.enabled!==false));
+ return false;
 }
 
 export function createResetCreditService(manager?:AccountManager):ResetCreditService {
@@ -39,22 +40,22 @@ export function createResetCreditService(manager?:AccountManager):ResetCreditSer
  return {accessToken:fresh.accessToken,accountId:target.accountId,expiresAt:fresh.account.expires??0,codexCliMirror:current.codexCliMirror};
  };
  return new ResetCreditService(join(getCodexMultiAuthDir(),'reset-credits.json'),{
-  read:async target=>{
+  read:async(target,{creditDetails})=>{
    // The backend answers for the id written into its auth.json (the mirror id when one
    // applies). Verify the reply against that id; the snapshot stays keyed on the target.
    const freshAuth=await auth(target);
    const sent=codexCliAccountIdFor(freshAuth,freshAuth.accessToken)??freshAuth.accountId;
-   const reply=await nativeRateLimitsRpc(freshAuth,'account/rateLimits/read',{excludeResetCreditDetails:true});
+   const reply=await nativeRateLimitsRpc(freshAuth,'account/rateLimits/read',{excludeResetCreditDetails:!creditDetails});
    if(!isRecord(reply)||reply.accountId!==sent)throw Error('Reset credit workspace identity mismatch');
    return {...reply,accountId:target.accountId};
   },
-  consume:async(target,idempotencyKey)=>{
+  consume:async(target,idempotencyKey,creditId)=>{
    const freshAuth=await auth(target);
    const disk=await loadAccounts();
    const matches=disk?.accounts.filter(a=>isResetTargetEnabled(a,target))??[];
    if(matches.length>1)throw Error('Reset account identity is ambiguous; no credit consumed');
    if(matches.length!==1)throw Error('Reset target was removed, disabled, or changed; no credit consumed');
-   return nativeRateLimitsRpc(freshAuth,'account/rateLimitResetCredit/consume',{idempotencyKey});
+   return nativeRateLimitsRpc(freshAuth,'account/rateLimitResetCredit/consume',{idempotencyKey,...(creditId===undefined?{}:{creditId})});
   },
  });
 }
@@ -65,12 +66,31 @@ export function resetAccountLabel(account: Pick<AccountMetadataV3, "email">, ind
  const printable = email && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(email);
  return `Account ${index + 1}${printable ? ` (${email})` : ""}`;
 }
+/** Strips terminal control codes, invisible formatters, and whitespace before printing credit titles. */
+export function sanitizeCreditTitle(title: string | null | undefined): string | null {
+ if (typeof title !== "string") return null;
+ const trimmed = title.trim();
+ if (!trimmed || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(trimmed)) return null;
+ return trimmed;
+}
+/** One local terminal line per credit row; expiresAt is Unix seconds and null means it never expires. */
+export function formatResetCreditLine(credit:ResetCreditDetail,index:number):string{
+ const date=new Date(typeof credit.expiresAt==='number'&&credit.expiresAt>0?credit.expiresAt*1000:Number.NaN);
+ const expiry=credit.expiresAt===null?'no expiry':Number.isNaN(date.getTime())?'expires unknown':`expires ${date.toLocaleString()}`;
+ const title=sanitizeCreditTitle(credit.title);
+ return `   - credit #${index+1}: ${expiry}${title?` (${title})`:''}`;
+}
 export async function refreshAndPrintResetCredits(log:(message:string)=>void){
  const storage=await loadAccounts();if(!storage?.accounts.length)return;
  const manager=new AccountManager(undefined,storage);
  const targets=storage.accounts.map(resetTargetForStoredAccount).filter((t):t is ResetTarget=>Boolean(t));
  try{
   const snapshots=await withCheckProgress(`Checking reset credits for ${targets.length} accounts`,()=>createResetCreditService(manager).refresh(targets),log);
-  storage.accounts.forEach((a,i)=>{const target=resetTargetForStoredAccount(a);const count=target?snapshots[target.key]?.availableCount:undefined;log(`${resetAccountLabel(a,i)}: available subscription resets: ${count??'unknown (not verified)'}`);});
+  storage.accounts.forEach((a,i)=>{
+   const target=resetTargetForStoredAccount(a);
+   const snap=target?snapshots[target.key]:undefined;
+   log(`${resetAccountLabel(a,i)}: available subscription resets: ${snap?.availableCount??'unknown (not verified)'}`);
+   snap?.credits?.forEach((c,idx)=>log(formatResetCreditLine(c,idx)));
+  });
  }finally{await manager.flushPendingSave();}
 }

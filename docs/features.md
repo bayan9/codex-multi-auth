@@ -14,7 +14,8 @@ What `codex-multi-auth` gives you, grouped by job. Everything listed is a `codex
 | List the pool, quota windows, and runtime markers | `codex-multi-auth list`, `status`, `limits --json` |
 | Luna Reserve | First-class `gpt-reserve`, automatic Luna quota fallback, independent cooldowns, and live Reserve percentage via `limits --json --refresh` |
 | Pin the active account | `codex-multi-auth switch <index>` (`unpin` clears it) |
-| Pick a workspace under an account | `codex-multi-auth workspace <account> [workspace]` |
+| List or select a workspace under an account | `codex-multi-auth workspace <account> [workspace]` |
+| Enable or disable a specific workspace without changing the selection | `codex-multi-auth workspace <account> <workspace> enable` or `codex-multi-auth workspace <account> <workspace> disable` |
 | Health and quota checks | `codex-multi-auth check` |
 | Recover flagged (sidelined) accounts | `codex-multi-auth verify-flagged` |
 | Restore a named backup into an empty pool | `codex-multi-auth login` → restore menu |
@@ -56,6 +57,15 @@ On by default for request-bearing Codex sessions launched through `codex-multi-a
 The proxy also forwards model discovery, image generation/edits, and Codex dictation (`POST /transcribe`) — the multipart audio body is passed through byte-for-byte with managed OAuth credentials, and ambiguous failures are never replayed across accounts. See [reference/image-routes.md](reference/image-routes.md) and [reference/imagegen-provider-compatibility.md](reference/imagegen-provider-compatibility.md) for image-specific behavior.
 
 ---
+
+## Hourly quota revalidation
+
+Account rate-limit deadlines and preemptive quota deferrals are bounded to one
+hour. Cached exhausted usage older than an hour is unknown for routing purposes.
+The next eligible request checks the server again on the same pinned account;
+a fresh 429 renews the local block. Shorter server retry windows still apply.
+Authentication failures, circuit breakers, disabled accounts, and policy blocks
+are unaffected. No background inference or automatic reset redemption is added.
 
 ## Local Governance
 

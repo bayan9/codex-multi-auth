@@ -128,12 +128,12 @@ it("resolves the current workspace by identity across a reorder", () => {
     expect(row!.workspaces!.map(w => w.id)).toEqual(["business", "personal"]);
     expect(row!.workspaces![row!.currentWorkspaceIndex!]!.id).toBe("business");
 });
-it("moves the current workspace off one the other side disabled", () => {
+it("preserves a selected workspace even when the other side disabled it", () => {
     const base = fixture(), disk = structuredClone(base), local = structuredClone(base);
     Object.assign(disk.accounts[0]!.workspaces![1]!, { enabled: false, disabledAt: 10 });
     local.accounts[0]!.currentWorkspaceIndex = 1;
     const [row] = mergeAccountSnapshot(base, disk, local).accounts;
-    expect(row!.workspaces![row!.currentWorkspaceIndex!]!.id).toBe("personal");
+    expect(row!.workspaces![row!.currentWorkspaceIndex!]!.id).toBe("business");
 });
 
 it("keeps an auth-failure cooldown recorded against the refresh token that is kept", () => {
@@ -159,4 +159,15 @@ it("does not drop unknown account fields another version wrote", () => {
     local.accounts[0]!.lastUsed = 10;
     const [row] = mergeAccountSnapshot(base, disk, local).accounts;
     expect((row as Record<string, unknown>).codexCliMirror).toEqual({ forAccountId: "a", accountId: "org-b" });
+});
+it("lets a lowered local deadline replace an unchanged disk deadline but keeps the later of two observations", () => {
+    const base = fixture();
+    base.accounts[0]!.rateLimitResetTimes = { codex: 1_000 };
+    const disk = structuredClone(base), local = structuredClone(base);
+    local.accounts[0]!.rateLimitResetTimes = { codex: 400 };
+    expect(mergeAccountSnapshot(base, disk, local).accounts[0]!.rateLimitResetTimes).toEqual({ codex: 400 });
+    disk.accounts[0]!.rateLimitResetTimes = { codex: 300 };
+    expect(mergeAccountSnapshot(base, disk, local).accounts[0]!.rateLimitResetTimes).toEqual({ codex: 400 });
+    const unchangedLocal = structuredClone(base);
+    expect(mergeAccountSnapshot(base, disk, unchangedLocal).accounts[0]!.rateLimitResetTimes).toEqual({ codex: 300 });
 });

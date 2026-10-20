@@ -1,10 +1,11 @@
-import { extractAccountId } from "./auth/token-utils.js";
+import { RATE_LIMIT_CACHE_TTL_MS } from "./constants.js";
+import { extractAccountId, nativeWorkspaceIdentity } from "./auth/token-utils.js";
 import { createHash } from "node:crypto";
 import { resolveAccountRecordId } from "./storage/record-identity.js";
 import type { QuotaCacheData, QuotaCacheEntry, QuotaCacheWindow } from "./quota-cache.js";
 import type { AccountMetadataV3 } from "./storage.js";
 
-export type QuotaCacheAccountRef = Pick<AccountMetadataV3, "accountId" | "email" | "recordId" | "workspaces" | "currentWorkspaceIndex"> & Partial<Pick<AccountMetadataV3, "refreshToken" | "addedAt" | "accessToken">>;
+export type QuotaCacheAccountRef = Pick<AccountMetadataV3, "accountId" | "email" | "recordId" | "workspaces" | "currentWorkspaceIndex"> & Partial<Pick<AccountMetadataV3, "refreshToken" | "addedAt" | "accessToken" | "codexCliMirror">>;
 
 type QuotaWindowLike = Pick<QuotaCacheWindow, "usedPercent" | "resetAtMs" | "windowMinutes">;
 
@@ -125,6 +126,12 @@ export function isQuotaCacheEntryExhausted(
 	// Codex quota windows are cumulative gates: a 0% remaining active window blocks use
 	// even if another window still has quota left.
 	const updatedAt = entry?.updatedAt;
+	// Stale usage is unknown, not proof that the server still rejects requests.
+	if (
+		typeof updatedAt === "number" &&
+		Number.isFinite(updatedAt) &&
+		now >= updatedAt + RATE_LIMIT_CACHE_TTL_MS
+	) return false;
 	return (
 		quotaWindowIsExhausted(entry?.primary, now, updatedAt) ||
 		quotaWindowIsExhausted(entry?.secondary, now, updatedAt)
@@ -140,9 +147,10 @@ export function quotaWorkspaceKey(account: QuotaCacheAccountRef, workspaceId: st
 
 /** Display the selected workspace; callers routing another scope must pass that exact workspace. */
 export function quotaWorkspaceId(account: QuotaCacheAccountRef): string | undefined {
-    return account.workspaces?.length
+    const selectedId = account.workspaces?.length
         ? account.workspaces[account.currentWorkspaceIndex ?? 0]?.id.trim()
         : account.accountId?.trim() || extractAccountId(account.accessToken);
+    return nativeWorkspaceIdentity({ access: account.accessToken, codexCliMirror: account.codexCliMirror }, selectedId);
 }
 
 /** Read exact-workspace quota, using legacy binding entries only for that binding. */

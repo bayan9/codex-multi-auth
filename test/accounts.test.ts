@@ -1284,7 +1284,7 @@ describe("AccountManager", () => {
 			expect(account.rateLimitResetTimes["codex"]).toBeDefined();
 		});
 
-		it("H1: clamps an absurd retry-after value to MAX_RATE_LIMIT_DELAY_MS (7d)", () => {
+		it("H1: clamps an absurd retry-after value to the one-hour revalidation deadline", () => {
 			const now = new Date("2026-04-05T00:00:00.000Z");
 			vi.useFakeTimers();
 			vi.setSystemTime(now);
@@ -1298,13 +1298,13 @@ describe("AccountManager", () => {
 				const account = manager.getCurrentAccount()!;
 				// Hostile/buggy upstream: ~31 years in ms.
 				manager.markRateLimitedWithReason(account, 999_999_999_999, "codex", "quota");
-				const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+				const oneHourMs = 60 * 60 * 1000;
 				const resetAt = account.rateLimitResetTimes["codex"]!;
-				// Window must not exceed 7 days from now.
-				expect(resetAt - now.getTime()).toBeLessThanOrEqual(sevenDaysMs);
-				expect(resetAt - now.getTime()).toBe(sevenDaysMs);
-				// And the clamped window is in the past after 7d+ elapses (self-heals).
-				vi.advanceTimersByTime(sevenDaysMs + 1000);
+				// Window must not exceed one hour from now.
+				expect(resetAt - now.getTime()).toBeLessThanOrEqual(oneHourMs);
+				expect(resetAt - now.getTime()).toBe(oneHourMs);
+				// And the clamped window is in the past after 1h+ elapses (self-heals).
+				vi.advanceTimersByTime(oneHourMs + 1000);
 				expect(account.rateLimitResetTimes["codex"]!).toBeLessThan(Date.now());
 			} finally {
 				vi.useRealTimers();
@@ -1359,7 +1359,7 @@ describe("AccountManager", () => {
 					"quota",
 				);
 
-				const expectedResetAt = now.getTime() + 90 * 60_000;
+				const expectedResetAt = now.getTime() + 60 * 60_000;
 
 				vi.advanceTimersByTime(30 * 60_000);
 
@@ -1398,7 +1398,7 @@ describe("AccountManager", () => {
 					"gpt-5.2",
 				);
 
-				const expectedResetAt = now.getTime() + 90 * 60_000;
+				const expectedResetAt = now.getTime() + 60 * 60_000;
 
 				vi.advanceTimersByTime(30 * 60_000);
 
@@ -1716,6 +1716,30 @@ describe("AccountManager", () => {
 
 			const manager = new AccountManager(undefined, stored);
 			expect(manager.getMinWaitTimeForFamily("codex")).toBe(0);
+		});
+
+		it("ignores excluded accounts so policy-reserved capacity does not report a zero wait", () => {
+			const now = Date.now();
+			const stored = {
+				version: 3 as const,
+				activeIndex: 0,
+				accounts: [
+					{
+						refreshToken: "token-1",
+						addedAt: now,
+						lastUsed: now,
+						rateLimitResetTimes: { codex: now + 30000 },
+					},
+					{ refreshToken: "token-2", addedAt: now, lastUsed: now },
+				],
+			};
+
+			const manager = new AccountManager(undefined, stored);
+			expect(manager.getMinWaitTimeForFamily("codex")).toBe(0);
+			const waitTime = manager.getMinWaitTimeForFamily("codex", null, new Set([1]));
+			expect(waitTime).toBeGreaterThan(0);
+			expect(waitTime).toBeLessThanOrEqual(30000);
+			expect(manager.getMinWaitTimeForFamily("codex", null, new Set([0, 1]))).toBe(0);
 		});
 
 		it("returns wait time when all accounts rate limited", () => {

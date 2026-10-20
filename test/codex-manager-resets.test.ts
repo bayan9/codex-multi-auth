@@ -87,6 +87,17 @@ it('identifies a disabled pending account without calling it removed',async()=>{
  const output=JSON.stringify(vi.mocked(console.error).mock.calls);
  expect(output).toContain('account 2');expect(output).toContain('disabled');expect(output).not.toContain('was removed');
 });
+it('names the owner of a pending result whose workspace is no longer selected',async()=>{
+ const {resetTargetForStoredAccount}=await import('../lib/runtime/account-reset-credits.js');
+ const other={accountId:'binding',refreshToken:'fixture-3',addedAt:1,lastUsed:1,workspaces:[{id:'team-a',name:'A'},{id:'team-b',name:'B'}],currentWorkspaceIndex:1};
+ const key=resetTargetForStoredAccount({...other,currentWorkspaceIndex:0})!.key;
+ expect(resetTargetForStoredAccount(other)!.key).not.toBe(key);
+ f.extraAccounts=[other];
+ f.redeem.mockRejectedValue(Error('pending'));f.list.mockResolvedValue({version:1,policy:'manual',snapshots:{},pending:{key}});
+ expect(await runResetsCommand(['redeem','1'])).toBe(1);
+ const output=JSON.stringify(vi.mocked(console.error).mock.calls);
+ expect(output).toContain('account 2');expect(output).toContain('no longer selected');expect(output).not.toContain('was removed');
+});
 
 it('reports every failed refresh and exits nonzero instead of silently succeeding with unknown counts', async () => {
  f.refresh.mockResolvedValue({});
@@ -115,4 +126,50 @@ it('accepts a successful read whose credit count is unavailable', async () => {
  expect(await runResetsCommand(['list','--refresh'])).toBe(0);
  expect(console.error).not.toHaveBeenCalled();
  expect(console.log).toHaveBeenCalledWith(expect.stringContaining('unknown reset credits (checked'));
+});
+
+it('prints credit expiration dates and titles when credit details are present', async () => {
+ const { resetTargetForStoredAccount } = await import('../lib/runtime/account-reset-credits.js');
+ const key = resetTargetForStoredAccount({ accountId: 'workspace', email: 'reader@example.test', refreshToken: 'secret', addedAt: 1, lastUsed: 1 })!.key;
+ // Pin the locale formatter so the assertion proves the seconds-to-milliseconds conversion on any host.
+ vi.spyOn(Date.prototype, 'toLocaleString').mockImplementation(function (this: Date) { return `local:${this.getTime()}`; });
+ f.refresh.mockResolvedValue({
+  [key]: {
+   updatedAt: Date.now(),
+   availableCount: 3,
+   credits: [{ expiresAt: 1793300484, title: 'Full reset' }, { expiresAt: null }, { expiresAt: 1e300 }, {}]
+  }
+ });
+ try {
+  expect(await runResetsCommand(['list', '--refresh'])).toBe(0);
+ } finally { vi.mocked(Date.prototype.toLocaleString).mockRestore(); }
+ expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Account 1 (reader@example.test): 3 reset credits'));
+ expect(console.log).toHaveBeenCalledWith('   - credit #1: expires local:1793300484000 (Full reset)');
+ expect(console.log).toHaveBeenCalledWith('   - credit #2: no expiry');
+ expect(console.log).toHaveBeenCalledWith('   - credit #3: expires unknown');
+ expect(console.log).toHaveBeenCalledWith('   - credit #4: expires unknown');
+});
+
+it('prints cached credit details without a refresh', async () => {
+ const { resetTargetForStoredAccount } = await import('../lib/runtime/account-reset-credits.js');
+ const key = resetTargetForStoredAccount({ accountId: 'workspace', email: 'reader@example.test', refreshToken: 'secret', addedAt: 1, lastUsed: 1 })!.key;
+ f.list.mockResolvedValue({ version: 1, policy: 'manual', snapshots: { [key]: { updatedAt: Date.now(), availableCount: 1, credits: [{ expiresAt: null, title: 'Bonus reset' }] } } });
+ expect(await runResetsCommand(['list'])).toBe(0);
+ expect(f.refresh).not.toHaveBeenCalled();
+ expect(console.log).toHaveBeenCalledWith('   - credit #1: no expiry (Bonus reset)');
+});
+
+it('sanitizes control characters and newlines from credit titles', async () => {
+ const { resetTargetForStoredAccount } = await import('../lib/runtime/account-reset-credits.js');
+ const key = resetTargetForStoredAccount({ accountId: 'workspace', email: 'reader@example.test', refreshToken: 'secret', addedAt: 1, lastUsed: 1 })!.key;
+ f.refresh.mockResolvedValue({
+  [key]: {
+   updatedAt: Date.now(),
+   availableCount: 1,
+   credits: [{ expiresAt: null, title: 'Full reset\nfake-injected-line' }]
+  }
+ });
+ expect(await runResetsCommand(['list', '--refresh'])).toBe(0);
+ expect(console.log).toHaveBeenCalledWith('   - credit #1: no expiry');
+ expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining('fake-injected-line'));
 });

@@ -59,6 +59,14 @@ The account pool under `~/.codex/multi-auth` carries over.
 
 ## Changes To Know About
 
+### Hourly rate-limit cache revalidation
+
+Restart existing routers after installing this change. Legacy persisted routing
+deadlines longer than an hour are bounded to one hour from the first load and
+written back to the account pool then, or on the next normal save if that write
+fails. Already-bounded deadlines are not extended on restart.
+No account migration or reset-credit redemption is required.
+
 ### Compact `status` Output Is The Default
 
 `codex-multi-auth status` and `codex-multi-auth list` now print a compact
@@ -303,6 +311,16 @@ Automatic on first load: legacy worktree-keyed pools merge into the repo-shared 
 
 ---
 
+## Emergency-only account policy compatibility
+
+The new `account emergency-only` command reserves an account from automatic rotation until regular capacity and reset credits are exhausted.
+
+The `emergencyOnly` account flag reserves subscription accounts until regular
+pool capacity and reset credits are confirmed exhausted. Older policy writers
+do not preserve this flag. Before downgrading, pause reserved accounts or remove
+them from the enabled pool; reapply `account emergency-only <index> on` after
+upgrading. Existing pause and drain flags remain independent.
+
 ## Related
 
 - [getting-started.md](getting-started.md)
@@ -310,3 +328,15 @@ Automatic on first load: legacy worktree-keyed pools merge into the repo-shared 
 - [features.md](features.md)
 - [reference/storage-paths.md](reference/storage-paths.md)
 - [development/CONFIG_FLOW.md](development/CONFIG_FLOW.md)
+
+## Selected workspace routing
+
+Native pool requests, model discovery, and reset targets now honor the selected
+workspace only. Unselected siblings and stored bindings are not fallback routes.
+A disabled selected workspace makes the account unavailable until an enabled
+workspace is selected. Use `workspace <account> <workspace> enable` or `disable`
+to control availability without changing selection.
+
+Saved Personal organization aliases retain their native client identity mapping.
+The selected entry still controls enablement; disabling it never falls back to
+the token entry or another workspace.
