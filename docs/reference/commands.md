@@ -498,10 +498,16 @@ Last-resort mode first rechecks all eligible subscription workspaces and spends
 a credit only when every read confirms included usage is blocked. Remaining
 reserves, a scheduled reset that recovered or is due within a minute, unknown
 usage, API/ZDR routes, and explicit single-account invocation pins all prevent
-automatic redemption; network failures never authorize one. An ambiguous
-redemption stays pending under the same idempotency key — retry the same
-account explicitly. Concurrent redemptions are serialized with a five-minute
-minimum interval.
+automatic redemption; network failures never authorize one. Among eligible
+depleted accounts, the available credit with the earliest reported expiry is
+redeemed by its explicit credit ID. Equal deadlines keep the existing account
+preference/priority order. Nonexpiring credits and unknown expiry details follow
+known deadlines. Native detail lists can be capped or unavailable; count-positive
+accounts without usable details retain deterministic backend-selected recovery
+after known deadlines, so ordering cannot cover credits the backend did not expose.
+An ambiguous redemption stays pending under the same idempotency key and selected
+credit ID — retry the same account explicitly. Full credit lists are not persisted.
+Concurrent redemptions are serialized with a five-minute minimum interval.
 
 `check resets` and `resets list --refresh` report how many eligible accounts
 could not be read and exit 1 on a partial or complete refresh failure. A

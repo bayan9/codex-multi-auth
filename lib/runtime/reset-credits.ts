@@ -14,15 +14,39 @@ export interface ResetExhaustionEvidence extends ResetTarget { observedAt: numbe
 const windowSchema=z.object({usedPercent:z.number().min(0).max(100).optional(),resetsAt:z.number().nonnegative().nullish(),windowDurationMins:z.number().nonnegative().nullish()});
 const snapshotSchema=z.object({updatedAt:z.number(),availableCount:z.number().int().nonnegative().nullable(),ordinaryUsageAllowed:z.boolean().nullable(),planType:z.string().nullable(),primary:windowSchema,secondary:windowSchema});
 export type ResetSnapshot=z.infer<typeof snapshotSchema>;
-const stateSchema=z.object({version:z.literal(1),policy:z.enum(['manual','last-resort']).default('manual'),snapshots:z.record(z.string(),snapshotSchema).default({}),pending:z.object({key:z.string(),idempotencyKey:z.string().uuid()}).optional(),lastAutomaticCheckAt:z.number().optional(),lastRedemptionAt:z.number().optional(),lastRedemption:z.object({key:z.string(),at:z.number(),outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed']),automatic:z.boolean()}).optional()});
+const creditIdSchema=z.string().min(1).refine(id=>id.trim().length>0);
+const stateSchema=z.object({version:z.union([z.literal(1),z.literal(2)]),policy:z.enum(['manual','last-resort']).default('manual'),snapshots:z.record(z.string(),snapshotSchema).default({}),pending:z.object({key:z.string(),idempotencyKey:z.string().uuid(),creditId:creditIdSchema.optional()}).optional(),lastAutomaticCheckAt:z.number().optional(),lastRedemptionAt:z.number().optional(),lastRedemption:z.object({key:z.string(),at:z.number(),outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed']),automatic:z.boolean()}).optional()});
 type State=z.infer<typeof stateSchema>;
-const readSchema=z.object({accountId:z.string(),ordinaryUsageAllowed:z.boolean().nullish(),rateLimitResetCredits:z.object({availableCount:z.number().int().nonnegative()}).nullish(),rateLimits:z.object({planType:z.string().nullish(),primary:windowSchema.nullish(),secondary:windowSchema.nullish()})});
+const readSchema=z.object({accountId:z.string(),ordinaryUsageAllowed:z.boolean().nullish(),rateLimitResetCredits:z.object({availableCount:z.number().int().nonnegative(),credits:z.unknown().optional()}).nullish(),rateLimits:z.object({planType:z.string().nullish(),primary:windowSchema.nullish(),secondary:windowSchema.nullish()})});
+const creditSchema=z.object({id:creditIdSchema,status:z.literal('available'),resetType:z.literal('codexRateLimits'),expiresAt:z.number().int().safe().nonnegative().nullish()});
 const outcomeSchema=z.object({outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed'])});
 export type ResetOutcome=z.infer<typeof outcomeSchema>['outcome'];
 export function parseResetSnapshot(value:unknown,accountId:string,now:number):ResetSnapshot {
+ return parseResetReading(value,accountId,now).snapshot;
+}
+function parseResetReading(value:unknown,accountId:string,now:number) {
  const parsed=readSchema.parse(value);
  if(parsed.accountId!==accountId)throw Error('Reset credit workspace identity mismatch');
- return {updatedAt:now,availableCount:parsed.rateLimitResetCredits?.availableCount??null,ordinaryUsageAllowed:parsed.ordinaryUsageAllowed??null,planType:parsed.rateLimits.planType??null,primary:parsed.rateLimits.primary??{},secondary:parsed.rateLimits.secondary??{}};
+ const snapshot:ResetSnapshot={updatedAt:now,availableCount:parsed.rateLimitResetCredits?.availableCount??null,ordinaryUsageAllowed:parsed.ordinaryUsageAllowed??null,planType:parsed.rateLimits.planType??null,primary:parsed.rateLimits.primary??{},secondary:parsed.rateLimits.secondary??{}};
+ const rows=parsed.rateLimitResetCredits?.credits;
+ return {snapshot,credits:Array.isArray(rows)?rows as unknown[]:[]};
+}
+/** Counts authorize availability; potentially capped detail rows only rank it.
+ * Never confuse credit expiry (seconds) with a quota window's scheduled reset. */
+function firstExpiringCredit(rows:unknown[],now:number):{creditId?:string;expiresAt:number} {
+ const ids=rows.map(row=>z.object({id:creditIdSchema}).safeParse(row));
+ const counts=new Map<string,number>();
+ for(const id of ids)if(id.success)counts.set(id.data.id,(counts.get(id.data.id)??0)+1);
+ let best:{creditId?:string;expiresAt:number}={expiresAt:Infinity};
+ for(const row of rows){
+  const parsed=creditSchema.safeParse(row);
+  if(!parsed.success||counts.get(parsed.data.id)!==1)continue;
+  const credit=parsed.data;
+  if(typeof credit.expiresAt==='number'&&credit.expiresAt<=now/1000)continue;
+  const expiresAt=credit.expiresAt??Infinity;
+  if(best.creditId===undefined||expiresAt<best.expiresAt)best={creditId:credit.id,expiresAt};
+ }
+ return best;
 }
 export function resetSnapshotQuota(snapshot:ResetSnapshot):QuotaCacheEntry {
  // A bogus resetsAt must not read as a window that never resets.
@@ -35,11 +59,12 @@ export function isResetSubscription(snapshot:ResetSnapshot):boolean {
 }
 export interface ResetCreditIO {
  read:(target:ResetTarget)=>Promise<unknown>;
- consume:(target:ResetTarget,idempotencyKey:string)=>Promise<unknown>;
+ consume:(target:ResetTarget,idempotencyKey:string,creditId?:string)=>Promise<unknown>;
  now?:()=>number;
 }
-/** No credentials or credit IDs are persisted. One global redemption lease covers
- * all accounts: concurrent exhausted requests cannot independently spend credits. */
+/** No credentials or credit lists are persisted. Only an explicitly selected
+ * credit ID accompanies its pending idempotency key until completion. One global
+ * lease prevents concurrent exhausted requests from independently spending. */
 /** A stored time further ahead than this came from a clock that has since stepped back: treat it as expired. */
 const FUTURE_SKEW_MS=5*60000;
 const within=(at:number|undefined,now:number,windowMs:number)=>at!==undefined&&at<=now+FUTURE_SKEW_MS&&now-at<windowMs;
@@ -85,6 +110,9 @@ export class ResetCreditService {
   catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return {version:1,policy:'manual',snapshots:{}};throw e;}
  }
  private async save(state:State){
+  // Older readers strip unknown pending fields. Make them reject an explicit
+  // credit attempt instead of retrying its UUID with different parameters.
+  state.version=state.pending?.creditId===undefined?1:2;
   const path=this.path+'.'+randomUUID()+'.tmp';
   try {
    const file=await fs.open(path,'wx',0o600);
@@ -94,16 +122,17 @@ export class ResetCreditService {
   finally {await fs.rm(path,{force:true});}
  }
  async setPolicy(policy:State['policy']){await withFileTransactionLock(this.path,async()=>{const s=await this.status();s.policy=policy;await this.save(s);});}
- private async read(target:ResetTarget){return parseResetSnapshot(await this.io.read(target),target.accountId,this.now());}
+ private async readDetails(target:ResetTarget){return parseResetReading(await this.io.read(target),target.accountId,this.now());}
+ private async read(target:ResetTarget){return (await this.readDetails(target)).snapshot;}
  async refresh(targets:ResetTarget[]):Promise<Record<string,ResetSnapshot>>{
   const results=await mapWithConcurrency(targets,3,async t=>{try{return {key:t.key,snapshot:await this.read(t)}}catch{return null}});
   return withFileTransactionLock(this.path,async()=>{const state=await this.status();const updated:Record<string,ResetSnapshot>={};const now=this.now();for(const row of results)if(row){const old=state.snapshots[row.key];if(!old||old.updatedAt<=row.snapshot.updatedAt||old.updatedAt>now+FUTURE_SKEW_MS)state.snapshots[row.key]=row.snapshot;updated[row.key]=row.snapshot;}await this.save(state);return updated;});
  }
- private async consumeLocked(state:State,target:ResetTarget,automatic=false):Promise<ResetOutcome>{
+ private async consumeLocked(state:State,target:ResetTarget,automatic=false,creditId?:string):Promise<ResetOutcome>{
   if(state.pending&&state.pending.key!==target.key)throw Error('A reset redemption is pending for another account; retry that account explicitly first.');
-  state.pending??={key:target.key,idempotencyKey:randomUUID()};
+  state.pending??={key:target.key,idempotencyKey:randomUUID(),...(creditId===undefined?{}:{creditId})};
   state.lastRedemptionAt=this.now();await this.save(state);
-  const result=outcomeSchema.parse(await this.io.consume(target,state.pending.idempotencyKey));
+  const result=outcomeSchema.parse(await this.io.consume(target,state.pending.idempotencyKey,state.pending.creditId));
   // Keep the same key on *any* ambiguous outcome, including a failed follow-up read.
   state.snapshots[target.key]=await this.read(target);
   state.lastRedemption={key:target.key,at:this.now(),outcome:result.outcome,automatic};
@@ -158,13 +187,22 @@ export class ResetCreditService {
    state.lastAutomaticCheckAt=now;await this.save(state);
    // Missing/failed reads prevent spending. A scheduled reset that has arrived
    // is confirmed by ordinaryUsageAllowed, never inferred from a clock or %.
-   const reads=await mapWithConcurrency(targets,3,async t=>{try{return await this.read(t)}catch{return null}});
+   const details=await mapWithConcurrency(targets,3,async t=>{try{return await this.readDetails(t)}catch{return null}});
+   const reads=details.map(row=>row?.snapshot??null);
    reads.forEach((s,i)=>{const t=targets[i];if(s&&t)state.snapshots[t.key]=s;});await this.save(state);
    if(reads.some(s=>!s||!isResetSubscription(s)||s.ordinaryUsageAllowed!==false))return null;
    if(reads.some(s=>s&&[s.primary,s.secondary].some(w=>w.usedPercent===100&&typeof w.resetsAt==='number'&&w.resetsAt*1000<=this.now()+60000)))return null;
-   const index=reads.findIndex(s=>s!==null&&(s.availableCount??0)>0);const target=targets[index];
-   if(!target)return null;
-   return {key:target.key,outcome:await this.consumeLocked(state,target,true)};
+   let best:{target:ResetTarget;creditId?:string;expiresAt:number}|undefined;
+   for(const [index,row] of details.entries()){
+    const target=targets[index];
+    if(!row||!target||(row.snapshot.availableCount??0)<=0)continue;
+    const credit=firstExpiringCredit(row.credits,this.now());
+    // Stable ties retain the caller's preferred-account/priority ordering.
+    // Unknown, omitted and nonexpiring details follow all known deadlines.
+    if(!best||credit.expiresAt<best.expiresAt)best={target,...credit};
+   }
+   if(!best)return null;
+   return {key:best.target.key,outcome:await this.consumeLocked(state,best.target,true,best.creditId)};
   },{waitMs:1000});
  }
 }

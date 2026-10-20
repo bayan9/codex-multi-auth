@@ -45,17 +45,17 @@ export function createResetCreditService(manager?:AccountManager):ResetCreditSer
    // applies). Verify the reply against that id; the snapshot stays keyed on the target.
    const freshAuth=await auth(target);
    const sent=codexCliAccountIdFor(freshAuth,freshAuth.accessToken)??freshAuth.accountId;
-   const reply=await nativeRateLimitsRpc(freshAuth,'account/rateLimits/read',{excludeResetCreditDetails:true});
+   const reply=await nativeRateLimitsRpc(freshAuth,'account/rateLimits/read',{excludeResetCreditDetails:false});
    if(!isRecord(reply)||reply.accountId!==sent)throw Error('Reset credit workspace identity mismatch');
    return {...reply,accountId:target.accountId};
   },
-  consume:async(target,idempotencyKey)=>{
+  consume:async(target,idempotencyKey,creditId)=>{
    const freshAuth=await auth(target);
    const disk=await loadAccounts();
    const matches=disk?.accounts.filter(a=>isResetTargetEnabled(a,target))??[];
    if(matches.length>1)throw Error('Reset account identity is ambiguous; no credit consumed');
    if(matches.length!==1)throw Error('Reset target was removed, disabled, or changed; no credit consumed');
-   return nativeRateLimitsRpc(freshAuth,'account/rateLimitResetCredit/consume',{idempotencyKey});
+   return nativeRateLimitsRpc(freshAuth,'account/rateLimitResetCredit/consume',{idempotencyKey,...(creditId===undefined?{}:{creditId})});
   },
  });
 }
