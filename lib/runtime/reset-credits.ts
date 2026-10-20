@@ -11,12 +11,19 @@ import { MAX_RATE_LIMIT_DELAY_MS } from '../constants.js';
 export interface ResetTarget { key: string; accountId: string }
 /** A routing observation may invalidate a healthy check, never authorize spending. */
 export interface ResetExhaustionEvidence extends ResetTarget { observedAt: number }
+// Display-only projection: unknown keys (credit ids, backend extras) are stripped before
+// persistence, and a malformed field degrades to unknown instead of failing the count read.
+// expiresAt is Unix seconds; null means the credit does not expire.
+const creditDetailSchema=z.object({expiresAt:z.number().nullish().catch(undefined),title:z.string().nullish().catch(undefined)});
+export type ResetCreditDetail=z.infer<typeof creditDetailSchema>;
+const creditDetailsSchema=z.array(creditDetailSchema).nullish().catch(null);
 const windowSchema=z.object({usedPercent:z.number().min(0).max(100).optional(),resetsAt:z.number().nonnegative().nullish(),windowDurationMins:z.number().nonnegative().nullish()});
-const snapshotSchema=z.object({updatedAt:z.number(),availableCount:z.number().int().nonnegative().nullable(),ordinaryUsageAllowed:z.boolean().nullable(),planType:z.string().nullable(),primary:windowSchema,secondary:windowSchema});
+const snapshotSchema=z.object({updatedAt:z.number(),availableCount:z.number().int().nonnegative().nullable(),credits:creditDetailsSchema,ordinaryUsageAllowed:z.boolean().nullable(),planType:z.string().nullable(),primary:windowSchema,secondary:windowSchema});
 export type ResetSnapshot=z.infer<typeof snapshotSchema>;
 const creditIdSchema=z.string().min(1).refine(id=>id.trim().length>0);
 const stateSchema=z.object({version:z.union([z.literal(1),z.literal(2)]),policy:z.enum(['manual','last-resort']).default('manual'),snapshots:z.record(z.string(),snapshotSchema).default({}),pending:z.object({key:z.string(),idempotencyKey:z.string().uuid(),creditId:creditIdSchema.optional()}).optional(),lastAutomaticCheckAt:z.number().optional(),lastRedemptionAt:z.number().optional(),lastRedemption:z.object({key:z.string(),at:z.number(),outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed']),automatic:z.boolean()}).optional()});
 type State=z.infer<typeof stateSchema>;
+// Raw credit rows stay in memory for credit selection; only the display projection is persisted.
 const readSchema=z.object({accountId:z.string(),ordinaryUsageAllowed:z.boolean().nullish(),rateLimitResetCredits:z.object({availableCount:z.number().int().nonnegative(),credits:z.unknown().optional()}).nullish(),rateLimits:z.object({planType:z.string().nullish(),primary:windowSchema.nullish(),secondary:windowSchema.nullish()})});
 const creditSchema=z.object({id:creditIdSchema,status:z.literal('available'),resetType:z.literal('codexRateLimits'),expiresAt:z.number().int().safe().nonnegative().nullish()});
 const outcomeSchema=z.object({outcome:z.enum(['reset','nothingToReset','noCredit','alreadyRedeemed'])});
@@ -27,7 +34,7 @@ export function parseResetSnapshot(value:unknown,accountId:string,now:number):Re
 function parseResetReading(value:unknown,accountId:string,now:number) {
  const parsed=readSchema.parse(value);
  if(parsed.accountId!==accountId)throw Error('Reset credit workspace identity mismatch');
- const snapshot:ResetSnapshot={updatedAt:now,availableCount:parsed.rateLimitResetCredits?.availableCount??null,ordinaryUsageAllowed:parsed.ordinaryUsageAllowed??null,planType:parsed.rateLimits.planType??null,primary:parsed.rateLimits.primary??{},secondary:parsed.rateLimits.secondary??{}};
+ const snapshot:ResetSnapshot={updatedAt:now,availableCount:parsed.rateLimitResetCredits?.availableCount??null,credits:creditDetailsSchema.parse(parsed.rateLimitResetCredits?.credits)??null,ordinaryUsageAllowed:parsed.ordinaryUsageAllowed??null,planType:parsed.rateLimits.planType??null,primary:parsed.rateLimits.primary??{},secondary:parsed.rateLimits.secondary??{}};
  const rows=parsed.rateLimitResetCredits?.credits;
  return {snapshot,credits:Array.isArray(rows)?rows as unknown[]:[]};
 }
@@ -58,13 +65,15 @@ export function isResetSubscription(snapshot:ResetSnapshot):boolean {
  return ['plus','pro','promax','prolite','team','business','self_serve_business_prolite','enterprise','edu','edu_plus','edu_pro'].includes(snapshot.planType??'');
 }
 export interface ResetCreditIO {
- read:(target:ResetTarget)=>Promise<unknown>;
+ /** creditDetails asks the backend for per-credit rows; display refreshes and credit selection need them. */
+ read:(target:ResetTarget,options:{creditDetails:boolean})=>Promise<unknown>;
  consume:(target:ResetTarget,idempotencyKey:string,creditId?:string)=>Promise<unknown>;
  now?:()=>number;
 }
-/** No credentials or credit lists are persisted. Only an explicitly selected
- * credit ID accompanies its pending idempotency key until completion. One global
- * lease prevents concurrent exhausted requests from independently spending. */
+/** No credentials or credit lists are persisted (snapshot credit rows keep only expiry
+ * and title). Only an explicitly selected credit ID accompanies its pending idempotency
+ * key until completion. One global lease prevents concurrent exhausted requests from
+ * independently spending. */
 /** A stored time further ahead than this came from a clock that has since stepped back: treat it as expired. */
 const FUTURE_SKEW_MS=5*60000;
 const within=(at:number|undefined,now:number,windowMs:number)=>at!==undefined&&at<=now+FUTURE_SKEW_MS&&now-at<windowMs;
@@ -122,10 +131,10 @@ export class ResetCreditService {
   finally {await fs.rm(path,{force:true});}
  }
  async setPolicy(policy:State['policy']){await withFileTransactionLock(this.path,async()=>{const s=await this.status();s.policy=policy;await this.save(s);});}
- private async readDetails(target:ResetTarget){return parseResetReading(await this.io.read(target),target.accountId,this.now());}
- private async read(target:ResetTarget){return (await this.readDetails(target)).snapshot;}
+ private async readDetails(target:ResetTarget,creditDetails:boolean){return parseResetReading(await this.io.read(target,{creditDetails}),target.accountId,this.now());}
+ private async read(target:ResetTarget,creditDetails=false){return (await this.readDetails(target,creditDetails)).snapshot;}
  async refresh(targets:ResetTarget[]):Promise<Record<string,ResetSnapshot>>{
-  const results=await mapWithConcurrency(targets,3,async t=>{try{return {key:t.key,snapshot:await this.read(t)}}catch{return null}});
+  const results=await mapWithConcurrency(targets,3,async t=>{try{return {key:t.key,snapshot:await this.read(t,true)}}catch{return null}});
   return withFileTransactionLock(this.path,async()=>{const state=await this.status();const updated:Record<string,ResetSnapshot>={};const now=this.now();for(const row of results)if(row){const old=state.snapshots[row.key];if(!old||old.updatedAt<=row.snapshot.updatedAt||old.updatedAt>now+FUTURE_SKEW_MS)state.snapshots[row.key]=row.snapshot;updated[row.key]=row.snapshot;}await this.save(state);return updated;});
  }
  private async consumeLocked(state:State,target:ResetTarget,automatic=false,creditId?:string):Promise<ResetOutcome>{
@@ -187,7 +196,7 @@ export class ResetCreditService {
    state.lastAutomaticCheckAt=now;await this.save(state);
    // Missing/failed reads prevent spending. A scheduled reset that has arrived
    // is confirmed by ordinaryUsageAllowed, never inferred from a clock or %.
-   const details=await mapWithConcurrency(targets,3,async t=>{try{return await this.readDetails(t)}catch{return null}});
+   const details=await mapWithConcurrency(targets,3,async t=>{try{return await this.readDetails(t,true)}catch{return null}});
    const reads=details.map(row=>row?.snapshot??null);
    reads.forEach((s,i)=>{const t=targets[i];if(s&&t)state.snapshots[t.key]=s;});await this.save(state);
    if(reads.some(s=>!s||!isResetSubscription(s)||s.ordinaryUsageAllowed!==false))return null;

@@ -514,6 +514,12 @@ Concurrent redemptions are serialized with a five-minute minimum interval.
 `check resets` and `resets list --refresh` report how many eligible accounts
 could not be read and exit 1 on a partial or complete refresh failure. A
 successful read with an unavailable count remains `unknown`, not zero.
+These display refreshes also list each available credit under its account as
+`credit #N: expires <local date/time> (<title>)`; a credit the backend marks as
+non-expiring shows `no expiry`, and a missing or invalid expiry shows
+`expires unknown`. Only the expiry and title are cached. Explicit redemption
+reads skip the per-credit detail lookup; last-resort rechecks request it so they
+can pick the earliest-expiring credit.
 Duplicate record/workspace identities are marked ambiguous rather than sharing
 a cached count or selecting the first credential; repair duplicate imported
 records before checking or redeeming for them.

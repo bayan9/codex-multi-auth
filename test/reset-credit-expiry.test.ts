@@ -109,7 +109,8 @@ it.each(['consume', 'follow-up read'])('persists the chosen credit with its idem
  const pending = (await f.service.status()).pending;
  expect(pending).toMatchObject({ key: 'a', creditId: 'chosen' });
  expect((await f.service.status()).version).toBe(2); // Old readers must reject, never strip the credit ID.
- expect(JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')).snapshots.a).not.toHaveProperty('credits');
+ // Snapshots keep only the display projection; the credit ID lives solely in pending.
+ expect(JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')).snapshots.a.credits).toEqual([{ expiresAt: expect.any(Number) }]);
  const restarted = new ResetCreditService(join(dir, 'state.json'), f.io);
  expect(await restarted.automatic([target('a')])).toBeNull();
  await restarted.redeem(target('a'));
