@@ -4009,8 +4009,11 @@ async function handleRequestInner(
 					// Read live account state, not only selection skip reasons. The final
 					// refresh attempt can install an auth cooldown after the last selection
 					// pass, so that blocker may never have been written to accountSkipReasons.
+					const backupsReserved = !isPinned && !emergencyBackupsAllowed();
 					for (const account of accountManager.getAccountsSnapshot()) {
 						if (policyDecision?.blockedAccountIndexes.has(account.index)) continue;
+						// Selection never offers a reserved backup, so it is not ready capacity.
+						if (backupsReserved && policyDecision?.emergencyAccountIndexes?.has(account.index)) continue;
 						if (account.enabled === false) continue;
 						if (!accountManager.hasEnabledWorkspaces(account)) continue;
 						if (accountManager.isAccountAuthInvalidated(account)) continue;
