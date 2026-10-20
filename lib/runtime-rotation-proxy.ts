@@ -1097,9 +1097,11 @@ function writePoolExhausted(params: {
 	reason: ExhaustionReason;
 	accountSkipReasons?: Record<string, string>;
 	retryAfterMs?: number;
+	ineligibleAccountIndexes?: ReadonlySet<number>;
 }): void {
 	const { res, accountManager, family, model, reason } = params;
-	const waitMs = params.retryAfterMs ?? accountManager.getMinWaitTimeForFamily(family, model);
+	const waitMs = params.retryAfterMs ??
+		accountManager.getMinWaitTimeForFamily(family, model, params.ineligibleAccountIndexes);
 	const accountCount = accountManager.getAccountCount();
 	const accountSkipReasons = params.accountSkipReasons ?? {};
 	recordRuntimePoolExhaustion({
@@ -4038,6 +4040,10 @@ async function handleRequestInner(
 					return minWaitMs ?? 0;
 				})()
 				: undefined;
+			const ineligibleAccountIndexes = new Set(policyDecision?.blockedAccountIndexes ?? []);
+			if (!isPinned && !emergencyBackupsAllowed()) {
+				for (const index of policyDecision?.emergencyAccountIndexes ?? []) ineligibleAccountIndexes.add(index);
+			}
 			writePoolExhausted({
 				res,
 				accountManager,
@@ -4045,6 +4051,7 @@ async function handleRequestInner(
 				model: context.model,
 				reason: exhaustionReason,
 				retryAfterMs: transcriptionRetryAfterMs,
+				ineligibleAccountIndexes,
 				accountSkipReasons: Object.fromEntries(
 					[...accountSkipReasons.entries()].map(([index, reason]) => [
 						String(index),

@@ -6403,6 +6403,17 @@ describe("request-level capability rejections",()=>{
 });
 
 describe('earned reset last-resort integration',()=>{
+ it('does not report a reserved emergency account as ready capacity in the exhaustion retry hint',async()=>{
+  vi.spyOn(runtimePolicy,'evaluateRuntimePolicy').mockResolvedValue({allowed:true,statusCode:200,errorCode:null,reasons:[],projectKey:null,blockedAccountIndexes:new Set(),emergencyAccountIndexes:new Set([1]),scoreBoostByAccount:{},budgetEvaluations:[]});
+  const manager=new AccountManager(undefined,createStorage(Date.now(),2));
+  const {calls,fetchImpl}=createRecordingFetch(()=>new Response(JSON.stringify({error:{code:'rate_limit_exceeded',message:'Rate limit reached'}}),{status:HTTP_STATUS.TOO_MANY_REQUESTS,headers:{'content-type':'application/json','retry-after':'60'}}));
+  const proxy=await startProxy({accountManager:manager,fetchImpl});
+  const response=await postResponses(proxy,{model:'gpt-5-codex'});
+  const payload=(await response.json()) as {error:{code:string;retry_after_ms:number}};
+  expect(payload.error.code).toBe('codex_runtime_rotation_pool_exhausted');
+  expect(calls.filter(call=>call.url.endsWith('/responses')).map(call=>call.headers.get('chatgpt-account-id'))).toEqual(['acc_1']);
+  expect(payload.error.retry_after_ms).toBeGreaterThan(0);
+ });
  it.each(['invalidated-before-request','invalidated-during-catalog','usable'] as const)('counts only authenticated primary capacity before emergency routing (%s)',async mode=>{
   vi.spyOn(runtimePolicy,'evaluateRuntimePolicy').mockResolvedValue({allowed:true,statusCode:200,errorCode:null,reasons:[],projectKey:null,blockedAccountIndexes:new Set(),emergencyAccountIndexes:new Set([0]),scoreBoostByAccount:{},priorityByAccount:{0:1,1:2,2:3},budgetEvaluations:[]});
   const {createResetCreditService}=await import('../lib/runtime/account-reset-credits.js');
