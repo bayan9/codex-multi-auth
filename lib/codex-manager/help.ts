@@ -23,7 +23,7 @@ export function printUsage(): void {
 			"  codex-multi-auth workspace <account> [workspace]   (list or select; add enable/disable to change availability)",
 			"  codex-multi-auth best [--live] [--json] [--model <model>]   (clears any manual pin set by switch)",
 			"  codex-multi-auth forecast [--live] [--json] [--explain] [--model <model>] [--no-runtime-overlay]",
-			"  codex-multi-auth account tag|untag|weight|priority|auto-prime|pause|unpause|drain|undrain|note|policy list ...",
+			"  codex-multi-auth account tag|untag|weight|priority|auto-prime|emergency-only|pause|unpause|drain|undrain|note|policy list ...",
 			"",
 			"Repair:",
 			"  codex-multi-auth uninstall [--dry-run] [--json] [--clear-accounts]",

@@ -401,9 +401,11 @@ eligible automatic resets are used first. Unknown, stale, pending, failed, or
 unsupported reset state keeps backups reserved. An empty regular pool does not
 open backups. A newer observation of recovered regular capacity closes them again.
 
-Reset spending still requires `resets policy last-resort` and all existing
+Reset spending still requires `resets auto last-resort` and all existing
 redemption safeguards. With automatic resets disabled, remaining credits keep
 backups reserved until an explicit reset is performed or the policy is changed.
+The runtime also skips the fresh native reset reads that confirm exhaustion, so
+backups normally stay reserved under `manual` even when no credits remain.
 Explicit account pins retain their existing behavior; pause/drain and model,
 workspace, privacy, authentication, and budget restrictions still apply.
 Automatic backup admission is unavailable for non-native requests and the
