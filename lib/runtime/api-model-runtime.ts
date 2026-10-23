@@ -37,6 +37,7 @@ export function apiPickerModel(id: string): RouteModel {
 		description:
 			"API model; optional capabilities are not advertised by model discovery.",
 		supported_reasoning_levels: [],
+		reasoning_levels_known: false,
 		default_reasoning_level: null,
 		shell_type: "shell_command",
 		visibility: "list",
@@ -59,14 +60,41 @@ export function apiPickerModel(id: string): RouteModel {
 	};
 }
 /** Apply current credential policy, never metadata inherited from another credential or old config. */
-function withAccessPrograms(model: RouteModel, route: ApiRouteCredential): RouteModel {
- const result = {...model};
- delete result.available_access_programs;
- const override = route.modelAccessPrograms && Object.hasOwn(route.modelAccessPrograms, model.slug)
-  ? route.modelAccessPrograms[model.slug] : undefined;
- const programs = override ?? route.accessPrograms;
- if (programs) result.available_access_programs = structuredClone(programs);
- return result;
+function withRouteMetadata(model: RouteModel, route: ApiRouteCredential): RouteModel {
+	const result = { ...model };
+	delete result.available_access_programs;
+	const override =
+		route.modelAccessPrograms &&
+		Object.hasOwn(route.modelAccessPrograms, model.slug)
+			? route.modelAccessPrograms[model.slug]
+			: undefined;
+	const programs = override ?? route.accessPrograms;
+	if (programs) result.available_access_programs = structuredClone(programs);
+	const declared = route.modelReasoningLevels?.[model.slug];
+	if (declared) {
+		const levels = [...new Set(declared)];
+		const multiAgent =
+			(["max", "xhigh", "high"] as const).find((level) =>
+				levels.includes(level),
+			) ?? null;
+		result.reasoning_levels_known = true;
+		result.capability_metadata_source = "operator";
+		result.multi_agent_reasoning_effort = multiAgent;
+		result.supported_reasoning_levels = [
+			...levels,
+			...(multiAgent ? ["ultra"] : []),
+		].map((effort) => ({
+			effort,
+			description:
+				effort === "ultra"
+					? "Operator-declared multi-agent mode using a supported API reasoning effort"
+					: `Operator-declared ${effort} reasoning effort`,
+		}));
+		result.default_reasoning_level = levels.includes("medium")
+			? "medium"
+			: (levels[0] ?? null);
+	}
+	return result;
 }
 export async function boundedJson(
 	response: Response,
@@ -228,7 +256,7 @@ export class ApiModelRuntime {
 						kind: route.kind,
 						enabled: route.enabled,
 						priority: route.priority,
-						models: (entry?.models ?? []).map(model => withAccessPrograms(model, route)),
+						models: (entry?.models ?? []).map(model => withRouteMetadata(model, route)),
 						visibleModels: route.visibleModels,
 					};
 					this.snapshots.set(key, snapshot);
@@ -240,7 +268,10 @@ export class ApiModelRuntime {
 							forceProbes,
 						).then((enriched) => {
 							const byId = new Map(enriched.map((m) => [m.slug, m]));
-							snapshot.models = entry.models.map((m) => withAccessPrograms(byId.get(m.slug) ?? m, route));
+							const discoveredModels = entry.models.map((m) => byId.get(m.slug) ?? m);
+							snapshot.models = discoveredModels.map((m) =>
+								withRouteMetadata(m, route),
+							);
 							// The caller receives its own completed result; only the newest refresh may replace the shared cache.
 							if (
 								this.cache.get(key) !== entry ||
@@ -248,7 +279,7 @@ export class ApiModelRuntime {
 								!this.activeKeys.has(key)
 							)
 								return;
-							entry.models = snapshot.models;
+							entry.models = discoveredModels;
 							this.onCatalogUpdated?.();
 						});
 						if (waitForCapabilities) await pending;
@@ -278,7 +309,7 @@ export class ApiModelRuntime {
 							m.slug,
 						),
 					)
-					.map(model => modelEntitlements(withAccessPrograms(model, r))),
+					.map(model => modelEntitlements(withRouteMetadata(model, r))),
 				visibleModels: (
 					this.visibility.get(this.key(r)) ?? r.visibleModels
 				).filter((id) => c?.models.some((m) => m.slug === id)),
@@ -327,6 +358,7 @@ export class ApiModelRuntime {
 		delete payload.client_metadata;
 		let lastStatus = 503;
 		let lastRejection: Response | undefined;
+		let selectedRegion: "global" | "us" | undefined;
 		for (const candidate of route.candidates) {
 			const credential = routes.find((r) => r.id === candidate.id);
 			if (!credential) continue;
@@ -343,6 +375,10 @@ export class ApiModelRuntime {
 				)
 			)
 				continue;
+			const candidateRegion = credential.region ?? "global";
+			if (selectedRegion !== undefined && selectedRegion !== candidateRegion)
+				continue;
+			selectedRegion ??= candidateRegion;
 			if (signal?.aborted) throw new ClientCancellationError();
 			const controller = new AbortController();
 			const abort = () => controller.abort();

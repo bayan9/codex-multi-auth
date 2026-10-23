@@ -72,10 +72,11 @@ export function supportsModelSettings(
 ): boolean {
 	return (
 		(!reasoningEffort ||
-			Array.isArray(model.supported_reasoning_levels) &&
-			model.supported_reasoning_levels.some(
-				(l) => isRecord(l) && l.effort === reasoningEffort,
-			)) &&
+			model.reasoning_levels_known === false ||
+			(Array.isArray(model.supported_reasoning_levels) &&
+				model.supported_reasoning_levels.some(
+					(l) => isRecord(l) && l.effort === reasoningEffort,
+				))) &&
 		(!serviceTier ||
 			serviceTier === "default" ||
 			serviceTier === "auto" ||

@@ -137,7 +137,7 @@ async function storedGeneration(route: ApiRouteCredential, model: string): Promi
 		value.id === route.id && value.kind === route.kind && value.apiKey === route.apiKey && apiBaseUrl(value) === apiBaseUrl(route) &&
 		value.enabled && value.probeCapabilities && value.visibleModels?.includes(model),
 	);
-	if (!current || JSON.stringify(current.accessPrograms) !== JSON.stringify(route.accessPrograms) || JSON.stringify(current.modelAccessPrograms) !== JSON.stringify(route.modelAccessPrograms)) return undefined;
+	if (!current || JSON.stringify(current.accessPrograms) !== JSON.stringify(route.accessPrograms) || JSON.stringify(current.modelAccessPrograms) !== JSON.stringify(route.modelAccessPrograms) || JSON.stringify(current.modelReasoningLevels) !== JSON.stringify(route.modelReasoningLevels)) return undefined;
 	if (route.capabilityEpoch && route.capabilityEpoch !== current.capabilityEpoch) return undefined;
 	if (current.capabilityEpoch) return current.capabilityEpoch;
 	const after = await fs.stat(path).catch(() => undefined);

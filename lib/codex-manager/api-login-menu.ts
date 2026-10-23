@@ -129,6 +129,74 @@ async function chooseModels(
 		}
 	}
 }
+const reasoningLevels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+async function configureModelMetadata(
+	route: ApiRouteCredential,
+	d: MenuDeps,
+): Promise<ApiRouteCredential | null> {
+	const modelChoice = await d.select(
+		route.visibleModels.map((model) => ({ label: model, value: `model:${model}` })),
+		"Choose a model for operator-declared metadata",
+	);
+	if (!modelChoice?.startsWith("model:")) return null;
+	const model = modelChoice.slice(6);
+	const selected = new Set(route.modelReasoningLevels?.[model] ?? []);
+	const inherited = route.modelAccessPrograms?.[model] ?? route.accessPrograms ?? {};
+	let daybreakRed = inherited.cyber?.includes("daybreak_red") ?? false;
+	for (;;) {
+		const choice = await d.select(
+			[
+				{ label: `Save metadata for ${model}`, value: "save" },
+				...reasoningLevels.map((level) => ({
+					label: `${selected.has(level) ? "[x]" : "[ ]"} Reasoning: ${level}`,
+					value: `toggle:${level}`,
+				})),
+				{ label: `${daybreakRed ? "[x]" : "[ ]"} Daybreak Red access`, value: "daybreak_red" },
+				{ label: "Clear operator-declared metadata", value: "clear" },
+				{ label: "Cancel without saving", value: "cancel" },
+			],
+			`Configure ${model} (operator-declared, separate from API verification)`,
+		);
+		if (!choice || choice === "cancel") return null;
+		const modelReasoningLevels = { ...(route.modelReasoningLevels ?? {}) };
+		const modelAccessPrograms = structuredClone(route.modelAccessPrograms ?? {});
+		if (choice === "clear") {
+			delete modelReasoningLevels[model];
+			delete modelAccessPrograms[model];
+			return {
+				...route,
+				modelReasoningLevels: Object.keys(modelReasoningLevels).length ? modelReasoningLevels : undefined,
+				modelAccessPrograms: Object.keys(modelAccessPrograms).length ? modelAccessPrograms : undefined,
+			};
+		}
+		if (choice === "daybreak_red") {
+			daybreakRed = !daybreakRed;
+			continue;
+		}
+		if (choice.startsWith("toggle:")) {
+			const level = choice.slice(7) as typeof reasoningLevels[number];
+			if (!reasoningLevels.includes(level)) continue;
+			if (selected.has(level)) selected.delete(level);
+			else selected.add(level);
+			continue;
+		}
+		const ordered = reasoningLevels.filter((level) => selected.has(level));
+		if (ordered.length) modelReasoningLevels[model] = ordered;
+		else delete modelReasoningLevels[model];
+		const programs = structuredClone(modelAccessPrograms[model] ?? inherited);
+		const cyber = new Set(programs.cyber ?? []);
+		if (daybreakRed) cyber.add("daybreak_red");
+		else cyber.delete("daybreak_red");
+		if (cyber.size) programs.cyber = [...cyber];
+		else delete programs.cyber;
+		modelAccessPrograms[model] = programs;
+		return {
+			...route,
+			modelReasoningLevels: Object.keys(modelReasoningLevels).length ? modelReasoningLevels : undefined,
+			modelAccessPrograms,
+		};
+	}
+}
 export async function runApiLoginMenu(
 	overrides: Partial<MenuDeps> = {},
 ): Promise<number> {
@@ -205,6 +273,7 @@ export async function runApiLoginMenu(
 				const action = await d.select(
 					[
 						{ label: "Choose visible models", value: "models" },
+						{ label: "Configure operator-declared model metadata", value: "metadata" },
 						{ label: "Change priority", value: "priority" },
  { label: "Change API region", value: "region" },
 						{
@@ -219,6 +288,11 @@ export async function runApiLoginMenu(
 					route.label,
 				);
 				if (!action || action === "back") continue;
+				if (action === "metadata") {
+ const configured = await configureModelMetadata(route, d);
+ if (configured === null) continue;
+ route = configured;
+ }
 				if (action === "probes")
 					route = { ...route, probeCapabilities: !route.probeCapabilities };
 				if (action === "toggle") route = { ...route, enabled: !route.enabled };

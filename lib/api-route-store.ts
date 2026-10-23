@@ -16,6 +16,7 @@ const modelId = z
 const programId = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 const accessPrograms = z.record(programId, z.array(programId).max(32))
 	.refine(value => Object.keys(value).length <= 16);
+const reasoningLevel = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const routeSchema = z.object({
 	/** Internal lifetime token. Store-owned; never trust an incoming token. */
 	capabilityEpoch: z.string().uuid().optional(),
@@ -42,10 +43,17 @@ const routeSchema = z.object({
 	accessPrograms: accessPrograms.optional(),
 	modelAccessPrograms: z.record(modelId, accessPrograms)
 		.refine(value => Object.keys(value).length <= 1000).optional(),
+	/** Operator-declared model capability metadata when API discovery omits it. */
+	modelReasoningLevels: z.record(modelId, z.array(reasoningLevel).max(7))
+		.refine(value => Object.keys(value).length <= 1000).optional(),
 });
 export const MAX_API_ROUTES = 100;
+function storeVersion(routes: ApiRouteCredential[]): 1 | 2 | 3 {
+	if (routes.some((route) => route.modelReasoningLevels)) return 3;
+	return routes.some((route) => route.region === "us") ? 2 : 1;
+}
 const schema = z.object({
-	version: z.union([z.literal(1), z.literal(2)]),
+	version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
 	routes: z.array(routeSchema).max(MAX_API_ROUTES),
 });
 export type ApiRouteCredential = z.infer<typeof routeSchema>;
@@ -121,7 +129,7 @@ async function saveApiRoutesLocked(
 	onSaved?: (routes: ApiRouteCredential[]) => void,
 ): Promise<void> {
 	const validated = validate({ version: 1, routes });
-	let serialized = JSON.stringify({ version: validated.some(r => r.region === "us") ? 2 : 1, routes: validated }) + "\n";
+	let serialized = JSON.stringify({ version: storeVersion(validated), routes: validated }) + "\n";
 	if (Buffer.byteLength(serialized) > 1024 * 1024)
 		throw new Error("API route configuration is too large");
 
@@ -151,7 +159,7 @@ async function saveApiRoutesLocked(
 			const old = current.find(value => value.id === route.id);
 			const policy = (value: ApiRouteCredential) => JSON.stringify([
 				value.kind, value.apiKey, apiBaseUrl(value), value.enabled, value.probeCapabilities,
-				value.accessPrograms, value.modelAccessPrograms,
+				value.accessPrograms, value.modelAccessPrograms, value.modelReasoningLevels,
 				// Visibility is a selection set; menu ordering is not a policy edit.
 				...(discoveryExpansion ? [] : [[...new Set(value.visibleModels)].sort()]),
 			]);
@@ -161,7 +169,7 @@ async function saveApiRoutesLocked(
 			return { ...withoutLegacy, capabilityEpoch: sameLifetime ? old.capabilityEpoch ?? randomUUID() : randomUUID(),
 				...(sameLifetime && (!old.capabilityEpoch || old.legacyCapabilityCache === true) ? { legacyCapabilityCache: true } : {}) };
 		});
-		serialized = JSON.stringify({ version: owned.some(r => r.region === "us") ? 2 : 1, routes: owned }) + "\n";
+		serialized = JSON.stringify({ version: storeVersion(owned), routes: owned }) + "\n";
 		if (Buffer.byteLength(serialized) > 1024 * 1024) throw Error("API route configuration is too large");
 		await fs.writeFile(temp, serialized, { mode: 0o600, flag: "wx" });
 		signal?.throwIfAborted();

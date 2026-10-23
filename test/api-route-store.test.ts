@@ -297,6 +297,14 @@ it("persists US region using a store version that old readers reject",async()=>{
  expect(JSON.parse(await readFile(file,"utf8")).version).toBe(2);
 });
 
+it("persists operator metadata using a store version that old readers reject",async()=>{
+ const file=join(await tempDir(),"routes.json");
+ const route={id:"declared",label:"Declared",kind:"api" as const,apiKey:"fixture",enabled:true,priority:9,visibleModels:["astra"],modelReasoningLevels:{astra:["medium" as const]},modelAccessPrograms:{astra:{cyber:["daybreak_red"]}}};
+ await saveApiRoutes([route],file);
+ expect(JSON.parse(await readFile(file,"utf8")).version).toBe(3);
+ expect((await loadApiRoutes(file))[0]).toMatchObject({modelReasoningLevels:{astra:["medium"]},modelAccessPrograms:{astra:{cyber:["daybreak_red"]}}});
+});
+
 it("invalidates regional capability ownership and rejects stale discovery",async()=>{
  const {updateApiModelDiscovery}=await import("../lib/api-route-store.js");
  const file=join(await tempDir(),"routes.json");

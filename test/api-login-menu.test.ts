@@ -228,3 +228,11 @@ it("changes a saved credential's region only after selecting models from the new
  expect(save.mock.calls[0]?.[0]?.[0]).toMatchObject({region:"us",visibleModels:["new"],knownModels:["new"]});
  expect(route.visibleModels).toEqual(["old"]);
 });
+
+it("lets operators declare reasoning and Daybreak Red metadata", async () => {
+ const route:ApiRouteCredential={id:"fixture",label:"Fixture",kind:"api",apiKey:"fixture",priority:9,enabled:true,visibleModels:["astra-cyber-preview"]};
+ const choices=["fixture","metadata","model:astra-cyber-preview","toggle:low","toggle:medium","toggle:high","toggle:xhigh","toggle:max","daybreak_red","save","back"];
+ const save=vi.fn(async(routes:ApiRouteCredential[])=>routes);
+ await runApiLoginMenu({load:async()=>[route],save,log:vi.fn(),select:async(items)=>offered(items,choices.shift())});
+ expect(save.mock.calls[0]?.[0]?.[0]).toMatchObject({modelReasoningLevels:{"astra-cyber-preview":["low","medium","high","xhigh","max"]},modelAccessPrograms:{"astra-cyber-preview":{cyber:["daybreak_red"]}}});
+});
