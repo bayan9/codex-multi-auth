@@ -513,9 +513,10 @@ export class ApiModelCapabilities {
 		return mapWithConcurrency(models, 3, async (model) => {
 						const documented = await this.documentation(model.slug, refresh);
 						let levels = documented.levels;
+						let probed: ProbeResult | undefined;
 						let extra: Record<string, unknown> = {};
 						if (route?.enabled && route.probeCapabilities) {
-							let probed = cached ? this.freshProbe(route, model.slug, cached.get(probeKey(route, model.slug))) : await this.probe(
+							probed = cached ? this.freshProbe(route, model.slug, cached.get(probeKey(route, model.slug))) : await this.probe(
 								route,
 								model.slug,
 								levels,
@@ -556,9 +557,17 @@ export class ApiModelCapabilities {
 						const nativeLevels = multiAgentEffort
 							? [...levels, "ultra"]
 							: levels;
+						const probeEstablishedReasoning = Object.entries(probed?.status ?? {}).some(
+							([name, status]) =>
+								name.startsWith("effort:") &&
+								["verified", "unsupported", "downgraded"].includes(status),
+						);
 						return {
 							...model,
 							...extra,
+							...((documented.reasoningAvailable === true || probeEstablishedReasoning)
+								? { reasoning_levels_known: true }
+								: {}),
 							...(documented.inputModalities ? { input_modalities: documented.inputModalities } : {}),
 							multi_agent_reasoning_effort: multiAgentEffort,
 							supported_reasoning_levels: nativeLevels.map((effort) => ({

@@ -229,7 +229,13 @@ it("discovers newly entitled effort levels absent from documentation and exclude
 			);
 		}) as typeof fetch,
 	);
-	const [model] = await reader.enrich([{ slug: "fixture" }], true, route, true);
+	const [model] = await reader.enrich(
+		[{ slug: "fixture", reasoning_levels_known: false, supported_reasoning_levels: [] }],
+		true,
+		route,
+		true,
+	);
+	expect(model).toMatchObject({ reasoning_levels_known: true });
 	expect(model?.supported_reasoning_levels).toEqual(
 		["low", "medium", "high", "xhigh", "ultra"].map((effort) => ({
 			effort,
