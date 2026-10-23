@@ -441,9 +441,13 @@ it("preserves established efforts across a documentation outage",async()=>{
  let now=1000;
  const fetcher=vi.fn(async()=>new Response("Model ID: `fixture`\nReasoning.effort supports: low, medium, high."));
  const reader=new ApiModelCapabilities(fetcher as typeof fetch,()=>now);
- expect(await reader.reasoning("fixture")).toContain("medium");
+ const [before] = await reader.enrich([{slug:"fixture"}], false, {...route, probeCapabilities:false});
+ expect(before).toMatchObject({reasoning_levels_known:true});
+ expect(before?.supported_reasoning_levels).not.toContainEqual(expect.objectContaining({effort:"max"}));
  now+=61000;fetcher.mockResolvedValue(new Response("unavailable",{status:503}));
- expect(await reader.reasoning("fixture")).toContain("medium");
+ const [after] = await reader.enrich([{slug:"fixture"}], true, {...route, probeCapabilities:false});
+ expect(after).toMatchObject({reasoning_levels_known:true});
+ expect(after?.supported_reasoning_levels).toEqual(before?.supported_reasoning_levels);
 });
 it("probes the exact priority tier exposed by the native picker",async()=>{
  const tiers:string[]=[];

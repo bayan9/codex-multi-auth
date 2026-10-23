@@ -71,7 +71,7 @@ function programsFresh(result: ProbeResult, programs: string[], now: number): bo
   result.programCheckedAt <= now && result.programCheckedAt + 86400_000 > now &&
   programs.every(program => ["verified", "unsupported"].includes(result.status[`program:cyber:${program}`] ?? ""));
 }
-type DocumentedCapabilities = { levels: string[]; reasoningAvailable?: boolean; inputModalities?: string[] };
+type DocumentedCapabilities = { levels: string[]; reasoningAvailable?: boolean; inputModalities?: string[]; stale?: boolean };
 function probeKey(route: ApiRouteCredential, id: string): string {
 	return createHash("sha256").update(route.id).update("\0").update(route.apiKey + (route.region === "us" ? "\0" + apiBaseUrl(route) : "")).update("\0").update(id).digest("hex");
 }
@@ -193,8 +193,16 @@ export class ApiModelCapabilities {
 				inputModalities: parseInputModalities(id, text),
 			};
 		} catch {
-			// An outage is not a capability revocation. Keep last successful evidence.
-			metadata = { ...(cached ?? metadata), reasoningAvailable: false };
+			// An outage is not a capability revocation. Keep the entire last
+			// successful declaration, including that its levels were authoritative.
+			if (cached) {
+				metadata = {
+					levels: [...cached.levels],
+					reasoningAvailable: cached.reasoningAvailable,
+					inputModalities: cached.inputModalities,
+					stale: true,
+				};
+			}
 		}
 		if (this.cache.size >= 1000)
 			this.cache.delete(this.cache.keys().next().value ?? "");
@@ -549,9 +557,9 @@ export class ApiModelCapabilities {
 								model.slug,
 								levels,
 								forceProbes,
-								documented.reasoningAvailable === true,
+								documented.reasoningAvailable === true && documented.stale !== true,
 							);
-							if (probed && cached) probed = this.reconcileReasoning(probed, levels, documented.reasoningAvailable === true);
+							if (probed && cached) probed = this.reconcileReasoning(probed, levels, documented.reasoningAvailable === true && documented.stale !== true);
 							if (probed) levels = probed.levels;
 							extra = probed ? {
 								service_tiers: probed.tiers.map((id) => ({
