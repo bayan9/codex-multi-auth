@@ -484,3 +484,13 @@ it("preserves the final sanitized setting rejection after trying every ZDR crede
  expect(await response.json()).toEqual({error:{code:"invalid_value",param:"reasoning.effort",message:"Upstream rejected the API request."}});
  expect(fetcher.mock.calls.filter(call=>call[1]?.method==="POST")).toHaveLength(2);
 });
+
+it("uses the selected US endpoint for discovery and inference, with separate regional caches", async () => {
+ const urls:string[]=[];
+ const runtime=new ApiModelRuntime(async(url,init)=>{urls.push(String(url));return init?.method==="POST"?new Response("ok"):Response.json({data:[{id:"exclusive"}]});});
+ const global=credential("same");
+ await runtime.catalogs([global]);
+ const us={...global,region:"us" as const};
+ expect((await runtime.request("zdr/exclusive",{},[us])).status).toBe(200);
+ expect(urls).toEqual(["https://api.openai.com/v1/models","https://us.api.openai.com/v1/models","https://us.api.openai.com/v1/responses"]);
+});

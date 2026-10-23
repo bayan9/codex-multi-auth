@@ -1,3 +1,4 @@
+import { apiBaseUrl } from "../api-region.js";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
@@ -8,6 +9,8 @@ import {
 } from "../api-route-store.js";
 import { ApiModelRuntime } from "../runtime/api-model-runtime.js";
 import { select, type MenuItem } from "../ui/select.js";
+
+class ApiSetupDiscoveryError extends Error {}
 
 interface MenuDeps {
 	load: () => Promise<ApiRouteCredential[]>;
@@ -59,14 +62,27 @@ const defaults: MenuDeps = {
 	discover: async (route) => {
 		const runtime = new ApiModelRuntime();
 		const catalogs = await runtime.catalogs([route], true);
-		if (runtime.statuses([route])[0]?.error)
-			throw Error(
-				"Model discovery failed. Check the credential and its API permissions.",
-			);
+		const status = runtime.statuses([route])[0];
+        if (status?.error) {
+            const failure = status.failure;
+            const reason = failure?.kind === "http"
+                ? "Model discovery returned HTTP " + failure.status + "." + (failure.status === 401 ? " Check the API key and selected API region." : failure.status === 403 ? " Check the key's model-list permissions." : failure.status === 429 ? " The API rate limit was reached; retry later." : " Retry when the API is available.")
+                : failure?.kind === "timeout" ? `Model discovery timed out after 15 seconds. Check network access to ${apiBaseUrl(route)} and retry.`
+                : failure?.kind === "network" ? `Model discovery failed before receiving a response. Check network access, DNS, and TLS for ${apiBaseUrl(route)}.`
+                : "The API returned an invalid model catalog.";
+            throw new ApiSetupDiscoveryError(reason);
+        }
 		return catalogs[0]?.models.map((m) => m.slug) ?? [];
 	},
 	log: console.log,
 };
+async function chooseRegion(d: MenuDeps): Promise<"global" | "us" | null> {
+ const region = await d.select([
+  {label: "Global (api.openai.com)", value: "global"},
+  {label: "US (us.api.openai.com)", value: "us"},
+ ], "Choose the API region required by this project");
+ return region === "global" || region === "us" ? region : null;
+}
 async function chooseModels(
 	route: ApiRouteCredential,
 	d: MenuDeps,
@@ -137,7 +153,7 @@ export async function runApiLoginMenu(
 			[
 				{ label: "Add API credential", value: "add" },
 				...routes.map((r) => ({
-					label: `${r.label} · ${r.kind.toUpperCase()} · priority ${r.priority} · ${r.visibleModels.length} models${r.enabled ? "" : " · disabled"}`,
+					label: `${r.label} · ${r.kind.toUpperCase()}${r.region === "us" ? " · US" : ""} · priority ${r.priority} · ${r.visibleModels.length} models${r.enabled ? "" : " · disabled"}`,
 					value: r.id,
 				})),
 				{ label: "Back", value: "back" },
@@ -163,7 +179,9 @@ export async function runApiLoginMenu(
 					"Choose the routing pool (ZDR is operator-declared)",
 				);
 				if (kind !== "api" && kind !== "zdr") continue;
-				const apiKey = await d.secret();
+				const region = await chooseRegion(d);
+ if (!region) continue;
+ const apiKey = await d.secret();
 				if (!apiKey) continue;
 				const priority = await d.select(
 					Array.from({ length: 9 }, (_, offset) => {
@@ -178,6 +196,7 @@ export async function runApiLoginMenu(
 					label,
 					kind,
 					apiKey,
+ region,
 					priority: Number(priority),
 					enabled: true,
 					visibleModels: [],
@@ -187,6 +206,7 @@ export async function runApiLoginMenu(
 					[
 						{ label: "Choose visible models", value: "models" },
 						{ label: "Change priority", value: "priority" },
+ { label: "Change API region", value: "region" },
 						{
 							label: route.probeCapabilities
 								? "Disable billable capability probes"
@@ -213,7 +233,12 @@ export async function runApiLoginMenu(
 					if (value === null) continue;
 					route = { ...route, priority: Number(value) };
 				}
-				if (action !== "models") {
+				if (action === "region") {
+ const region = await chooseRegion(d);
+ if (!region) continue;
+ route = {...route, region, visibleModels: [], knownModels: []};
+ }
+ if (action !== "models" && action !== "region") {
 					const next = routes.map((r) => (r.id === route?.id ? route : r));
 					routes = await d.save(next, routes);
 					continue;
@@ -234,7 +259,7 @@ export async function runApiLoginMenu(
             const changed = error instanceof Error && error.message.startsWith("API route configuration changed");
             let reloaded = false;
             try {routes = await d.load();reloaded = true;} catch { /* Keep the last readable configuration. */ }
-			d.log(changed ? (reloaded
+			d.log(error instanceof ApiSetupDiscoveryError ? error.message + " No credential was saved." : changed ? (reloaded
                 ? "API routes changed in another process; the latest configuration was reloaded. Repeat the edit."
                 : "API routes changed in another process and could not be reloaded. Reopen the menu before editing.") :
 				"API setup did not complete. No partial credential was saved; check the key, permissions, and configuration.",

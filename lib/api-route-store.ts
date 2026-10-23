@@ -1,3 +1,4 @@
+import { apiBaseUrl } from "./api-region.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
@@ -30,6 +31,7 @@ const routeSchema = z.object({
 		.max(80)
 		.regex(/^[^\x00-\x1f\x7f]+$/),
 	kind: z.enum(["api", "zdr"]),
+ region: z.enum(["global", "us"]).optional(),
 	apiKey: z.string().min(1).max(1024).regex(/^\S+$/),
 	enabled: z.boolean(),
 	priority: z.number().int().min(0).max(9),
@@ -43,7 +45,7 @@ const routeSchema = z.object({
 });
 export const MAX_API_ROUTES = 100;
 const schema = z.object({
-	version: z.literal(1),
+	version: z.union([z.literal(1), z.literal(2)]),
 	routes: z.array(routeSchema).max(MAX_API_ROUTES),
 });
 export type ApiRouteCredential = z.infer<typeof routeSchema>;
@@ -119,7 +121,7 @@ async function saveApiRoutesLocked(
 	onSaved?: (routes: ApiRouteCredential[]) => void,
 ): Promise<void> {
 	const validated = validate({ version: 1, routes });
-	let serialized = JSON.stringify({ version: 1, routes: validated }) + "\n";
+	let serialized = JSON.stringify({ version: validated.some(r => r.region === "us") ? 2 : 1, routes: validated }) + "\n";
 	if (Buffer.byteLength(serialized) > 1024 * 1024)
 		throw new Error("API route configuration is too large");
 
@@ -148,7 +150,7 @@ async function saveApiRoutesLocked(
 		const owned = validated.map(route => {
 			const old = current.find(value => value.id === route.id);
 			const policy = (value: ApiRouteCredential) => JSON.stringify([
-				value.kind, value.apiKey, value.enabled, value.probeCapabilities,
+				value.kind, value.apiKey, apiBaseUrl(value), value.enabled, value.probeCapabilities,
 				value.accessPrograms, value.modelAccessPrograms,
 				// Visibility is a selection set; menu ordering is not a policy edit.
 				...(discoveryExpansion ? [] : [[...new Set(value.visibleModels)].sort()]),
@@ -159,7 +161,7 @@ async function saveApiRoutesLocked(
 			return { ...withoutLegacy, capabilityEpoch: sameLifetime ? old.capabilityEpoch ?? randomUUID() : randomUUID(),
 				...(sameLifetime && (!old.capabilityEpoch || old.legacyCapabilityCache === true) ? { legacyCapabilityCache: true } : {}) };
 		});
-		serialized = JSON.stringify({ version: 1, routes: owned }) + "\n";
+		serialized = JSON.stringify({ version: owned.some(r => r.region === "us") ? 2 : 1, routes: owned }) + "\n";
 		if (Buffer.byteLength(serialized) > 1024 * 1024) throw Error("API route configuration is too large");
 		await fs.writeFile(temp, serialized, { mode: 0o600, flag: "wx" });
 		signal?.throwIfAborted();
@@ -203,7 +205,7 @@ async function updateApiModelDiscoverySerial(
 	const routes = await loadApiRoutes(path);
 	const current = routes.find(
 		(r) =>
-			r.id === route.id && r.apiKey === route.apiKey && r.kind === route.kind &&
+			r.id === route.id && r.apiKey === route.apiKey && r.kind === route.kind && apiBaseUrl(r) === apiBaseUrl(route) &&
 			(!route.capabilityEpoch || route.capabilityEpoch === r.capabilityEpoch),
 	);
 	if (!current) return { ...route, enabled: false, visibleModels: [] };
@@ -237,7 +239,7 @@ export async function ensureApiRouteCapabilityEpoch(route: ApiRouteCredential, s
 	return withStorageLock(() => withFileTransactionLock(getApiRoutesPath(), async () => {
 		signal?.throwIfAborted();
 		const current = await loadApiRoutes();
-		const match = current.find(value => value.id === route.id && value.kind === route.kind && value.apiKey === route.apiKey);
+		const match = current.find(value => value.id === route.id && value.kind === route.kind && value.apiKey === route.apiKey && apiBaseUrl(value) === apiBaseUrl(route));
 		if (!match || (route.capabilityEpoch && route.capabilityEpoch !== match.capabilityEpoch)) return undefined;
 		if (match.capabilityEpoch) return match;
 		let migrated: ApiRouteCredential | undefined;

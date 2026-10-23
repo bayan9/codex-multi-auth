@@ -1,3 +1,4 @@
+import { apiBaseUrl } from "../api-region.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import { classifyCapabilityFailure } from "./runtime-capability-failures.js";
 import { createHash } from "node:crypto";
@@ -72,7 +73,7 @@ function programsFresh(result: ProbeResult, programs: string[], now: number): bo
 }
 type DocumentedCapabilities = { levels: string[]; reasoningAvailable?: boolean; inputModalities?: string[] };
 function probeKey(route: ApiRouteCredential, id: string): string {
-	return createHash("sha256").update(route.id).update("\0").update(route.apiKey).update("\0").update(id).digest("hex");
+	return createHash("sha256").update(route.id).update("\0").update(route.apiKey + (route.region === "us" ? "\0" + apiBaseUrl(route) : "")).update("\0").update(id).digest("hex");
 }
 
 /** Only the exact model's input declaration can enable native image attachments. */
@@ -290,7 +291,7 @@ export class ApiModelCapabilities {
 				if (credentialUnavailable || modelDenied) return "unverified";
 				try {
 					const response = await this.fetchImpl(
-						"https://api.openai.com/v1/responses",
+						`${apiBaseUrl(route)}/responses`,
 						{
 							method: "POST",
 							headers: {

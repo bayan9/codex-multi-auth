@@ -1,3 +1,4 @@
+import { apiBaseUrl } from "../api-region.js";
 import { ClientCancellationError } from "../request/client-cancellation.js";
 import { mapWithConcurrency } from "../concurrency.js";
 import {
@@ -88,6 +89,10 @@ export async function boundedJson(
 	}
 	return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
+export interface ApiCatalogFailure {
+ kind: "http" | "timeout" | "network" | "invalid_catalog";
+ status?: number;
+}
 export interface ApiCatalogStatus {
 	id: string;
 	kind: "api" | "zdr";
@@ -95,6 +100,7 @@ export interface ApiCatalogStatus {
 	priority: number;
 	checkedAt: number;
 	error: boolean;
+ failure?: ApiCatalogFailure;
 	availableModels: string[];
 	visibleModels: string[];
 	entitlements: ReturnType<typeof modelEntitlements>[];
@@ -113,7 +119,7 @@ export class ApiModelRuntime {
 	}
 	private readonly cache = new Map<
 		string,
-		{ at: number; models: RouteModel[]; error: boolean }
+		{ at: number; models: RouteModel[]; error: boolean; failure?: ApiCatalogFailure }
 	>();
 	constructor(
 		private readonly fetchImpl: typeof fetch = fetch,
@@ -134,7 +140,7 @@ export class ApiModelRuntime {
 		return createHash("sha256")
 			.update(route.id)
 			.update("\0")
-			.update(route.apiKey)
+			.update(route.apiKey + (route.region === "us" ? "\0" + apiBaseUrl(route) : ""))
 			.digest("hex");
 	}
 	async catalogs(
@@ -157,9 +163,11 @@ export class ApiModelRuntime {
 					) {
 						let models: RouteModel[] = [];
 						let error = false;
+ let failure: ApiCatalogFailure | undefined;
+ let receivedResponse = false;
 						try {
 							const response = await this.fetchImpl(
-								"https://api.openai.com/v1/models",
+								`${apiBaseUrl(route)}/models`,
 								{
 									method: "GET",
 									headers: { authorization: `Bearer ${route.apiKey}` },
@@ -167,7 +175,9 @@ export class ApiModelRuntime {
 									signal: AbortSignal.timeout(15000),
 								},
 							);
+							receivedResponse = true;
 							if (!response.ok) {
+ failure = {kind: "http", status: response.status};
 								await response.body?.cancel();
 								throw Error("API catalog unavailable");
 							}
@@ -191,12 +201,13 @@ export class ApiModelRuntime {
 										]
 									: [],
 							);
-						} catch {
+						} catch (cause) {
+ failure ??= {kind: cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError") ? "timeout" : receivedResponse ? "invalid_catalog" : "network"};
 							error = true;
 						}
 						if (this.cache.size >= 100)
 							this.cache.delete(this.cache.keys().next().value ?? "");
-						this.cache.set(key, { at: this.now(), models, error });
+						this.cache.set(key, { at: this.now(), models, error, failure });
 					}
 					const entry = this.cache.get(key);
 					if (route.enabled && entry && !entry.error && this.updateDiscovery) {
@@ -259,6 +270,7 @@ export class ApiModelRuntime {
 				priority: r.priority,
 				checkedAt: c?.at ?? 0,
 				error: c?.error ?? true,
+ failure: c?.failure,
 				availableModels: c?.models.map((m) => m.slug) ?? [],
 				entitlements: (c?.models ?? [])
 					.filter((m) =>
@@ -339,7 +351,7 @@ export class ApiModelRuntime {
 			try {
 				onAttempt?.(routes.indexOf(credential));
 				const response = await this.fetchImpl(
-					"https://api.openai.com/v1/responses",
+					`${apiBaseUrl(credential)}/responses`,
 					{
 						method: "POST",
 						headers: {

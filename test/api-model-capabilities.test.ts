@@ -888,3 +888,16 @@ it("does not use an unavailable cached document to remove newer persisted doc-on
 	expect(model.supported_reasoning_levels).toContainEqual(expect.objectContaining({ effort: "high" }));
 	expect(service.exportProbes()[0][1].levels).toEqual(["low", "high"]);
 });
+
+it("keeps authenticated capability probes on their selected region and separates the cache",async()=>{
+ const urls:string[]=[];
+ const reader=new ApiModelCapabilities(async(url,init)=>{
+  if(init?.method!=="POST")return new Response("missing",{status:404});
+  urls.push(String(url));return Response.json({});
+ });
+ await reader.enrich([{slug:"fixture"}],false,route);
+ const count=urls.length;expect(count).toBeGreaterThan(0);
+ await reader.enrich([{slug:"fixture"}],false,{...route,region:"us"});
+ expect(urls.length).toBeGreaterThan(count);
+ expect(urls.slice(count).every(url=>url==="https://us.api.openai.com/v1/responses")).toBe(true);
+});
