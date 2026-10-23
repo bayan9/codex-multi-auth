@@ -444,10 +444,12 @@ it("preserves established efforts across a documentation outage",async()=>{
  const [before] = await reader.enrich([{slug:"fixture"}], false, {...route, probeCapabilities:false});
  expect(before).toMatchObject({reasoning_levels_known:true});
  expect(before?.supported_reasoning_levels).not.toContainEqual(expect.objectContaining({effort:"max"}));
+ expect(resolveModelRoute("zdr/fixture", [{...route, probeCapabilities:false, models:[before!]}], {reasoningEffort:"max"}).candidates).toHaveLength(0);
  now+=61000;fetcher.mockResolvedValue(new Response("unavailable",{status:503}));
  const [after] = await reader.enrich([{slug:"fixture"}], true, {...route, probeCapabilities:false});
  expect(after).toMatchObject({reasoning_levels_known:true});
  expect(after?.supported_reasoning_levels).toEqual(before?.supported_reasoning_levels);
+ expect(resolveModelRoute("zdr/fixture", [{...route, probeCapabilities:false, models:[after!]}], {reasoningEffort:"max"}).candidates).toHaveLength(0);
 });
 it("probes the exact priority tier exposed by the native picker",async()=>{
  const tiers:string[]=[];
