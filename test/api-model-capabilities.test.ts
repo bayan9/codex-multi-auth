@@ -141,6 +141,39 @@ it("never runs paid probes without opt-in and never calls an authentication fail
 	});
 });
 
+it.each(["429", "network"])(
+	"keeps inconclusive efforts routable after an undocumented model partially probes then hits %s",
+	async (failure) => {
+		const reader = new ApiModelCapabilities(
+			vi.fn(async (_u: unknown, init?: RequestInit) => {
+				if (init?.method !== "POST") return new Response("missing", { status: 404 });
+				const body = JSON.parse(String(init.body));
+				if (body.reasoning?.effort === "low")
+					return Response.json({ reasoning: { effort: "low" } });
+				if (body.reasoning?.effort === "medium") {
+					if (failure === "network") throw Error("timeout");
+					return Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 });
+				}
+				return Response.json(
+					{ error: { param: body.service_tier ? "service_tier" : "reasoning.effort" } },
+					{ status: 400 },
+				);
+			}) as typeof fetch,
+		);
+		const [model] = await reader.enrich([{ slug: "fixture" }], true, route, true);
+		expect(model).toMatchObject({ reasoning_levels_known: true });
+		expect(model?.supported_reasoning_levels?.map((value) => value.effort)).toEqual(
+			expect.arrayContaining(["low", "medium"]),
+		);
+		expect(model?.supported_reasoning_levels?.map((value) => value.effort)).not.toContain("minimal");
+		expect(
+			resolveModelRoute("zdr/fixture", [{ ...route, models: [model!] }], {
+				reasoningEffort: "medium",
+			}).candidates,
+		).toHaveLength(1);
+	},
+);
+
 it("coalesces concurrent paid probes for the same credential and model", async () => {
 	let posts = 0;
 	const reader = new ApiModelCapabilities(

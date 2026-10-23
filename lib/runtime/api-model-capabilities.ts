@@ -258,6 +258,7 @@ export class ApiModelCapabilities {
 			status: {} as Record<string, string>,
 		};
 		let credentialUnavailable = false;
+		let needsRetry = false;
 		// 401/403 means this credential lost access: nothing it verified before
 		// may still be advertised. A throttle (429) or transport failure is only
 		// inconclusive and keeps what an earlier probe verified. Only
@@ -288,7 +289,10 @@ export class ApiModelCapabilities {
 				return "unverified";
 			};
 			return this.withProbeSlot(async () => {
-				if (credentialUnavailable || modelDenied) return "unverified";
+				if (credentialUnavailable || modelDenied) {
+					if (!modelDenied) needsRetry = true;
+					return "unverified";
+				}
 				try {
 					const response = await this.fetchImpl(
 						`${apiBaseUrl(route)}/responses`,
@@ -336,6 +340,7 @@ export class ApiModelCapabilities {
 					);
 					if ([401, 429].includes(response.status))
 						credentialUnavailable = true;
+					if (response.status === 429) needsRetry = true;
 					if (response.status === 401) lostAccess = true;
 					// Probe bodies are tiny, but an upstream error must not grow local memory unboundedly.
 					const reader = response.body?.getReader();
@@ -420,6 +425,7 @@ export class ApiModelCapabilities {
 						? "verified"
 						: "downgraded";
 				} catch {
+					needsRetry = true;
 					return "unverified";
 				}
 			});
@@ -440,6 +446,21 @@ export class ApiModelCapabilities {
 				// verified effort probe. Keep that scoped evidence through an
 				// inconclusive retry only while current documentation is unavailable.
 				if (effective === "verified" || (status === "unverified" && !reasoningAvailable && !lostAccess && !modelDenied && previous?.levels.includes(effort))) result.levels.push(effort);
+			}
+			const probeEstablishedReasoning = checked.some(({ status }) =>
+				["verified", "unsupported", "downgraded"].includes(status),
+			);
+			if (!reasoningAvailable && needsRetry && probeEstablishedReasoning) {
+				// Partial evidence says only that explicitly rejected efforts fail. A
+				// timeout or throttle must not turn unchecked settings into denials.
+				for (const { effort, status } of checked) {
+					const prior = previous?.status[`effort:${effort}`];
+					if (
+						status === "unverified" &&
+						(!previous || previous.status.retry === "transient" || prior === "unverified") &&
+						!result.levels.includes(effort)
+					) result.levels.push(effort);
+				}
 			}
 		}
 		const effort = result.levels.includes("low") ? "low" : result.levels[0];
@@ -494,7 +515,7 @@ export class ApiModelCapabilities {
 			result.tiers = [];
 			for (const name of Object.keys(result.status)) result.status[name] = "unverified";
 		}
-		if (credentialUnavailable && !modelDenied) result.status.retry = "transient";
+		if ((credentialUnavailable || needsRetry) && !modelDenied) result.status.retry = "transient";
 		result.at = this.now();
 		if (this.probes.size >= 1000)
 			this.probes.delete(this.probes.keys().next().value ?? "");
@@ -548,6 +569,11 @@ export class ApiModelCapabilities {
 								program_checked_at: undefined,
 							};
 						}
+						const probeEstablishedReasoning = Object.entries(probed?.status ?? {}).some(
+							([name, status]) =>
+								name.startsWith("effort:") &&
+								["verified", "unsupported", "downgraded"].includes(status),
+						);
 						// Ultra is a native orchestration mode. Codex resolves it to this
 						// supported wire effort; it is not an API entitlement named "ultra".
 						const multiAgentEffort =
@@ -557,11 +583,6 @@ export class ApiModelCapabilities {
 						const nativeLevels = multiAgentEffort
 							? [...levels, "ultra"]
 							: levels;
-						const probeEstablishedReasoning = Object.entries(probed?.status ?? {}).some(
-							([name, status]) =>
-								name.startsWith("effort:") &&
-								["verified", "unsupported", "downgraded"].includes(status),
-						);
 						return {
 							...model,
 							...extra,
