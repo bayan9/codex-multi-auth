@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { resolveModelRoute } from "../lib/model-route-policy.js";
 import {
 	ApiModelCapabilities,
 	parseApiReasoningDocumentation,
@@ -246,6 +247,13 @@ it("discovers newly entitled effort levels absent from documentation and exclude
 		"effort:xhigh": "verified",
 		"effort:max": "unsupported",
 	});
+	expect(
+		resolveModelRoute(
+			"zdr/fixture",
+			[{ ...route, models: [model!] }],
+			{ reasoningEffort: "max" },
+		).candidates,
+	).toHaveLength(0);
 });
 
 it("keeps native Ultra separate from API effort probes and maps it to a supported maximum", async () => {
