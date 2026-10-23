@@ -161,7 +161,7 @@ it.each(["429", "network"])(
 			}) as typeof fetch,
 		);
 		const [model] = await reader.enrich([{ slug: "fixture" }], true, route, true);
-		expect(model).toMatchObject({ reasoning_levels_known: true });
+		expect(model).toMatchObject({ reasoning_levels_known: false });
 		expect(model?.supported_reasoning_levels?.map((value) => value.effort)).toEqual(
 			expect.arrayContaining(["low", "medium"]),
 		);
@@ -171,6 +171,11 @@ it.each(["429", "network"])(
 				reasoningEffort: "medium",
 			}).candidates,
 		).toHaveLength(1);
+		expect(
+			resolveModelRoute("zdr/fixture", [{ ...route, models: [model!] }], {
+				reasoningEffort: "minimal",
+			}).candidates,
+		).toHaveLength(0);
 	},
 );
 

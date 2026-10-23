@@ -514,6 +514,7 @@ export class ApiModelCapabilities {
 			result.levels = [];
 			result.tiers = [];
 			for (const name of Object.keys(result.status)) result.status[name] = "unverified";
+			result.status.credential = "unavailable";
 		}
 		if ((credentialUnavailable || needsRetry) && !modelDenied) result.status.retry = "transient";
 		result.at = this.now();
@@ -569,11 +570,14 @@ export class ApiModelCapabilities {
 								program_checked_at: undefined,
 							};
 						}
-						const probeEstablishedReasoning = Object.entries(probed?.status ?? {}).some(
-							([name, status]) =>
-								name.startsWith("effort:") &&
-								["verified", "unsupported", "downgraded"].includes(status),
+						const effortStatuses = Object.entries(probed?.status ?? {}).filter(([name]) =>
+							name.startsWith("effort:"),
 						);
+						const probeEstablishedReasoning =
+							effortStatuses.length > 0 &&
+							effortStatuses.every(([, status]) =>
+								["verified", "unsupported", "downgraded"].includes(status),
+							);
 						// Ultra is a native orchestration mode. Codex resolves it to this
 						// supported wire effort; it is not an API entitlement named "ultra".
 						const multiAgentEffort =
@@ -586,9 +590,8 @@ export class ApiModelCapabilities {
 						return {
 							...model,
 							...extra,
-							...((documented.reasoningAvailable === true || probeEstablishedReasoning)
-								? { reasoning_levels_known: true }
-								: {}),
+							reasoning_levels_known:
+								documented.reasoningAvailable === true || probeEstablishedReasoning,
 							...(documented.inputModalities ? { input_modalities: documented.inputModalities } : {}),
 							multi_agent_reasoning_effort: multiAgentEffort,
 							supported_reasoning_levels: nativeLevels.map((effort) => ({
