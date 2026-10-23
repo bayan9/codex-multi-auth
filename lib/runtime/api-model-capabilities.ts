@@ -268,8 +268,13 @@ export class ApiModelCapabilities {
 		// A model-level denial hides the model on this credential: no efforts, no tiers.
 		let modelDenied = false;
 		const previous = this.probes.get(key);
-		const keep = (name: string, status: string): string =>
-			status === "unverified" && !lostAccess && !modelDenied && previous?.status[name] === "verified" ? "verified" : status;
+		const keep = (name: string, status: string): string => {
+			const prior = previous?.status[name];
+			return status === "unverified" && !lostAccess && !modelDenied &&
+				prior !== undefined && ["verified", "unsupported", "downgraded"].includes(prior)
+				? prior
+				: status;
+		};
 		const attempt = async (setting: {
 			effort?: string;
 			tier?: string;
@@ -458,6 +463,7 @@ export class ApiModelCapabilities {
 					if (
 						status === "unverified" &&
 						(!previous || previous.status.retry === "transient" || prior === "unverified") &&
+						!["unsupported", "downgraded"].includes(prior ?? "") &&
 						!result.levels.includes(effort)
 					) result.levels.push(effort);
 				}

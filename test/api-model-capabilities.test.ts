@@ -179,6 +179,34 @@ it.each(["429", "network"])(
 	},
 );
 
+it("keeps an explicitly rejected effort denied across a transient retry", async () => {
+	let round = 0;
+	const reader = new ApiModelCapabilities(
+		vi.fn(async (_u: unknown, init?: RequestInit) => {
+			if (init?.method !== "POST") return new Response("missing", { status: 404 });
+			const body = JSON.parse(String(init.body));
+			if (body.reasoning?.effort === "minimal") {
+				if (round === 0)
+					return Response.json({ error: { param: "reasoning.effort" } }, { status: 400 });
+				throw Error("timeout");
+			}
+			if (body.reasoning?.effort === "medium")
+				return Response.json({ error: { code: "rate_limit_exceeded" } }, { status: 429 });
+			return Response.json({ reasoning: { effort: body.reasoning?.effort } });
+		}) as typeof fetch,
+	);
+	const [first] = await reader.enrich([{ slug: "fixture" }], true, route, true);
+	expect(first?.capability_probe_status?.["effort:minimal"]).toBe("unsupported");
+	round = 1;
+	const [second] = await reader.enrich([{ slug: "fixture" }], true, route, true);
+	expect(second).toMatchObject({ reasoning_levels_known: false });
+	expect(second?.capability_probe_status?.["effort:minimal"]).toBe("unsupported");
+	expect(second?.supported_reasoning_levels?.map((value) => value.effort)).not.toContain("minimal");
+	expect(resolveModelRoute("zdr/fixture", [{ ...route, models: [second!] }], {
+		reasoningEffort: "minimal",
+	}).candidates).toHaveLength(0);
+});
+
 it("coalesces concurrent paid probes for the same credential and model", async () => {
 	let posts = 0;
 	const reader = new ApiModelCapabilities(
