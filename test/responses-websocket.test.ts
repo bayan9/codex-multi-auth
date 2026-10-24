@@ -361,26 +361,33 @@ it("times out a genuinely silent upstream independently of bridge keepalives", a
 });
 
 it("does not let a completed turn's silence timer terminate a later active turn", async () => {
+	let active: { socket: WebSocket; id: string } | undefined;
 	const f = await fixture((upstream, body, id) => {
 		if (body.model !== "active-continuation") return false;
-		let pulses = 0;
-		const timer = setInterval(() => {
-			if (upstream.readyState !== WebSocket.OPEN) { clearInterval(timer); return; }
-			if (++pulses < 20) {
-				upstream.send(JSON.stringify({ type: "response.output_text.delta", delta: "x" }));
-			} else {
-				clearInterval(timer);
-				upstream.send(JSON.stringify({ type: "response.completed", response: { id, output: [] } }));
-			}
-		}, 20);
-		upstream.once("close", () => clearInterval(timer));
+		active = { socket: upstream, id };
 		return true;
-	}, { bridgeKeepAliveMs: 10, upstreamSilenceMs: 150 });
+	}, { bridgeKeepAliveMs: 10_000, upstreamSilenceMs: 1000 });
 	const ws = await f.connect();
-	expect((await turn(ws, { model: "first", input: [] })).at(-1)?.type).toBe("response.completed");
-	expect((await turn(ws, { model: "active-continuation", input: [], previous_response_id: "resp_1" })).at(-1)?.type).toBe("response.completed");
-	expect(f.connections()).toBe(1);
-	expect(f.calls).toHaveLength(2);
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+	try {
+		expect((await turn(ws, { model: "first", input: [] })).at(-1)?.type).toBe("response.completed");
+		const created = once(ws, "message");
+		const continuation = turn(ws, { model: "active-continuation", input: [], previous_response_id: "resp_1" });
+		await created;
+		expect(active).toBeDefined();
+		await vi.advanceTimersByTimeAsync(600);
+		const delta = once(ws, "message");
+		active!.socket.send(JSON.stringify({ type: "response.output_text.delta", delta: "x" }));
+		await delta;
+		await vi.advanceTimersByTimeAsync(600);
+		if (active!.socket.readyState === WebSocket.OPEN)
+			active!.socket.send(JSON.stringify({ type: "response.completed", response: { id: active!.id, output: [] } }));
+		expect((await continuation).at(-1)?.type).toBe("response.completed");
+		expect(f.connections()).toBe(1);
+		expect(f.calls).toHaveLength(2);
+	} finally {
+		vi.useRealTimers();
+	}
 });
 
 it("does not replay after generation starts and the upstream disconnects", async () => {
