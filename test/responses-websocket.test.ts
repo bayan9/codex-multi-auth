@@ -356,8 +356,31 @@ it("times out a genuinely silent upstream independently of bridge keepalives", a
 	const ws = await f.connect();
 	const events = await turn(ws, { model: "silent", input: [] });
 	expect(events[0]?.type).toBe("response.created");
-	expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "websocket_request_failed" } });
+	expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "upstream_websocket_disconnected" } });
 	expect(f.calls).toHaveLength(1);
+});
+
+it("does not let a completed turn's silence timer terminate a later active turn", async () => {
+	const f = await fixture((upstream, body, id) => {
+		if (body.model !== "active-continuation") return false;
+		let pulses = 0;
+		const timer = setInterval(() => {
+			if (upstream.readyState !== WebSocket.OPEN) { clearInterval(timer); return; }
+			if (++pulses < 20) {
+				upstream.send(JSON.stringify({ type: "response.output_text.delta", delta: "x" }));
+			} else {
+				clearInterval(timer);
+				upstream.send(JSON.stringify({ type: "response.completed", response: { id, output: [] } }));
+			}
+		}, 20);
+		upstream.once("close", () => clearInterval(timer));
+		return true;
+	}, { bridgeKeepAliveMs: 10, upstreamSilenceMs: 150 });
+	const ws = await f.connect();
+	expect((await turn(ws, { model: "first", input: [] })).at(-1)?.type).toBe("response.completed");
+	expect((await turn(ws, { model: "active-continuation", input: [], previous_response_id: "resp_1" })).at(-1)?.type).toBe("response.completed");
+	expect(f.connections()).toBe(1);
+	expect(f.calls).toHaveLength(2);
 });
 
 it("does not replay after generation starts and the upstream disconnects", async () => {
@@ -365,7 +388,8 @@ it("does not replay after generation starts and the upstream disconnects", async
 	const ws = await f.connect();
 	const events = await turn(ws, { model: "disconnect", input: [] });
 	expect(events[0]?.type).toBe("response.created");
-	expect(events.at(-1)?.type).toBe("error");
+	expect(events.at(-1)).toMatchObject({ type: "error", status: 502, error: { code: "upstream_websocket_disconnected" } });
+	expect(events.at(-1)?.error).toMatchObject({ message: expect.stringContaining("Upstream WebSocket") });
 	expect(f.calls).toHaveLength(1);
 });
 it.each(["oauth", "api", "zdr"] as const)("records sanitized %s close context without replaying generation", async (routeKind) => {

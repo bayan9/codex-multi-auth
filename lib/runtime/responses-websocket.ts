@@ -122,6 +122,8 @@ function wireError(code: string, status = 400): Json {
 			message:
 				code === "previous_response_not_found"
 					? "Retry with complete input and no previous_response_id."
+					: code === "upstream_websocket_disconnected"
+						? "Upstream WebSocket closed before completing the response."
 					: "The local WebSocket request could not be served.",
 		},
 	};
@@ -462,7 +464,13 @@ class SocketSession {
                 const error = cancelled
                     ? new ClientCancellationError()
                     : Error("Upstream WebSocket disconnected");
-                if (accepted) streamController.error(error);
+                if (accepted && !cancelled) {
+                    // Preserve a protocol error through the loopback SSE bridge.
+                    // Destroying its HTTP stream loses the cause at the local WS.
+                    streamController.enqueue(Buffer.from(`data: ${JSON.stringify(wireError("upstream_websocket_disconnected", 502))}\n\n`));
+                    streamController.close();
+                }
+                else if (accepted) streamController.error(error);
                 else if (cancelled) reject(error);
                 else {
                     // A sent create has an ambiguous outcome. Return a terminal
@@ -540,6 +548,7 @@ class SocketSession {
 			};
 			const resetUpstreamSilence = () => {
 				clearTimeout(upstreamSilence);
+				if (finished) return;
 				upstreamSilence = setTimeout(() => active.terminate(), this.upstreamSilenceMs);
 				upstreamSilence.unref();
 			};
