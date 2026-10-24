@@ -305,6 +305,17 @@ it("persists operator metadata using a store version that old readers reject",as
  expect((await loadApiRoutes(file))[0]).toMatchObject({modelReasoningLevels:{astra:["medium"]},modelAccessPrograms:{astra:{cyber:["daybreak_red"]}}});
 });
 
+it("gives operator metadata version precedence and renews its capability epoch",async()=>{
+ const file=join(await tempDir(),"routes.json");
+ const route={id:"regional-metadata",label:"Fixture",kind:"api" as const,region:"us" as const,apiKey:"fixture",enabled:true,priority:9,visibleModels:["model"],modelReasoningLevels:{model:["medium" as const]}};
+ await saveApiRoutes([route],file);const [before]=await loadApiRoutes(file);
+ expect(JSON.parse(await readFile(file,"utf8")).version).toBe(3);
+ await saveApiRoutes([{...before,modelReasoningLevels:{model:["high"]}}],file,[before]);
+ const [after]=await loadApiRoutes(file);
+ expect(after.capabilityEpoch).not.toBe(before.capabilityEpoch);
+ expect(after).toMatchObject({region:"us",modelReasoningLevels:{model:["high"]}});
+});
+
 it("invalidates regional capability ownership and rejects stale discovery",async()=>{
  const {updateApiModelDiscovery}=await import("../lib/api-route-store.js");
  const file=join(await tempDir(),"routes.json");

@@ -236,3 +236,30 @@ it("lets operators declare reasoning and Daybreak Red metadata", async () => {
  await runApiLoginMenu({load:async()=>[route],save,log:vi.fn(),select:async(items)=>offered(items,choices.shift())});
  expect(save.mock.calls[0]?.[0]?.[0]).toMatchObject({modelReasoningLevels:{"astra-cyber-preview":["low","medium","high","xhigh","max"]},modelAccessPrograms:{"astra-cyber-preview":{cyber:["daybreak_red"]}}});
 });
+
+it.each([undefined, { research: ["extended"] }])("preserves inherited access during reasoning-only edits", async accessPrograms => {
+ const route:ApiRouteCredential={id:"fixture",label:"Fixture",kind:"api",apiKey:"fixture",priority:9,enabled:true,visibleModels:["model"],accessPrograms};
+ const choices=["fixture","metadata","model:model","toggle:high","save","back"];
+ const save=vi.fn(async(routes:ApiRouteCredential[])=>routes);
+ await runApiLoginMenu({load:async()=>[route],save,log:vi.fn(),select:async(items)=>offered(items,choices.shift())});
+ expect(save.mock.calls[0]?.[0]?.[0]?.modelAccessPrograms).toBeUndefined();
+ expect(save.mock.calls[0]?.[0]?.[0]?.accessPrograms).toEqual(accessPrograms);
+});
+
+it("explains why metadata cannot be configured without visible models",async()=>{
+ const route:ApiRouteCredential={id:"fixture",label:"Fixture",kind:"api",apiKey:"fixture",priority:9,enabled:true,visibleModels:[]};
+ const choices=["fixture","metadata","back"];const save=vi.fn(async(routes:ApiRouteCredential[])=>routes);const log=vi.fn();
+ await runApiLoginMenu({load:async()=>[route],save,log,select:async(items)=>offered(items,choices.shift())});
+ expect(log).toHaveBeenCalledWith(expect.stringMatching(/choose.*visible models.*first/i));
+ expect(save).not.toHaveBeenCalled();
+});
+
+it("preserves the saved region and models when regional discovery fails",async()=>{
+ const route:ApiRouteCredential={id:"fixture",label:"Fixture",kind:"api",region:"global",apiKey:"fixture",priority:9,enabled:true,visibleModels:["old"],knownModels:["old","hidden"]};
+ const before=structuredClone(route);const choices=["fixture","region","us","back"];const save=vi.fn(async(routes:ApiRouteCredential[])=>routes);const log=vi.fn();
+ vi.stubGlobal("fetch",vi.fn(async()=>new Response(null,{status:401})));
+ try { await runApiLoginMenu({load:async()=>[route],save,log,select:async(items)=>offered(items,choices.shift())}); }
+ finally {vi.unstubAllGlobals();}
+ expect(save).not.toHaveBeenCalled();expect(route).toEqual(before);
+ expect(log).toHaveBeenCalledWith(expect.stringContaining("HTTP 401"));
+});

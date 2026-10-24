@@ -134,6 +134,10 @@ async function configureModelMetadata(
 	route: ApiRouteCredential,
 	d: MenuDeps,
 ): Promise<ApiRouteCredential | null> {
+	if (!route.visibleModels.length) {
+		d.log("Choose visible models first, then configure their metadata.");
+		return null;
+	}
 	const modelChoice = await d.select(
 		route.visibleModels.map((model) => ({ label: model, value: `model:${model}` })),
 		"Choose a model for operator-declared metadata",
@@ -144,7 +148,8 @@ async function configureModelMetadata(
 	const initialImageInput = route.modelInputModalities?.[model]?.includes("image") ?? false;
 	let imageInput = initialImageInput;
 	const inherited = route.modelAccessPrograms?.[model] ?? route.accessPrograms ?? {};
-	let daybreakRed = inherited.cyber?.includes("daybreak_red") ?? false;
+	const initialDaybreakRed = inherited.cyber?.includes("daybreak_red") ?? false;
+	let daybreakRed = initialDaybreakRed;
 	for (;;) {
 		const choice = await d.select(
 			[
@@ -195,18 +200,20 @@ async function configureModelMetadata(
 		else delete modelReasoningLevels[model];
 		if (Object.hasOwn(modelInputModalities, model) || imageInput !== initialImageInput)
 			modelInputModalities[model] = imageInput ? ["text", "image"] : ["text"];
-		const programs = structuredClone(modelAccessPrograms[model] ?? inherited);
-		const cyber = new Set(programs.cyber ?? []);
-		if (daybreakRed) cyber.add("daybreak_red");
-		else cyber.delete("daybreak_red");
-		if (cyber.size) programs.cyber = [...cyber];
-		else delete programs.cyber;
-		modelAccessPrograms[model] = programs;
+		if (Object.hasOwn(modelAccessPrograms, model) || daybreakRed !== initialDaybreakRed) {
+			const programs = structuredClone(modelAccessPrograms[model] ?? inherited);
+			const cyber = new Set(programs.cyber ?? []);
+			if (daybreakRed) cyber.add("daybreak_red");
+			else cyber.delete("daybreak_red");
+			if (cyber.size) programs.cyber = [...cyber];
+			else delete programs.cyber;
+			modelAccessPrograms[model] = programs;
+		}
 		return {
 			...route,
 			modelReasoningLevels: Object.keys(modelReasoningLevels).length ? modelReasoningLevels : undefined,
 			modelInputModalities: Object.keys(modelInputModalities).length ? modelInputModalities : undefined,
-			modelAccessPrograms,
+			modelAccessPrograms: Object.keys(modelAccessPrograms).length ? modelAccessPrograms : undefined,
 		};
 	}
 }
