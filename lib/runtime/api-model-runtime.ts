@@ -62,6 +62,11 @@ export function apiPickerModel(id: string): RouteModel {
 /** Apply current credential policy, never metadata inherited from another credential or old config. */
 function withRouteMetadata(model: RouteModel, route: ApiRouteCredential): RouteModel {
 	const result = { ...model };
+	const inputModalities = route.modelInputModalities?.[model.slug];
+	if (inputModalities) {
+		result.input_modalities = [...new Set(inputModalities)];
+		result.capability_metadata_source = "operator";
+	}
 	delete result.available_access_programs;
 	const override =
 		route.modelAccessPrograms &&

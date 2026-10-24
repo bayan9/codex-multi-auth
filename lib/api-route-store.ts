@@ -17,6 +17,10 @@ const programId = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const accessPrograms = z.record(programId, z.array(programId).max(32))
 	.refine(value => Object.keys(value).length <= 16);
 const reasoningLevel = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const inputModalities = z.array(z.enum(["text", "image"]))
+	.min(1)
+	.max(2)
+	.refine((values) => values.includes("text"));
 const routeSchema = z.object({
 	/** Internal lifetime token. Store-owned; never trust an incoming token. */
 	capabilityEpoch: z.string().uuid().optional(),
@@ -46,10 +50,12 @@ const routeSchema = z.object({
 	/** Operator-declared model capability metadata when API discovery omits it. */
 	modelReasoningLevels: z.record(modelId, z.array(reasoningLevel).max(8))
 		.refine(value => Object.keys(value).length <= 1000).optional(),
+	modelInputModalities: z.record(modelId, inputModalities)
+		.refine(value => Object.keys(value).length <= 1000).optional(),
 });
 export const MAX_API_ROUTES = 100;
 function storeVersion(routes: ApiRouteCredential[]): 1 | 2 | 3 {
-	if (routes.some((route) => route.modelReasoningLevels)) return 3;
+	if (routes.some((route) => route.modelReasoningLevels || route.modelInputModalities)) return 3;
 	return routes.some((route) => route.region === "us") ? 2 : 1;
 }
 const schema = z.object({
@@ -160,6 +166,7 @@ async function saveApiRoutesLocked(
 			const policy = (value: ApiRouteCredential) => JSON.stringify([
 				value.kind, value.apiKey, apiBaseUrl(value), value.enabled, value.probeCapabilities,
 				value.accessPrograms, value.modelAccessPrograms, value.modelReasoningLevels,
+				value.modelInputModalities,
 				// Visibility is a selection set; menu ordering is not a policy edit.
 				...(discoveryExpansion ? [] : [[...new Set(value.visibleModels)].sort()]),
 			]);

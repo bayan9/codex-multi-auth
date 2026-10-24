@@ -141,6 +141,8 @@ async function configureModelMetadata(
 	if (!modelChoice?.startsWith("model:")) return null;
 	const model = modelChoice.slice(6);
 	const selected = new Set(route.modelReasoningLevels?.[model] ?? []);
+	const initialImageInput = route.modelInputModalities?.[model]?.includes("image") ?? false;
+	let imageInput = initialImageInput;
 	const inherited = route.modelAccessPrograms?.[model] ?? route.accessPrograms ?? {};
 	let daybreakRed = inherited.cyber?.includes("daybreak_red") ?? false;
 	for (;;) {
@@ -151,6 +153,7 @@ async function configureModelMetadata(
 					label: `${selected.has(level) ? "[x]" : "[ ]"} Reasoning: ${level}`,
 					value: `toggle:${level}`,
 				})),
+				{ label: `${imageInput ? "[x]" : "[ ]"} Image inputs`, value: "image_input" },
 				{ label: `${daybreakRed ? "[x]" : "[ ]"} Daybreak Red access`, value: "daybreak_red" },
 				{ label: "Clear operator-declared metadata", value: "clear" },
 				{ label: "Cancel without saving", value: "cancel" },
@@ -159,15 +162,22 @@ async function configureModelMetadata(
 		);
 		if (!choice || choice === "cancel") return null;
 		const modelReasoningLevels = { ...(route.modelReasoningLevels ?? {}) };
+		const modelInputModalities = structuredClone(route.modelInputModalities ?? {});
 		const modelAccessPrograms = structuredClone(route.modelAccessPrograms ?? {});
 		if (choice === "clear") {
 			delete modelReasoningLevels[model];
+			delete modelInputModalities[model];
 			delete modelAccessPrograms[model];
 			return {
 				...route,
 				modelReasoningLevels: Object.keys(modelReasoningLevels).length ? modelReasoningLevels : undefined,
+				modelInputModalities: Object.keys(modelInputModalities).length ? modelInputModalities : undefined,
 				modelAccessPrograms: Object.keys(modelAccessPrograms).length ? modelAccessPrograms : undefined,
 			};
+		}
+		if (choice === "image_input") {
+			imageInput = !imageInput;
+			continue;
 		}
 		if (choice === "daybreak_red") {
 			daybreakRed = !daybreakRed;
@@ -183,6 +193,8 @@ async function configureModelMetadata(
 		const ordered = reasoningLevels.filter((level) => selected.has(level));
 		if (ordered.length) modelReasoningLevels[model] = ordered;
 		else delete modelReasoningLevels[model];
+		if (Object.hasOwn(modelInputModalities, model) || imageInput !== initialImageInput)
+			modelInputModalities[model] = imageInput ? ["text", "image"] : ["text"];
 		const programs = structuredClone(modelAccessPrograms[model] ?? inherited);
 		const cyber = new Set(programs.cyber ?? []);
 		if (daybreakRed) cyber.add("daybreak_red");
@@ -193,6 +205,7 @@ async function configureModelMetadata(
 		return {
 			...route,
 			modelReasoningLevels: Object.keys(modelReasoningLevels).length ? modelReasoningLevels : undefined,
+			modelInputModalities: Object.keys(modelInputModalities).length ? modelInputModalities : undefined,
 			modelAccessPrograms,
 		};
 	}
