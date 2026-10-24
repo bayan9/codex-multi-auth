@@ -16,7 +16,7 @@ async function listen(server: Server) {
 	if (!address || typeof address === "string") throw Error("listen failed");
 	return `http://127.0.0.1:${address.port}`;
 }
-async function fixture(respond?: (ws: WebSocket, body: Record<string, unknown>, id: string) => boolean, options: {signal?: AbortSignal; sendFailure?: boolean; cancelBody?: () => void} = {}) {
+async function fixture(respond?: (ws: WebSocket, body: Record<string, unknown>, id: string) => boolean, options: {signal?: AbortSignal; sendFailure?: boolean; cancelBody?: () => void; bridgeKeepAliveMs?: number; bodyReadTimeoutMs?: number} = {}) {
 	const upstream = createServer();
 	const wss = new WebSocketServer({ server: upstream });
 	const calls: Record<string, unknown>[] = [];
@@ -89,6 +89,7 @@ async function fixture(respond?: (ws: WebSocket, body: Record<string, unknown>, 
 	});
 	const gateway = new ResponsesWebSocketGateway(fetch, {
 		maxPayloadBytes: 16384,
+		bridgeKeepAliveMs: options.bridgeKeepAliveMs,
 	});
 	const server = createServer((req, res) => {
 		gateway.handle(req, async () => {
@@ -123,7 +124,20 @@ async function fixture(respond?: (ws: WebSocket, body: Record<string, unknown>, 
                 return;
             }
 			try {
-				if (response.body)
+				if (response.body && options.bodyReadTimeoutMs) {
+					const reader = response.body.getReader();
+					for (;;) {
+						let timer: NodeJS.Timeout | undefined;
+						const result = await Promise.race([
+							reader.read(),
+							new Promise<never>((_resolve, reject) => {
+								timer = setTimeout(() => reject(Error("bridge body read timeout")), options.bodyReadTimeoutMs);
+							}),
+						]).finally(() => clearTimeout(timer));
+						if (result.done) break;
+						res.write(result.value);
+					}
+				} else if (response.body)
 					for await (const chunk of response.body) res.write(chunk);
 				res.end();
 			} catch {
@@ -270,6 +284,43 @@ it("fails explicitly for unsupported control events", async () => {
 		error: { code: "unsupported_websocket_event" },
 	});
 	expect(f.calls).toHaveLength(0);
+});
+it("forwards steering to the active upstream response", async () => {
+	const f = await fixture((_ws, body) => body.model === "steer-target" || body.type === "response.steer");
+	const ws = await f.connect();
+	const created = once(ws, "message");
+	ws.send(JSON.stringify({ type: "response.create", model: "steer-target", input: [] }));
+	await created;
+	ws.send(JSON.stringify({ type: "response.steer", previous_response_id: "resp_1", input: "narrow scope" }));
+	await vi.waitFor(() => expect(f.calls).toHaveLength(2));
+	expect(f.calls[1]).toEqual({ type: "response.steer", previous_response_id: "resp_1", input: "narrow scope" });
+});
+it("rejects steering owned by another authenticated local session", async () => {
+	const f = await fixture((_ws, body) => body.model === "steer-target");
+	const owner = await f.connect();
+	const other = await f.connect();
+	const created = once(owner, "message");
+	owner.send(JSON.stringify({ type: "response.create", model: "steer-target", input: [] }));
+	await created;
+	const rejected = once(other, "message");
+	other.send(JSON.stringify({ type: "response.steer", previous_response_id: "resp_1", input: "not mine" }));
+	expect(JSON.parse((await rejected)[0].toString())).toMatchObject({
+		type: "error",
+		error: { code: "previous_response_not_found" },
+	});
+	expect(f.calls).toHaveLength(1);
+});
+it("keeps the local bridge readable during a quiet upstream response", async () => {
+	const f = await fixture((ws, body, id) => {
+		if (body.model !== "quiet") return false;
+		setTimeout(() => ws.send(JSON.stringify({ type: "response.completed", response: { id, output: [] } })), 80);
+		return true;
+	}, { bridgeKeepAliveMs: 5, bodyReadTimeoutMs: 20 });
+	const ws = await f.connect();
+	let pinged = false;
+	ws.once("ping", () => { pinged = true; });
+	expect((await turn(ws, { model: "quiet", input: [] })).at(-1)?.type).toBe("response.completed");
+	expect(pinged).toBe(true);
 });
 
 it("does not replay after generation starts and the upstream disconnects", async () => {

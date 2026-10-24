@@ -56,6 +56,7 @@ const MAX_CLIENT_SESSIONS = 64;
 // Conservative request ceiling below observed upstream 1009 rejections. This
 // is a local routing guard, not a claim about the upstream's undocumented cap.
 const MAX_UPSTREAM_WEBSOCKET_REQUEST_BYTES = 8 * 1024 * 1024;
+const DEFAULT_BRIDGE_KEEPALIVE_MS = 10_000;
 const terminal = new Set([
 	"response.completed",
 	"response.failed",
@@ -159,6 +160,7 @@ class SocketSession {
 		private readonly onComplete?: () => void,
 		private readonly needsHttpRecovery: () => boolean = () => false,
 		private readonly httpOnly: Map<string, number> = new Map(),
+		private readonly bridgeKeepAliveMs = DEFAULT_BRIDGE_KEEPALIVE_MS,
 	) {}
 	close() {
 		this.closed = true;
@@ -387,7 +389,13 @@ class SocketSession {
 				},
 				{ highWaterMark: this.maxBytes, size: (chunk) => chunk.byteLength },
 			);
+			const keepalive = setInterval(() => {
+				if (!finished && !bodyCancelled)
+					streamController.enqueue(Buffer.from(": keepalive\n\n"));
+			}, this.bridgeKeepAliveMs);
+			keepalive.unref();
 			const cleanup = () => {
+				clearInterval(keepalive);
 				active.off("message", onMessage);
 				active.off("close", onSocketClose);
 				active.off("error", onError);
@@ -549,6 +557,7 @@ export class ResponsesWebSocketGateway {
 		private readonly upstreamFetch: typeof fetch,
 		private readonly options: {
 			maxPayloadBytes: number;
+			bridgeKeepAliveMs?: number;
 			upgrade?: (
 				req: IncomingMessage,
 				socket: Duplex,
@@ -558,6 +567,8 @@ export class ResponsesWebSocketGateway {
 		},
 	) {
 		this.maxBytes = options.maxPayloadBytes;
+		if (options.bridgeKeepAliveMs !== undefined && options.bridgeKeepAliveMs < 1)
+			throw Error("bridgeKeepAliveMs must be positive");
 		this.wss = new WebSocketServer({
 			noServer: true,
 			maxPayload: this.maxBytes,
@@ -714,6 +725,7 @@ export class ResponsesWebSocketGateway {
 			() => { if (scope) this.websocketFailures.delete(scope); },
 			() => this.needsHttpFallback(req),
 			this.apiHandshakeBackoff,
+			this.options.bridgeKeepAliveMs ?? DEFAULT_BRIDGE_KEEPALIVE_MS,
 		);
 		let queue = Promise.resolve(),
 			queued = 0,
@@ -740,6 +752,11 @@ export class ResponsesWebSocketGateway {
 			this.sessions.delete(session);
 			this.stats.activeConnections = this.sessions.size;
 		});
+		const bridgeKeepalive = setInterval(() => {
+			if (session.controller && ws.readyState === WebSocket.OPEN) ws.ping();
+		}, this.options.bridgeKeepAliveMs ?? DEFAULT_BRIDGE_KEEPALIVE_MS);
+		bridgeKeepalive.unref();
+		ws.once("close", () => clearInterval(bridgeKeepalive));
 		ws.on("message", (raw, isBinary) => {
 			let event: Json;
 			try {
@@ -755,6 +772,20 @@ export class ResponsesWebSocketGateway {
 				generation++;
 				session.controller?.abort();
 				for (const channel of session.channels.values()) channel.terminate();
+				return;
+			}
+			if (event.type === "response.steer") {
+				const previousId = typeof event.previous_response_id === "string"
+					? event.previous_response_id
+					: undefined;
+				const owner = previousId ? session.owners.get(previousId) : undefined;
+				if (!owner || owner.readyState !== WebSocket.OPEN) {
+					send(wireError("previous_response_not_found"));
+					return;
+				}
+				owner.send(raw.toString(), (error) => {
+					if (error) send(wireError("websocket_steer_failed", 502));
+				});
 				return;
 			}
 			if (event.type !== "response.create") {
