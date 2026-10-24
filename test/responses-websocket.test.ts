@@ -16,7 +16,7 @@ async function listen(server: Server) {
 	if (!address || typeof address === "string") throw Error("listen failed");
 	return `http://127.0.0.1:${address.port}`;
 }
-async function fixture(respond?: (ws: WebSocket, body: Record<string, unknown>, id: string) => boolean, options: {signal?: AbortSignal; sendFailure?: boolean; cancelBody?: () => void; bridgeKeepAliveMs?: number; bodyReadTimeoutMs?: number} = {}) {
+async function fixture(respond?: (ws: WebSocket, body: Record<string, unknown>, id: string) => boolean, options: {signal?: AbortSignal; sendFailure?: boolean; cancelBody?: () => void; bridgeKeepAliveMs?: number; bodyReadTimeoutMs?: number; upstreamSilenceMs?: number} = {}) {
 	const upstream = createServer();
 	const wss = new WebSocketServer({ server: upstream });
 	const calls: Record<string, unknown>[] = [];
@@ -90,6 +90,7 @@ async function fixture(respond?: (ws: WebSocket, body: Record<string, unknown>, 
 	const gateway = new ResponsesWebSocketGateway(fetch, {
 		maxPayloadBytes: 16384,
 		bridgeKeepAliveMs: options.bridgeKeepAliveMs,
+		upstreamSilenceMs: options.upstreamSilenceMs,
 	});
 	const server = createServer((req, res) => {
 		gateway.handle(req, async () => {
@@ -321,6 +322,18 @@ it("keeps the local bridge readable during a quiet upstream response", async () 
 	ws.once("ping", () => { pinged = true; });
 	expect((await turn(ws, { model: "quiet", input: [] })).at(-1)?.type).toBe("response.completed");
 	expect(pinged).toBe(true);
+});
+it("times out a genuinely silent upstream independently of bridge keepalives", async () => {
+	const f = await fixture((_ws, body) => body.model === "silent", {
+		bridgeKeepAliveMs: 5,
+		bodyReadTimeoutMs: 20,
+		upstreamSilenceMs: 40,
+	});
+	const ws = await f.connect();
+	const events = await turn(ws, { model: "silent", input: [] });
+	expect(events[0]?.type).toBe("response.created");
+	expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "websocket_request_failed" } });
+	expect(f.calls).toHaveLength(1);
 });
 
 it("does not replay after generation starts and the upstream disconnects", async () => {

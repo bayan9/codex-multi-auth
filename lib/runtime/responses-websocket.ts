@@ -57,6 +57,7 @@ const MAX_CLIENT_SESSIONS = 64;
 // is a local routing guard, not a claim about the upstream's undocumented cap.
 const MAX_UPSTREAM_WEBSOCKET_REQUEST_BYTES = 8 * 1024 * 1024;
 const DEFAULT_BRIDGE_KEEPALIVE_MS = 10_000;
+const DEFAULT_UPSTREAM_SILENCE_MS = 5 * 60_000;
 const terminal = new Set([
 	"response.completed",
 	"response.failed",
@@ -161,6 +162,7 @@ class SocketSession {
 		private readonly needsHttpRecovery: () => boolean = () => false,
 		private readonly httpOnly: Map<string, number> = new Map(),
 		private readonly bridgeKeepAliveMs = DEFAULT_BRIDGE_KEEPALIVE_MS,
+		private readonly upstreamSilenceMs = DEFAULT_UPSTREAM_SILENCE_MS,
 	) {}
 	close() {
 		this.closed = true;
@@ -376,6 +378,7 @@ class SocketSession {
 			let eventCount = 0;
 			let sendCompleted = false;
 			let requestTransportErrorCode: TransportErrorCode | undefined;
+			let upstreamSilence: NodeJS.Timeout | undefined;
 			let streamController: ReadableStreamDefaultController<Uint8Array>;
 			const stream = new ReadableStream<Uint8Array>(
 				{
@@ -396,6 +399,8 @@ class SocketSession {
 			keepalive.unref();
 			const cleanup = () => {
 				clearInterval(keepalive);
+				clearTimeout(upstreamSilence);
+				active.off("message", resetUpstreamSilence);
 				active.off("message", onMessage);
 				active.off("close", onSocketClose);
 				active.off("error", onError);
@@ -511,11 +516,18 @@ class SocketSession {
 					active.terminate();
 				}
 			};
+			const resetUpstreamSilence = () => {
+				clearTimeout(upstreamSilence);
+				upstreamSilence = setTimeout(() => active.terminate(), this.upstreamSilenceMs);
+				upstreamSilence.unref();
+			};
 			active.on("message", onMessage);
 			active.once("close", onSocketClose);
 			active.once("error", onError);
 			init.signal?.addEventListener("abort", abort, { once: true });
 			context.signal.addEventListener("abort", abort, {once:true});
+			active.on("message", resetUpstreamSilence);
+			resetUpstreamSilence();
             if (init.signal?.aborted || context.signal.aborted) {
 				abort();
 				return;
@@ -558,6 +570,7 @@ export class ResponsesWebSocketGateway {
 		private readonly options: {
 			maxPayloadBytes: number;
 			bridgeKeepAliveMs?: number;
+			upstreamSilenceMs?: number;
 			upgrade?: (
 				req: IncomingMessage,
 				socket: Duplex,
@@ -569,6 +582,8 @@ export class ResponsesWebSocketGateway {
 		this.maxBytes = options.maxPayloadBytes;
 		if (options.bridgeKeepAliveMs !== undefined && options.bridgeKeepAliveMs < 1)
 			throw Error("bridgeKeepAliveMs must be positive");
+		if (options.upstreamSilenceMs !== undefined && options.upstreamSilenceMs < 1)
+			throw Error("upstreamSilenceMs must be positive");
 		this.wss = new WebSocketServer({
 			noServer: true,
 			maxPayload: this.maxBytes,
@@ -726,6 +741,7 @@ export class ResponsesWebSocketGateway {
 			() => this.needsHttpFallback(req),
 			this.apiHandshakeBackoff,
 			this.options.bridgeKeepAliveMs ?? DEFAULT_BRIDGE_KEEPALIVE_MS,
+			this.options.upstreamSilenceMs ?? DEFAULT_UPSTREAM_SILENCE_MS,
 		);
 		let queue = Promise.resolve(),
 			queued = 0,
