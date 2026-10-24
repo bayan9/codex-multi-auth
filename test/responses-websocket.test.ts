@@ -209,6 +209,30 @@ it("uses real upstream WebSockets and reuses the socket for a continuation", asy
 	});
 	expect(f.calls[0]).not.toHaveProperty("stream");
 });
+it("replaces an upstream socket before its five-minute lease expires", async () => {
+	const f = await fixture();
+	const ws = await f.connect();
+	await turn(ws, {
+		model: "api/shared",
+		input: [{ role: "user", content: "hello" }],
+	});
+	const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 4 * 60_000 + 1);
+	try {
+		await turn(ws, {
+			model: "api/shared",
+			previous_response_id: "resp_1",
+			input: [{ role: "user", content: "again" }],
+		});
+	} finally {
+		clock.mockRestore();
+	}
+	expect(f.connections()).toBe(2);
+	expect(f.calls[1]).not.toHaveProperty("previous_response_id");
+	expect(f.calls[1]?.input).toEqual(expect.arrayContaining([
+		{ role: "user", content: "hello" },
+		{ role: "user", content: "again" },
+	]));
+});
 it.each([undefined, false, true])("preserves caller permission metadata over WebSocket (%s)", async (enabled) => {
 	const f = await fixture();
 	const ws = await f.connect();
@@ -692,6 +716,31 @@ it("falls back to HTTP for an API credential whose WebSocket handshake is refuse
 	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)).toMatchObject({ type: "response.completed" });
 	expect(posts).toHaveLength(2);
 	expect(JSON.parse(posts[0]!)).toMatchObject({ model: "api/fixture", stream: true });
+});
+
+it("uses HTTP for the next API create after an unexpected upstream close", async () => {
+	const posts: string[] = [];
+	const upstream = createServer(async (req, res) => {
+		const chunks: Buffer[] = [];
+		for await (const chunk of req) chunks.push(Buffer.from(chunk));
+		posts.push(Buffer.concat(chunks).toString("utf8"));
+		res.writeHead(200, { "content-type": "text/event-stream" });
+		res.end(`data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_http", output: [] } })}\n\n`);
+	});
+	const wss = new WebSocketServer({ server: upstream });
+	let websocketCreates = 0;
+	wss.on("connection", (socket) => socket.on("message", () => {
+		websocketCreates++;
+		socket.send(JSON.stringify({ type: "response.created", response: { id: "resp_ws" } }));
+		socket.terminate();
+	}));
+	cleanups.push(async () => { for (const socket of wss.clients) socket.terminate(); wss.close(); });
+	const g = await customGateway({ upstream });
+	const ws = await g.connect();
+	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)).toMatchObject({ type: "error", status: 502 });
+	expect((await turn(ws, { model: "api/fixture", input: [] })).at(-1)?.type).toBe("response.completed");
+	expect(websocketCreates).toBe(1);
+	expect(posts).toHaveLength(1);
 });
 
 it.each([undefined, false, true])("preserves caller permission metadata during HTTP recovery (%s)", async (enabled) => {
