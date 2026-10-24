@@ -16,7 +16,7 @@ const modelId = z
 const programId = z.string().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 const accessPrograms = z.record(programId, z.array(programId).max(32))
 	.refine(value => Object.keys(value).length <= 16);
-const reasoningLevel = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const reasoningLevel = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const routeSchema = z.object({
 	/** Internal lifetime token. Store-owned; never trust an incoming token. */
 	capabilityEpoch: z.string().uuid().optional(),
@@ -44,7 +44,7 @@ const routeSchema = z.object({
 	modelAccessPrograms: z.record(modelId, accessPrograms)
 		.refine(value => Object.keys(value).length <= 1000).optional(),
 	/** Operator-declared model capability metadata when API discovery omits it. */
-	modelReasoningLevels: z.record(modelId, z.array(reasoningLevel).max(7))
+	modelReasoningLevels: z.record(modelId, z.array(reasoningLevel).max(8))
 		.refine(value => Object.keys(value).length <= 1000).optional(),
 });
 export const MAX_API_ROUTES = 100;

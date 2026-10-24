@@ -129,7 +129,7 @@ async function chooseModels(
 		}
 	}
 }
-const reasoningLevels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const reasoningLevels = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 async function configureModelMetadata(
 	route: ApiRouteCredential,
 	d: MenuDeps,

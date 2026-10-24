@@ -73,8 +73,9 @@ function withRouteMetadata(model: RouteModel, route: ApiRouteCredential): RouteM
 	const declared = route.modelReasoningLevels?.[model.slug];
 	if (declared) {
 		const levels = [...new Set(declared)];
+		const literalUltra = levels.includes("ultra");
 		const multiAgent =
-			(["max", "xhigh", "high"] as const).find((level) =>
+			literalUltra ? null : (["max", "xhigh", "high"] as const).find((level) =>
 				levels.includes(level),
 			) ?? null;
 		result.reasoning_levels_known = true;
@@ -82,7 +83,7 @@ function withRouteMetadata(model: RouteModel, route: ApiRouteCredential): RouteM
 		result.multi_agent_reasoning_effort = multiAgent;
 		result.supported_reasoning_levels = [
 			...levels,
-			...(multiAgent ? ["ultra"] : []),
+			...(multiAgent && !literalUltra ? ["ultra"] : []),
 		].map((effort) => ({
 			effort,
 			description:
