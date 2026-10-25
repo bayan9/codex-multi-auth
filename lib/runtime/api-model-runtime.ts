@@ -401,7 +401,8 @@ export class ApiModelRuntime {
 			selectedRegion ??= candidateRegion;
 			if (signal?.aborted) throw new ClientCancellationError();
 			const rateKey = this.rateBackoff.key(credential, route.upstreamModel);
-			// A send that returned headers or failed ambiguously is never replayed here.
+			// Accepted or ambiguous sends are never replayed. Only a confirmed
+			// temporary 429 below releases this per-request exclusion.
 			if (attemptedKeys.has(rateKey)) continue;
 			const admission = this.rateBackoff.acquire(rateKey);
 			if (admission.waitMs > 0) {
@@ -471,6 +472,8 @@ export class ApiModelRuntime {
 						lastRejection = Response.json({error:sanitized},{status:429});
 					} else {
 						retryWaitMs = Math.min(retryWaitMs, this.rateBackoff.penalize(rateKey, apiRetryDelayMs(data, this.now(), response.headers)));
+						attemptedKeys.delete(rateKey);
+						deferred = true;
 					}
 					continue;
 				}

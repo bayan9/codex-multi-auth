@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import WebSocket, { WebSocketServer } from "ws";
 import { ResponsesWebSocketGateway } from "../lib/runtime/responses-websocket.js";
+import { ApiModelRuntime } from "../lib/runtime/api-model-runtime.js";
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
 	for (const close of cleanups.splice(0).reverse()) await close();
@@ -597,6 +598,7 @@ it("cancels queued creates as well as the streaming turn without blocking new wo
 /** Gateway in front of an arbitrary upstream; records the Response each routed turn produced. */
 async function customGateway(options: {
 	upstream: Server;
+	apiRetry?: boolean;
 	auth?: (req: IncomingMessage) => number | null;
 	outboundHeaders?: Record<string, string>;
 	maxPayloadBytes?: number;
@@ -607,6 +609,9 @@ async function customGateway(options: {
 		await new Promise<void>((r) => options.upstream.close(() => r()));
 	});
 	const gateway = new ResponsesWebSocketGateway(fetch, { maxPayloadBytes: options.maxPayloadBytes ?? 16384 });
+	const runtime = new ApiModelRuntime(async (_url, init) => init?.method === "POST"
+		? gateway.fetch(`${upstreamUrl}/responses`, init)
+		: Response.json({data:[{id:"shared"}]}), () => Date.now());
 	const responses: Response[] = [];
 	const server = createServer((req, res) => {
 		gateway.handle(req, async () => {
@@ -623,7 +628,9 @@ async function customGateway(options: {
 			}
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(Buffer.from(chunk));
-			const response = await gateway.fetch(`${upstreamUrl}/responses`, {
+			const response = options.apiRetry
+				? await runtime.request("api/shared", JSON.parse(Buffer.concat(chunks).toString()), [{id:"fixture",label:"Fixture",kind:"api",priority:0,enabled:true,apiKey:"fixture-upstream",visibleModels:["shared"]}])
+				: await gateway.fetch(`${upstreamUrl}/responses`, {
 				method: "POST",
 				headers: { authorization: "Bearer fixture-upstream", "content-type": "application/json", ...options.outboundHeaders },
 				body: Buffer.concat(chunks),
@@ -633,8 +640,10 @@ async function customGateway(options: {
 			try {
 				if (response.body) for await (const chunk of response.body) res.write(chunk);
 				res.end();
+				if (options.apiRetry) runtime.completeRequest(response, true);
 			} catch {
 				res.destroy();
+				if (options.apiRetry) runtime.completeRequest(response, false);
 			}
 		});
 	});
@@ -674,6 +683,35 @@ function rejectingUpstream(status: number, headers: Record<string, string>, onPo
 	});
 	return upstream;
 }
+
+it("keeps the local socket open while retrying a rejected upstream create", async () => {
+	const upstream=createServer(); const wss=new WebSocketServer({server:upstream});
+	let creates=0; const received:Record<string,unknown>[]=[];
+	wss.on("connection",ws=>ws.on("message",raw=>{
+		received.push(JSON.parse(raw.toString())); creates++;
+		ws.send(JSON.stringify(creates===1
+			? {type:"error",status:429,headers:{"retry-after":"2"},error:{code:"rate_limit_exceeded"}}
+			: {type:"response.completed",response:{id:"resp_recovered",output:[]}}));
+	}));
+	const g=await customGateway({upstream,apiRetry:true});
+	cleanups.push(async()=>{for(const ws of wss.clients)ws.terminate();wss.close();});
+	const ws=await g.connect();
+	vi.useFakeTimers({toFake:["Date","setTimeout","clearTimeout"]});
+	const jitter=vi.spyOn(Math,"random").mockReturnValue(0);
+	let parked!:()=>void;const waiting=new Promise<void>(resolve=>{parked=resolve;});
+	const fakeTimeout=globalThis.setTimeout;
+	const timer=vi.spyOn(globalThis,"setTimeout").mockImplementation(((...args:Parameters<typeof setTimeout>)=>{
+		const result=fakeTimeout(...args);if(args[1]===2000)parked();return result;
+	}) as typeof setTimeout);
+	try {
+		const result=turn(ws,{model:"api/shared",input:[],reasoning:{effort:"ultra"}});
+		expect(await Promise.race([waiting.then(()=>"parked"),result])).toBe("parked");
+		await vi.advanceTimersByTimeAsync(1999);expect(creates).toBe(1);expect(ws.readyState).toBe(WebSocket.OPEN);
+		await vi.advanceTimersByTimeAsync(1);
+		expect((await result).map(event=>event.type)).toEqual(["response.completed"]);
+		expect(creates).toBe(2);expect(received[1]).toMatchObject({reasoning:{effort:"ultra"}});
+	} finally {timer.mockRestore();jitter.mockRestore();vi.useRealTimers();}
+});
 
 it("keeps Retry-After and quota headers from a rejected upstream handshake", async () => {
 	const g = await customGateway({

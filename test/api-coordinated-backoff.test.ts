@@ -14,19 +14,33 @@ class ImmediateRuntime extends ApiModelRuntime {
 }
 
 describe("coordinated API backoff", () => {
- it("waits before an unsent create instead of spending the native retry budget", async () => {
+ it("retries a confirmed upstream 429 after Retry-After within the same request", async () => {
   vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000);
   const jitter=vi.spyOn(Math,"random").mockReturnValue(0);
   let posts=0;
   const runtime=new ApiModelRuntime(async(_url,init)=>init?.method!=="POST"?catalog():++posts===1?limited("2"):new Response("ok"));
   try {
-   expect((await request(runtime)).status).toBe(429);
    const pending=request(runtime);
-   await vi.advanceTimersByTimeAsync(1999);
-   expect(posts).toBe(1);
+   await vi.advanceTimersByTimeAsync(1999); expect(posts).toBe(1);
    await vi.advanceTimersByTimeAsync(1);
    const result=await pending;
    expect(result.status).toBe(200); expect(posts).toBe(2);
+   runtime.completeRequest(result,true);
+  } finally {jitter.mockRestore();vi.useRealTimers();}
+ });
+ it("waits before an unsent create instead of spending the native retry budget", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000);
+  const jitter=vi.spyOn(Math,"random").mockReturnValue(0);
+  let posts=0;
+  const runtime=new ApiModelRuntime(async(_url,init)=>init?.method!=="POST"?catalog():(posts++,new Response("ok")));
+  try {
+   runtime.recordStreamFailure(route(),"api/exclusive",{}, {error:{code:"rate_limit_exceeded",retry_after:2}});
+   const pending=request(runtime);
+   await vi.advanceTimersByTimeAsync(1999);
+   expect(posts).toBe(0);
+   await vi.advanceTimersByTimeAsync(1);
+   const result=await pending;
+   expect(result.status).toBe(200); expect(posts).toBe(1);
    runtime.completeRequest(result,true);
   } finally {jitter.mockRestore();vi.useRealTimers();}
  });
@@ -41,17 +55,32 @@ describe("coordinated API backoff", () => {
   controller.abort();
   await expect(waiting).rejects.toMatchObject({name:"AbortError"});expect(posts).toBe(1);
  });
- it("cancels a parked request and never resends an earlier failed candidate", async () => {
+ it("bounds repeated confirmed throttles and never retries billing quota", async () => {
+  vi.useFakeTimers();vi.setSystemTime(1_800_000_000_000);
+  const jitter=vi.spyOn(Math,"random").mockReturnValue(0);
+  const times:number[]=[];let quotaPosts=0;
+  const runtime=new ApiModelRuntime(async(_url,init)=>init?.method!=="POST"?catalog():(times.push(Date.now()),limited("2")));
+  try {
+   const pending=request(runtime);await vi.advanceTimersByTimeAsync(30000);
+   const result=await pending;expect(result.status).toBe(429);
+   expect(times.map(time=>time-times[0]!)).toEqual([0,2000,4000,8000,16000]);
+   expect(Number(result.headers.get("retry-after"))).toBeGreaterThanOrEqual(16);
+   const quota=new ApiModelRuntime(async(_url,init)=>init?.method!=="POST"?catalog():(quotaPosts++,limited("2","insufficient_quota")));
+   expect(await (await request(quota)).json()).toMatchObject({error:{code:"insufficient_quota"}});expect(quotaPosts).toBe(1);
+  } finally {jitter.mockRestore();vi.useRealTimers();}
+ });
+ it("cancels a parked request and never resends an ambiguous earlier candidate", async () => {
   vi.useFakeTimers();vi.setSystemTime(1_800_000_000_000);
   const jitter=vi.spyOn(Math,"random").mockReturnValue(0);
   const posts:string[]=[];
   const runtime=new ApiModelRuntime(async(_url,init)=>{
    if(init?.method!=="POST")return catalog();
    const key=new Headers(init.headers).get("authorization")??"";posts.push(key);
-   return key.endsWith("backup")&&posts.length>2 ? new Response("ok") : limited("2");
+   if (key.endsWith("one")) throw Error("ambiguous transport failure");
+   return new Response("ok");
   });
   try {
-   expect((await request(runtime,[route("backup")])).status).toBe(429);
+   runtime.recordStreamFailure(route("backup"),"api/exclusive",{}, {error:{code:"rate_limit_exceeded",retry_after:2}});
    const abort=new AbortController();
    const parked=runtime.request("api/exclusive",{},[route("backup")],abort.signal);
    const cancelled=expect(parked).rejects.toMatchObject({name:"AbortError"});
@@ -60,7 +89,7 @@ describe("coordinated API backoff", () => {
    const pending=request(runtime,[route(),{...route("backup"),priority:2}]);
    await vi.advanceTimersByTimeAsync(2000);
    expect((await pending).status).toBe(200);
-   expect(posts).toEqual(["Bearer fixture-backup","Bearer fixture-one","Bearer fixture-backup"]);
+   expect(posts).toEqual(["Bearer fixture-one","Bearer fixture-backup"]);
   } finally {jitter.mockRestore();vi.useRealTimers();}
  });
  it("holds recovery admission through a pending HTTP 200 stream and preserves strikes on streamed failure", async () => {

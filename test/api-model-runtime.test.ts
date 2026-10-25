@@ -501,7 +501,7 @@ it("keeps responses failover within the selected credential region", async () =>
 	const runtime = new ApiModelRuntime(async (url, init) => {
 		urls.push(String(url));
 		return init?.method === "POST"
-			? new Response("busy", { status: 429 })
+			? new Response("busy", { status: 429, headers: { "retry-after": "120" } })
 			: Response.json({ data: [{ id: "exclusive" }] });
 	});
 	const global = credential("global", "api", 8);
