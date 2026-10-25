@@ -1,4 +1,5 @@
 import { MAX_API_ROUTES } from "../api-route-store.js";
+import { apiRetryDelayMs } from "../request/api-retry-delay.js";
 import { OPENAI_HEADER_VALUES } from "../constants.js";
 import { ClientCancellationError } from "../request/client-cancellation.js";
 import type { Duplex } from "node:stream";
@@ -930,10 +931,12 @@ export class ResponsesWebSocketGateway {
 							if (!response.ok) {
 								// An empty or non-JSON error body must not turn a real 401 into a 502.
 								const data: unknown = await response.json().catch(() => undefined);
+								const retryMs = apiRetryDelayMs(data, Date.now(), response.headers);
 								send(
-									isRecord(data)
-										? { ...data, type: "error", status: response.status }
-										: wireError("websocket_request_failed", response.status),
+									{ ...(isRecord(data) ? data : wireError("websocket_request_failed", response.status)),
+										type: "error", status: response.status,
+										...(retryMs > 0 ? {headers:{"retry-after":String(Math.ceil(retryMs / 1000))}} : {}),
+									},
 								);
 								return;
 							}

@@ -336,28 +336,48 @@ it("rejects steering owned by another authenticated local session", async () => 
 	expect(f.calls).toHaveLength(1);
 });
 it("keeps the local bridge readable during a quiet upstream response", async () => {
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+	try {
 	const f = await fixture((ws, body, id) => {
 		if (body.model !== "quiet") return false;
 		setTimeout(() => ws.send(JSON.stringify({ type: "response.completed", response: { id, output: [] } })), 80);
 		return true;
 	}, { bridgeKeepAliveMs: 5, bodyReadTimeoutMs: 20 });
 	const ws = await f.connect();
-	let pinged = false;
-	ws.once("ping", () => { pinged = true; });
-	expect((await turn(ws, { model: "quiet", input: [] })).at(-1)?.type).toBe("response.completed");
-	expect(pinged).toBe(true);
+	const created = once(ws, "message");
+	const ping = once(ws, "ping");
+	const result = turn(ws, { model: "quiet", input: [] });
+	await created;
+	await vi.advanceTimersByTimeAsync(5);
+	await ping;
+	for (let elapsed = 5; elapsed < 80; elapsed += 5) {
+		await vi.advanceTimersByTimeAsync(5);
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
+	expect((await result).at(-1)?.type).toBe("response.completed");
+	} finally { vi.useRealTimers(); }
 });
 it("times out a genuinely silent upstream independently of bridge keepalives", async () => {
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+	try {
 	const f = await fixture((_ws, body) => body.model === "silent", {
 		bridgeKeepAliveMs: 5,
 		bodyReadTimeoutMs: 20,
 		upstreamSilenceMs: 40,
 	});
 	const ws = await f.connect();
-	const events = await turn(ws, { model: "silent", input: [] });
+	const created = once(ws, "message");
+	const result = turn(ws, { model: "silent", input: [] });
+	await created;
+	for (let elapsed = 0; elapsed < 40; elapsed += 5) {
+		await vi.advanceTimersByTimeAsync(5);
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
+	const events = await result;
 	expect(events[0]?.type).toBe("response.created");
 	expect(events.at(-1)).toMatchObject({ type: "error", error: { code: "upstream_websocket_disconnected" } });
 	expect(f.calls).toHaveLength(1);
+	} finally { vi.useRealTimers(); }
 });
 
 it("does not let a completed turn's silence timer terminate a later active turn", async () => {
@@ -661,7 +681,7 @@ it("keeps Retry-After and quota headers from a rejected upstream handshake", asy
 		outboundHeaders: { "chatgpt-account-id": "acc_fixture" },
 	});
 	const ws = await g.connect();
-	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "error", status: 429 });
+	expect((await turn(ws, { model: "shared", input: [] })).at(-1)).toMatchObject({ type: "error", status: 429, headers: {"retry-after":"120"} });
 	expect(g.responses[0]?.headers.get("retry-after")).toBe("120");
 	expect(g.responses[0]?.headers.get("x-codex-primary-used-percent")).toBe("100");
 });

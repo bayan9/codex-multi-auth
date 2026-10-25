@@ -6,6 +6,8 @@ import {
 	classifyCapabilityFailure,
 } from "./runtime-capability-failures.js";
 import { readErrorBody } from "../request/stream-failover-runtime.js";
+import { apiRetryDelayMs } from "../request/api-retry-delay.js";
+import { ApiRateBackoff } from "./api-rate-backoff.js";
 import { createHash } from "node:crypto";
 import type { ApiRouteCredential } from "../api-route-store.js";
 import {
@@ -146,6 +148,7 @@ export class ApiModelRuntime {
 	private readonly discoveryUpdates = new Map<string, Promise<ApiRouteCredential>>();
 	lastPersistenceError: string | null = null;
 	private readonly failures = new RuntimeCapabilityFailures(() => this.now());
+	private readonly rateBackoff = new ApiRateBackoff(() => this.now());
 	private readonly visibility = new Map<string, string[]>();
 	private readonly snapshots = new Map<string, RouteCatalog>();
 	private activeKeys = new Set<string>();
@@ -368,6 +371,7 @@ export class ApiModelRuntime {
 		let lastStatus = 503;
 		let lastRejection: Response | undefined;
 		let selectedRegion: "global" | "us" | undefined;
+		let retryWaitMs = Infinity;
 		for (const candidate of route.candidates) {
 			const credential = routes.find((r) => r.id === candidate.id);
 			if (!credential) continue;
@@ -389,6 +393,13 @@ export class ApiModelRuntime {
 				continue;
 			selectedRegion ??= candidateRegion;
 			if (signal?.aborted) throw new ClientCancellationError();
+			const rateKey = this.rateBackoff.key(credential, route.upstreamModel);
+			const admission = this.rateBackoff.acquire(rateKey);
+			if (admission.waitMs > 0) {
+				retryWaitMs = Math.min(retryWaitMs, admission.waitMs);
+				continue;
+			}
+			let accepted = false;
 			const controller = new AbortController();
 			const abort = () => controller.abort();
 			signal?.addEventListener("abort", abort, { once: true });
@@ -411,6 +422,7 @@ export class ApiModelRuntime {
 				lastStatus = response.status;
 				lastRejection = undefined;
 				if (response.ok) {
+					accepted = true;
 					const headers = new Headers();
 					for (const name of [
 						"content-type",
@@ -440,6 +452,15 @@ export class ApiModelRuntime {
                     const value=source[field];
                     if (typeof value === "string" && /^[A-Za-z0-9_.]{1,80}$/.test(value)) sanitized[field]=value;
                 }
+				if (response.status === 429) {
+					const permanent = ["insufficient_quota", "billing_hard_limit_reached", "billing_not_active", "usage_limit_reached"].some(code => source.code === code || source.type === code);
+					if (permanent) {
+						lastRejection = Response.json({error:sanitized},{status:429});
+					} else {
+						retryWaitMs = Math.min(retryWaitMs, this.rateBackoff.penalize(rateKey, apiRetryDelayMs(data, this.now(), response.headers)));
+					}
+					continue;
+				}
                 if (rejection) {
                     lastRejection = Response.json({error:sanitized},{status:response.status});
 					this.failures.record(
@@ -460,10 +481,12 @@ export class ApiModelRuntime {
 				lastStatus = 502;
 				lastRejection = undefined;
 			} finally {
+				admission.release(accepted);
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", abort);
 			}
 		}
+		if (Number.isFinite(retryWaitMs)) return Response.json({error:{code:"rate_limit_exceeded", message:"Eligible API credentials are temporarily rate limited. Retry after the indicated delay.", retry_after_ms:Math.ceil(retryWaitMs)}}, {status:429, headers:{"retry-after":String(Math.max(1,Math.ceil(retryWaitMs/1000)))}});
 		if (lastRejection) return lastRejection;
 		// A 401/403 here belongs to the API key, not the desktop login; the native
 		// client must not read an exhausted credential pool as a bad login.
@@ -472,6 +495,10 @@ export class ApiModelRuntime {
 	recordStreamFailure(credential: ApiRouteCredential, alias: string, body: Record<string, unknown>, error: unknown): void {
 		const route = parseModelRoute(alias);
 		if (route.kind !== credential.kind) return;
+		if (isRecord(error) && isRecord(error.error) && error.error.code === "rate_limit_exceeded") {
+			this.rateBackoff.penalize(this.rateBackoff.key(credential, route.upstreamModel), apiRetryDelayMs(error, this.now()));
+			return;
+		}
 		const rejection = classifyCapabilityFailure(400, error);
 		if (!rejection) return;
 		const effort = isRecord(body.reasoning) && typeof body.reasoning.effort === "string" ? body.reasoning.effort : undefined;
