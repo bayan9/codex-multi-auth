@@ -156,6 +156,7 @@ class SocketSession {
 	private readonly openedAt = new WeakMap<WebSocket, number>();
 	private readonly transportEvidence = new WeakMap<WebSocket, SocketTransportEvidence>();
 	readonly owners = new Map<string, WebSocket>();
+	private readonly interrupts = new Map<string, () => void>();
 	readonly chains = new Map<string, Chain>();
 	bytes = 0;
 	controller: AbortController | undefined;
@@ -174,12 +175,54 @@ class SocketSession {
 	) {}
 	close() {
 		this.closed = true;
+		for (const cleanup of this.interrupts.values()) cleanup();
 		this.controller?.abort();
 		for (const socket of this.channels.values()) socket.terminate();
 		this.channels.clear();
 		this.owners.clear();
 		this.chains.clear();
 		this.bytes = 0;
+	}
+	/** Interrupt acknowledgements can follow the terminal generation event. */
+	interrupt(event: Json, send: (event: Json) => void): void {
+		const id = event.response_id;
+		if (typeof id !== "string" || !id || id.length > 1024) {
+			send(wireError("invalid_websocket_interrupt"));
+			return;
+		}
+		const failed = () => send({ type: "response.interrupt.failed", response_id: id });
+		const owner = this.owners.get(id);
+		if (event.mode !== "discard_partial_items" || !owner || owner.readyState !== WebSocket.OPEN) {
+			failed();
+			return;
+		}
+		// Native sends one interrupt per response. Do not duplicate it upstream.
+		if (this.interrupts.has(id)) return;
+		if (this.interrupts.size >= 64) { failed(); return; }
+		const cleanup = () => {
+			clearTimeout(timer);
+			owner.off("message", onMessage);
+			owner.off("close", onClose);
+			this.interrupts.delete(id);
+		};
+		const onClose = () => { cleanup(); if (!this.closed) failed(); };
+		const onMessage = (raw: WebSocket.RawData, binary: boolean) => {
+			if (binary) return;
+			let acknowledgement: unknown;
+			try { acknowledgement = JSON.parse(raw.toString()); } catch { return; }
+			if (!isRecord(acknowledgement) || acknowledgement.response_id !== id ||
+				(acknowledgement.type !== "response.interrupt.accepted" && acknowledgement.type !== "response.interrupt.failed")) return;
+			cleanup();
+			send({ type: acknowledgement.type, response_id: id });
+		};
+		const timer = setTimeout(onClose, this.upstreamSilenceMs);
+		timer.unref();
+		this.interrupts.set(id, cleanup);
+		owner.on("message", onMessage);
+		owner.once("close", onClose);
+		owner.send(JSON.stringify({ type: "response.interrupt", response_id: id, mode: "discard_partial_items" }), error => {
+			if (error && this.interrupts.get(id) === cleanup) onClose();
+		});
 	}
 	remember(id: string, body: Json, output: unknown[], pool: string) {
 		const bytes = Buffer.byteLength(JSON.stringify({ body, output }));
@@ -495,6 +538,8 @@ class SocketSession {
 					const event: unknown = JSON.parse(text);
 					if (!isRecord(event) || typeof event.type !== "string")
 						throw Error("Invalid response event");
+					// Owned control listeners deliver these even after this stream ends.
+					if (event.type === "response.interrupt.accepted" || event.type === "response.interrupt.failed") return;
 					eventCount++;
 					if (event.type === "error" && !accepted) {
 						finished = true;
@@ -838,6 +883,10 @@ export class ResponsesWebSocketGateway {
 				owner.send(raw.toString(), (error) => {
 					if (error) send(wireError("websocket_steer_failed", 502));
 				});
+				return;
+			}
+			if (event.type === "response.interrupt") {
+				session.interrupt(event, send);
 				return;
 			}
 			if (event.type !== "response.create") {
