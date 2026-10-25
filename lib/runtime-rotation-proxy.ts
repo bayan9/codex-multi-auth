@@ -1711,6 +1711,8 @@ async function handleRequestInner(
 				return;
 			}
 			const apiRuntime=getApiModelRuntime(state);
+			let apiResponse: Response | undefined;
+			let apiResponseSucceeded = false;
 			const controller = new AbortController();
 			const abort = () => {
 				if (!res.writableEnded) controller.abort();
@@ -1745,6 +1747,7 @@ async function handleRequestInner(
 						});
 					},
 				);
+				apiResponse = upstream;
 				const scanner = createUsageStreamScanner({
 					contentType: upstream.headers.get("content-type"),
 					onEvent: event => responseOutcome.observe(event),
@@ -1764,6 +1767,7 @@ async function handleRequestInner(
 				const clientDisconnected = !forwarded && !streamErrored && !res.writableEnded;
 				const attemptedCredential = attemptedCredentialIndex === undefined ? undefined : apiRoutes[attemptedCredentialIndex];
 				if (!forwarded && !clientDisconnected && attemptedCredential) apiRuntime.recordStreamFailure(attemptedCredential, context.model, body, responseOutcome.rejection);
+				apiResponseSucceeded = forwarded && upstream.ok;
 				if (apiRuntime.lastPersistenceError) state.status.lastError = apiRuntime.lastPersistenceError;
 				await usageRecorder.record({
 					outcome: forwarded && upstream.ok ? "success" : clientDisconnected ? "cancelled" : "failure",
@@ -1778,6 +1782,7 @@ async function handleRequestInner(
                 }
                 throw error;
             } finally {
+				if (apiResponse) apiRuntime.completeRequest(apiResponse, apiResponseSucceeded);
 				res.off("close", abort);
 			}
 			return;

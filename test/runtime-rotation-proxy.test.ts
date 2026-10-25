@@ -5698,6 +5698,32 @@ it("clamps a reference catalog's context to the serving pool",async()=>{
 });
 
 describe("explicit API model routes",()=>{
+	it("releases API recovery admission only after the forwarded stream completes", async () => {
+		let now = 1_800_000_000_000, posts = 0;
+		let stream!: ReadableStreamDefaultController<Uint8Array>;
+		const routes = [{id:"fixture",label:"Fixture",kind:"api" as const,apiKey:"fixture-key",enabled:true,priority:0,visibleModels:["exclusive"]}];
+		const {fetchImpl} = createRecordingFetch(call => {
+			if (call.url.endsWith("/models")) return Response.json({data:[{id:"exclusive"}]});
+			posts++;
+			if (posts === 1) return Response.json({error:{code:"rate_limit_exceeded"}}, {status:429,headers:{"retry-after":"1"}});
+			if (posts > 2) return textEventStream('data: {"type":"response.completed","response":{}}\n\n');
+			return new Response(new ReadableStream<Uint8Array>({start(controller) {stream=controller;controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));}}),{headers:{"content-type":"text/event-stream"}});
+		});
+		const proxy=await startProxy({accountManager:new AccountManager(undefined,createStorage(now,1)),fetchImpl,options:{now:()=>now,readApiRoutes:async()=>routes}});
+		const body={model:"api/exclusive",input:"fixture",stream:true};
+		const limited=await postResponses(proxy,body); expect(limited.status).toBe(429); await limited.text();
+		now+=2000;
+		const recovery=await postResponses(proxy,body);
+		expect(recovery.status).toBe(200);
+		const blocked=await postResponses(proxy,body); expect(blocked.status).toBe(429); await blocked.text();
+		expect(posts).toBe(2);
+		stream.enqueue(new TextEncoder().encode('data: {"type":"response.completed","response":{}}\n\n'));stream.close();
+		await recovery.text();
+		await vi.waitFor(async()=>{
+			const next=await postResponses(proxy,body); expect(next.status).toBe(200); await next.text();
+		});
+		expect(posts).toBe(3);
+	});
 	it.each(["api", "zdr"] as const)("records interrupted %s streams as cancellation", async kind => {
 		const recorded: Record<string, unknown>[] = [];
 		vi.spyOn(runtimePolicy, "createRuntimeUsageRecorder").mockImplementation(() => ({

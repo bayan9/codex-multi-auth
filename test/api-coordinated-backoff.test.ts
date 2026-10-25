@@ -11,6 +11,26 @@ const limited = (after: string, code = "rate_limit_exceeded") => Response.json({
 const request = (runtime: ApiModelRuntime, routes = [route()], model = "exclusive") => runtime.request(`api/${model}`, {model:`api/${model}`}, routes);
 
 describe("coordinated API backoff", () => {
+ it("holds recovery admission through a pending HTTP 200 stream and preserves strikes on streamed failure", async () => {
+  let now = 1_800_000_000_000, posts = 0;
+  const runtime = new ApiModelRuntime(async (_url,init) => {
+   if(init?.method !== "POST") return catalog();
+   posts++;
+   return posts === 1 ? limited("0") : new Response(new ReadableStream({start(){}}), {headers:{"content-type":"text/event-stream"}});
+  },()=>now);
+  expect((await request(runtime)).status).toBe(429);
+  now += 1500;
+  const recovery = await request(runtime);
+  expect(recovery.status).toBe(200);
+  expect((await request(runtime)).status).toBe(429);
+  expect(posts).toBe(2);
+  runtime.recordStreamFailure(route(),"api/exclusive",{}, {error:{code:"rate_limit_exceeded"}});
+  runtime.completeRequest(recovery, false);
+  now += 1500;
+  expect((await request(runtime)).status).toBe(429);
+  expect(posts).toBe(2);
+  await recovery.body?.cancel();
+ });
  it("never clears a newer penalty when an older recovery succeeds", () => {
   let now = 1000;
   const backoff = new ApiRateBackoff(()=>now);

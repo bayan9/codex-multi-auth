@@ -149,6 +149,7 @@ export class ApiModelRuntime {
 	lastPersistenceError: string | null = null;
 	private readonly failures = new RuntimeCapabilityFailures(() => this.now());
 	private readonly rateBackoff = new ApiRateBackoff(() => this.now());
+	private readonly responseAdmissions = new WeakMap<Response, (success: boolean) => void>();
 	private readonly visibility = new Map<string, string[]>();
 	private readonly snapshots = new Map<string, RouteCatalog>();
 	private activeKeys = new Set<string>();
@@ -422,7 +423,6 @@ export class ApiModelRuntime {
 				lastStatus = response.status;
 				lastRejection = undefined;
 				if (response.ok) {
-					accepted = true;
 					const headers = new Headers();
 					for (const name of [
 						"content-type",
@@ -433,10 +433,13 @@ export class ApiModelRuntime {
 						const value = response.headers.get(name);
 						if (value) headers.set(name, value);
 					}
-					return new Response(response.body, {
+					const forwarded = new Response(response.body, {
 						status: response.status,
 						headers,
 					});
+					this.responseAdmissions.set(forwarded, admission.release);
+					accepted = true;
+					return forwarded;
 				}
 				const errorBody = await readErrorBody(response, 5000, 65536);
 				let data: unknown;
@@ -481,7 +484,7 @@ export class ApiModelRuntime {
 				lastStatus = 502;
 				lastRejection = undefined;
 			} finally {
-				admission.release(accepted);
+				if (!accepted) admission.release(false);
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", abort);
 			}
@@ -491,6 +494,12 @@ export class ApiModelRuntime {
 		// A 401/403 here belongs to the API key, not the desktop login; the native
 		// client must not read an exhausted credential pool as a bad login.
 		return this.failure(lastStatus === 401 || lastStatus === 403 ? 503 : lastStatus, "model_route_pool_unavailable");
+	}
+	/** Called by the forwarding owner after recording the stream's terminal outcome. */
+	completeRequest(response: Response, success: boolean): void {
+		const release = this.responseAdmissions.get(response);
+		this.responseAdmissions.delete(response);
+		release?.(success);
 	}
 	recordStreamFailure(credential: ApiRouteCredential, alias: string, body: Record<string, unknown>, error: unknown): void {
 		const route = parseModelRoute(alias);
