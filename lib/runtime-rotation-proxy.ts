@@ -476,7 +476,7 @@ function getApiModelRuntime(state:RotationProxyState):ApiModelRuntime {
    ]};
    void saveModelInventory(state.catalogInventory).catch(()=>{state.status.lastError="Model discovery status could not be saved";});
   }
- });
+ },state.apiAdmissionWaitMs);
  return state.apiModelRuntime;
 }
 function setCatalogEtag(state:RotationProxyState,models:RouteModel[]):string {
@@ -1286,6 +1286,7 @@ export async function startRuntimeRotationProxy(
 		networkErrorCooldownMs,
 		serverErrorCooldownMs,
 		modelCapacityRetryMs,
+		apiAdmissionWaitMs: options.apiAdmissionWaitMs,
 		tokenInvalidationCooldownMs,
 		minRotationIntervalMs,
 		pidOffsetEnabled,

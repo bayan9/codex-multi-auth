@@ -5709,7 +5709,7 @@ describe("explicit API model routes",()=>{
 			if (posts > 2) return textEventStream('data: {"type":"response.completed","response":{}}\n\n');
 			return new Response(new ReadableStream<Uint8Array>({start(controller) {stream=controller;controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));}}),{headers:{"content-type":"text/event-stream"}});
 		});
-		const proxy=await startProxy({accountManager:new AccountManager(undefined,createStorage(now,1)),fetchImpl,options:{now:()=>now,readApiRoutes:async()=>routes}});
+		const proxy=await startProxy({accountManager:new AccountManager(undefined,createStorage(now,1)),fetchImpl,options:{now:()=>now,apiAdmissionWaitMs:0,readApiRoutes:async()=>routes}});
 		const body={model:"api/exclusive",input:"fixture",stream:true};
 		const limited=await postResponses(proxy,body); expect(limited.status).toBe(429); await limited.text();
 		now+=2000;

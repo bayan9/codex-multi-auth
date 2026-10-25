@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiModelRuntime } from "../lib/runtime/api-model-runtime.js";
 import type { ApiRouteCredential } from "../lib/api-route-store.js";
 import { ResponseOutcome } from "../lib/request/response-outcome.js";
@@ -9,11 +9,63 @@ const route = (id = "one"): ApiRouteCredential => ({ id, label: id, kind: "api",
 const catalog = () => Response.json({data: [{id: "exclusive"}, {id: "other"}]});
 const limited = (after: string, code = "rate_limit_exceeded") => Response.json({error:{code}}, {status:429, headers:{"retry-after":after}});
 const request = (runtime: ApiModelRuntime, routes = [route()], model = "exclusive") => runtime.request(`api/${model}`, {model:`api/${model}`}, routes);
+class ImmediateRuntime extends ApiModelRuntime {
+ constructor(fetcher: typeof fetch, now: () => number = Date.now) { super(fetcher,now,undefined,undefined,undefined,0); }
+}
 
 describe("coordinated API backoff", () => {
+ it("waits before an unsent create instead of spending the native retry budget", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000);
+  const jitter=vi.spyOn(Math,"random").mockReturnValue(0);
+  let posts=0;
+  const runtime=new ApiModelRuntime(async(_url,init)=>init?.method!=="POST"?catalog():++posts===1?limited("2"):new Response("ok"));
+  try {
+   expect((await request(runtime)).status).toBe(429);
+   const pending=request(runtime);
+   await vi.advanceTimersByTimeAsync(1999);
+   expect(posts).toBe(1);
+   await vi.advanceTimersByTimeAsync(1);
+   const result=await pending;
+   expect(result.status).toBe(200); expect(posts).toBe(2);
+   runtime.completeRequest(result,true);
+  } finally {jitter.mockRestore();vi.useRealTimers();}
+ });
+ it("bounds admission waiting and cancels without an upstream send", async () => {
+  let posts=0;
+  const runtime=new ApiModelRuntime(async(_url,init)=>init?.method!=="POST"?catalog():(posts++,limited("60")),Date.now,undefined,undefined,undefined,20);
+  expect((await request(runtime)).status).toBe(429);
+  const deferred=await request(runtime);
+  expect(deferred.status).toBe(429);expect(posts).toBe(1);
+  const controller=new AbortController();
+  const waiting=runtime.request("api/exclusive",{},[route()],controller.signal);
+  controller.abort();
+  await expect(waiting).rejects.toMatchObject({name:"AbortError"});expect(posts).toBe(1);
+ });
+ it("cancels a parked request and never resends an earlier failed candidate", async () => {
+  vi.useFakeTimers();vi.setSystemTime(1_800_000_000_000);
+  const jitter=vi.spyOn(Math,"random").mockReturnValue(0);
+  const posts:string[]=[];
+  const runtime=new ApiModelRuntime(async(_url,init)=>{
+   if(init?.method!=="POST")return catalog();
+   const key=new Headers(init.headers).get("authorization")??"";posts.push(key);
+   return key.endsWith("backup")&&posts.length>2 ? new Response("ok") : limited("2");
+  });
+  try {
+   expect((await request(runtime,[route("backup")])).status).toBe(429);
+   const abort=new AbortController();
+   const parked=runtime.request("api/exclusive",{},[route("backup")],abort.signal);
+   const cancelled=expect(parked).rejects.toMatchObject({name:"AbortError"});
+   await vi.advanceTimersByTimeAsync(100);
+   abort.abort();await cancelled;
+   const pending=request(runtime,[route(),{...route("backup"),priority:2}]);
+   await vi.advanceTimersByTimeAsync(2000);
+   expect((await pending).status).toBe(200);
+   expect(posts).toEqual(["Bearer fixture-backup","Bearer fixture-one","Bearer fixture-backup"]);
+  } finally {jitter.mockRestore();vi.useRealTimers();}
+ });
  it("holds recovery admission through a pending HTTP 200 stream and preserves strikes on streamed failure", async () => {
   let now = 1_800_000_000_000, posts = 0;
-  const runtime = new ApiModelRuntime(async (_url,init) => {
+  const runtime = new ImmediateRuntime(async (_url,init) => {
    if(init?.method !== "POST") return catalog();
    posts++;
    return posts === 1 ? limited("0") : new Response(new ReadableStream({start(){}}), {headers:{"content-type":"text/event-stream"}});
@@ -54,7 +106,7 @@ describe("coordinated API backoff", () => {
  it("honors fractional Retry-After, shares aliases of a credential, and admits one recovery request", async () => {
   let now = 1_800_000_000_000, posts = 0;
   let release!: (response: Response) => void;
-  const runtime = new ApiModelRuntime(async (_url, init) => {
+  const runtime = new ImmediateRuntime(async (_url, init) => {
    if(init?.method !== "POST") return catalog();
    posts++;
    if(posts === 1) return limited("2.5");
@@ -78,7 +130,7 @@ describe("coordinated API backoff", () => {
  });
  it("uses another eligible credential immediately, but keeps regions and models isolated", async () => {
   let posts = 0;
-  const runtime = new ApiModelRuntime(async (_url, init) => {
+  const runtime = new ImmediateRuntime(async (_url, init) => {
    if(init?.method !== "POST") return catalog();
    posts++;
    return new Headers(init.headers).get("authorization")?.endsWith("one") && JSON.parse(String(init.body)).model === "exclusive" ? limited("120") : new Response("ok");
@@ -91,7 +143,7 @@ describe("coordinated API backoff", () => {
  });
  it("learns streamed rate limits for later creates without replaying the accepted stream", async () => {
   let posts = 0;
-  const runtime = new ApiModelRuntime(async (_url,init) => {
+  const runtime = new ImmediateRuntime(async (_url,init) => {
    if(init?.method !== "POST") return catalog();
    posts++;
    return new Response('data: {"type":"response.failed"}\n\n');
@@ -105,7 +157,7 @@ describe("coordinated API backoff", () => {
  it("does not shorten long HTTP-date deadlines or treat insufficient quota as transient", async () => {
   let now = 1_800_000_000_000, posts = 0;
   const deadline = now + 3_600_000;
-  const runtime = new ApiModelRuntime(async (_url,init) => {
+  const runtime = new ImmediateRuntime(async (_url,init) => {
    if(init?.method !== "POST") return catalog();
    posts++;
    return limited(new Date(deadline).toUTCString());
@@ -115,7 +167,7 @@ describe("coordinated API backoff", () => {
   now += 60_000;
   expect((await request(runtime)).status).toBe(429);
   expect(posts).toBe(1);
-  const quota = new ApiModelRuntime(async (_url,init)=>init?.method === "POST" ? limited("60","insufficient_quota") : catalog());
+  const quota = new ImmediateRuntime(async (_url,init)=>init?.method === "POST" ? limited("60","insufficient_quota") : catalog());
   expect(await (await request(quota)).json()).toMatchObject({error:{code:"insufficient_quota"}});
  });
 });

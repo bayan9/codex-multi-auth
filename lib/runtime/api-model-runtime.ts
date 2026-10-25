@@ -176,6 +176,7 @@ export class ApiModelRuntime {
 			forceProbes: boolean,
 		) => Promise<RouteModel[]>,
 		private readonly onCatalogUpdated?: () => void,
+		private readonly admissionWaitMs = 30_000,
 	) {}
 	private key(route: ApiRouteCredential): string {
 		return createHash("sha256")
@@ -372,7 +373,12 @@ export class ApiModelRuntime {
 		let lastStatus = 503;
 		let lastRejection: Response | undefined;
 		let selectedRegion: "global" | "us" | undefined;
+		const attemptedKeys = new Set<string>();
+		const admissionDeadline = performance.now() + Math.max(0, Math.min(60_000, this.admissionWaitMs));
+		let waits = 0;
+		for (;;) {
 		let retryWaitMs = Infinity;
+		let deferred = false;
 		for (const candidate of route.candidates) {
 			const credential = routes.find((r) => r.id === candidate.id);
 			if (!credential) continue;
@@ -395,11 +401,15 @@ export class ApiModelRuntime {
 			selectedRegion ??= candidateRegion;
 			if (signal?.aborted) throw new ClientCancellationError();
 			const rateKey = this.rateBackoff.key(credential, route.upstreamModel);
+			// A send that returned headers or failed ambiguously is never replayed here.
+			if (attemptedKeys.has(rateKey)) continue;
 			const admission = this.rateBackoff.acquire(rateKey);
 			if (admission.waitMs > 0) {
 				retryWaitMs = Math.min(retryWaitMs, admission.waitMs);
+				deferred = true;
 				continue;
 			}
+			attemptedKeys.add(rateKey);
 			let accepted = false;
 			const controller = new AbortController();
 			const abort = () => controller.abort();
@@ -489,11 +499,25 @@ export class ApiModelRuntime {
 				signal?.removeEventListener("abort", abort);
 			}
 		}
+		if (deferred && Number.isFinite(retryWaitMs) && waits < 32 && retryWaitMs <= admissionDeadline - performance.now()) {
+			waits++;
+			await this.waitForAdmission(retryWaitMs, signal);
+			continue;
+		}
 		if (Number.isFinite(retryWaitMs)) return Response.json({error:{code:"rate_limit_exceeded", message:"Eligible API credentials are temporarily rate limited. Retry after the indicated delay.", retry_after_ms:Math.ceil(retryWaitMs)}}, {status:429, headers:{"retry-after":String(Math.max(1,Math.ceil(retryWaitMs/1000)))}});
 		if (lastRejection) return lastRejection;
 		// A 401/403 here belongs to the API key, not the desktop login; the native
 		// client must not read an exhausted credential pool as a bad login.
 		return this.failure(lastStatus === 401 || lastStatus === 403 ? 503 : lastStatus, "model_route_pool_unavailable");
+		}
+	}
+	private waitForAdmission(ms: number, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return Promise.reject(new ClientCancellationError());
+		return new Promise((resolve, reject) => {
+			const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(new ClientCancellationError()); };
+			const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, Math.max(1, ms));
+			signal?.addEventListener("abort", abort, {once:true});
+		});
 	}
 	/** Called by the forwarding owner after recording the stream's terminal outcome. */
 	completeRequest(response: Response, success: boolean): void {
