@@ -88,6 +88,25 @@ describe("discovery recovery", () => {
   expect(response.ok).toBe(false);
   expect(fetcher).toHaveBeenCalledTimes(1);
  });
+ it.each([503,429])("discovers a cold same-region backup after warm primary HTTP %s", async status => {
+  vi.useFakeTimers();
+  const sent: string[] = [];
+  const discovered: string[] = [];
+  const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+   const key = new Headers(init?.headers).get("authorization")!;
+   if (init?.method !== "POST") { discovered.push(key); return catalog(); }
+   sent.push(key);
+   return key === "Bearer fixture-one" ? Response.json({error:{code:"rate_limit_exceeded"}},{status,headers:{"retry-after":"60"}}) : Response.json({id:"fixture-success"});
+  });
+  const runtime = new ApiModelRuntime(fetcher as typeof fetch);
+  await runtime.catalogs([route()]);
+  const pending = runtime.request("api/example", {}, [route(), route("backup"), {...route("foreign"),region:"us"}, {...route("private"),kind:"psp"}]);
+  await vi.runAllTimersAsync();
+  const response = await pending;
+  expect(response.status).toBe(200);
+  expect(sent).toEqual(["Bearer fixture-one","Bearer fixture-backup"]);
+  expect(discovered).toEqual(["Bearer fixture-one","Bearer fixture-backup"]);
+ });
  it.each([401,403])("removes routing evidence on HTTP %s and never exposes the response body", async status => {
   vi.useFakeTimers();
   const fetcher=vi.fn().mockResolvedValueOnce(catalog()).mockResolvedValueOnce(new Response("secret fixture",{status}));

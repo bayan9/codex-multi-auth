@@ -434,6 +434,7 @@ export class ApiModelRuntime {
 		const attemptedKeys = new Set<string>();
 		const admissionDeadline = performance.now() + Math.max(0, Math.min(60_000, this.admissionWaitMs));
 		let waits = 0;
+        let discoveredBackups = false;
 		for (;;) {
 		let retryWaitMs = Infinity;
 		let deferred = false;
@@ -560,6 +561,29 @@ export class ApiModelRuntime {
 				signal?.removeEventListener("abort", abort);
 			}
 		}
+        // The warm fast path must not turn a partial catalog into an exhausted
+        // pool. Discover omitted backups once, without crossing pool or region.
+        if (!discoveredBackups) {
+            discoveredBackups = true;
+            const backups = routes.filter(credential => credential.enabled &&
+                credential.kind === route.kind &&
+                (selectedRegion === undefined || (credential.region ?? "global") === selectedRegion) &&
+                !route.candidates.some(candidate => candidate.id === credential.id));
+            if (backups.length) {
+                if (signal?.aborted) throw new ClientCancellationError();
+                const catalogs = await this.catalogs(backups, false, false, true, false, route.kind);
+                this.activeKeys = new Set(routes.map(credential => this.key(credential)));
+                if (signal?.aborted) throw new ClientCancellationError();
+                const resolved = resolveModelRoute(alias, catalogs, {
+                    serviceTier: route.serviceTier,
+                    reasoningEffort: isRecord(body.reasoning) && typeof body.reasoning.effort === "string" ? body.reasoning.effort : undefined,
+                });
+                if (resolved.candidates.length) {
+                    route.candidates.push(...resolved.candidates);
+                    continue;
+                }
+            }
+        }
 		if (deferred && Number.isFinite(retryWaitMs) && waits < 32 && retryWaitMs <= admissionDeadline - performance.now()) {
 			waits++;
 			await this.waitForAdmission(retryWaitMs, signal);
