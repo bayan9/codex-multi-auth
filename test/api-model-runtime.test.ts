@@ -444,7 +444,7 @@ it("enriches capability metadata when a failed cold catalog recovers",async()=>{
  const enrich=vi.fn(async(models:import('../lib/model-route-policy.js').RouteModel[])=>models.map(m=>({...m,supported_reasoning_levels:[{effort:'high'}]})));
  const runtime=new ApiModelRuntime(fetcher as typeof fetch,()=>now,undefined,enrich);
  await runtime.request('zdr/exclusive',{reasoning:{effort:'high'}},[credential('private')]);
- now+=6000;healthy=true;
+ now+=30_000;healthy=true;
  expect((await runtime.request('zdr/exclusive',{reasoning:{effort:'high'}},[credential('private')])).status).toBe(200);
 });
 

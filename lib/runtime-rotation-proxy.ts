@@ -472,7 +472,7 @@ function getApiModelRuntime(state:RotationProxyState):ApiModelRuntime {
   if(state.catalogInventory){
    state.catalogInventory={...state.catalogInventory,checkedAt:state.now(),entries:[
     ...state.catalogInventory.entries.filter(entry=>entry.kind==="oauth"),
-    ...runtime.statuses(state.catalogApiRoutes??[]).map(entry=>({id:modelScopeId(entry.kind,entry.id),label:entry.label,kind:entry.kind,enabled:runtime.cachedCatalogs().some(c=>c.id===entry.id&&c.enabled),checkedAt:entry.checkedAt,error:entry.error,models:entry.availableModels,visibleModels:entry.visibleModels,entitlements:entry.entitlements})),
+    ...runtime.statuses(state.catalogApiRoutes??[]).map(entry=>({id:modelScopeId(entry.kind,entry.id),label:entry.label,kind:entry.kind,enabled:runtime.cachedCatalogs().some(c=>c.id===entry.id&&c.enabled),checkedAt:entry.checkedAt,error:entry.error,failure:entry.failure,lastSuccessfulAt:entry.lastSuccessfulAt,models:entry.availableModels,visibleModels:entry.visibleModels,entitlements:entry.entitlements})),
    ]};
    void saveModelInventory(state.catalogInventory).catch(()=>{state.status.lastError="Model discovery status could not be saved";});
   }
@@ -2228,6 +2228,7 @@ async function handleRequestInner(
 								enabled: apiCatalogs.some((c) => c.id === a.id && c.enabled),
 								checkedAt: a.checkedAt,
 								error: a.error,
+ failure:a.failure,lastSuccessfulAt:a.lastSuccessfulAt,
 								models: a.availableModels,
 								visibleModels: a.visibleModels,
  entitlements:a.entitlements,

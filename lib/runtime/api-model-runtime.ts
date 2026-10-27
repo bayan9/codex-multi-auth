@@ -131,6 +131,7 @@ export async function boundedJson(
 export interface ApiCatalogFailure {
  kind: "http" | "timeout" | "network" | "invalid_catalog";
  status?: number;
+ retryAt?: number;
 }
 export interface ApiCatalogStatus {
 	id: string;
@@ -140,12 +141,17 @@ export interface ApiCatalogStatus {
 	checkedAt: number;
 	error: boolean;
  failure?: ApiCatalogFailure;
+ lastSuccessfulAt?: number;
 	availableModels: string[];
 	visibleModels: string[];
 	entitlements: ReturnType<typeof modelEntitlements>[];
 }
 export class ApiModelRuntime {
-	private readonly discoveryUpdates = new Map<string, Promise<ApiRouteCredential>>();
+	private discoveryQueue: Promise<void> = Promise.resolve();
+ private nextDiscoveryAt = 0;
+ private readonly discoveryInFlight = new Map<string, Promise<void>>();
+ private readonly discoveryStrikes = new Map<string, number>();
+ private readonly discoveryUpdates = new Map<string, Promise<ApiRouteCredential>>();
 	lastPersistenceError: string | null = null;
 	private readonly failures = new RuntimeCapabilityFailures(() => this.now());
 	private readonly rateBackoff = new ApiRateBackoff(() => this.now());
@@ -160,7 +166,7 @@ export class ApiModelRuntime {
 	}
 	private readonly cache = new Map<
 		string,
-		{ at: number; models: RouteModel[]; error: boolean; failure?: ApiCatalogFailure }
+		{ at: number; models: RouteModel[]; error: boolean; failure?: ApiCatalogFailure; lastSuccessfulAt?: number }
 	>();
 	constructor(
 		private readonly fetchImpl: typeof fetch = fetch,
@@ -185,25 +191,28 @@ export class ApiModelRuntime {
 			.update(route.apiKey + (route.region === "us" ? "\0" + apiBaseUrl(route) : ""))
 			.digest("hex");
 	}
-	async catalogs(
-		routes: ApiRouteCredential[],
-		refresh = false,
-		forceProbes = false,
-		waitForCapabilities = true,
-		waitForPersistence = true,
-        requestKind?: "oauth" | "api" | "zdr",
-	): Promise<RouteCatalog[]> {
-		this.activeKeys = new Set(routes.map((route) => this.key(route)));
-		return mapWithConcurrency(requestKind ? routes.filter(route => route.kind === requestKind) : routes, 3, async (route) => {
-					const key = this.key(route),
-						cached = this.cache.get(key);
+ private async refreshCatalog(route: ApiRouteCredential, refresh: boolean): Promise<void> {
+  const key = this.key(route);
+  const current = this.cache.get(key);
+  // Warm traffic and callers observing a cooldown never queue behind a slow refresh.
+  if (!route.enabled || (current?.failure?.retryAt && current.failure.retryAt > this.now()) || (!refresh && current && !current.error && current.at + 300_000 > this.now())) return;
+  const existing = this.discoveryInFlight.get(key);
+  if (existing) return existing;
+  const job = this.discoveryQueue.then(async () => {
+   const cached = this.cache.get(key);
+   if (!route.enabled || (cached?.failure?.retryAt && cached.failure.retryAt > this.now()) || (!refresh && cached && !cached.error && cached.at + 300_000 > this.now())) return;
+   const wait = this.nextDiscoveryAt - this.now();
+   if (wait > 0) await new Promise<void>(resolve => setTimeout(resolve, wait));
+   try {
 					if (
 						route.enabled &&
-						(refresh ||
+						(!cached?.failure?.retryAt || cached.failure.retryAt <= this.now()) &&
+                        (refresh ||
 							!cached ||
 							cached.at + (cached.error ? 5000 : 5 * 60_000) <= this.now())
 					) {
 						let models: RouteModel[] = [];
+                        let retryDelay = 0;
 						let error = false;
  let failure: ApiCatalogFailure | undefined;
  let receivedResponse = false;
@@ -220,6 +229,7 @@ export class ApiModelRuntime {
 							receivedResponse = true;
 							if (!response.ok) {
  failure = {kind: "http", status: response.status};
+ retryDelay = apiRetryDelayMs(null, this.now(), response.headers);
 								await response.body?.cancel();
 								throw Error("API catalog unavailable");
 							}
@@ -247,10 +257,39 @@ export class ApiModelRuntime {
  failure ??= {kind: cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError") ? "timeout" : receivedResponse ? "invalid_catalog" : "network"};
 							error = true;
 						}
-						if (this.cache.size >= 100)
-							this.cache.delete(this.cache.keys().next().value ?? "");
-						this.cache.set(key, { at: this.now(), models, error, failure });
+						if (this.cache.size >= 100 && !this.cache.has(key)) {
+                            const oldest = this.cache.keys().next().value ?? "";
+                            this.cache.delete(oldest);
+                            this.discoveryStrikes.delete(oldest);
+                        }
+						const strikes = error ? (this.discoveryStrikes.get(key) ?? 0) + 1 : 0;
+                        if (error) this.discoveryStrikes.set(key, strikes); else this.discoveryStrikes.delete(key);
+                        if (failure) failure.retryAt = Math.min(8.64e15, this.now() + Math.max(retryDelay, Math.min(300_000, 30_000 * 2 ** Math.min(strikes - 1, 4))));
+                        // Preserve display/routing evidence only for transient failures, never lost authorization.
+                        const transient = failure && (failure.kind !== "http" || failure.status === 429 || (failure.status ?? 0) >= 500);
+                        if (transient) models = cached?.models ?? [];
+                        this.cache.set(key, { at: this.now(), models, error, failure, lastSuccessfulAt: error ? cached?.lastSuccessfulAt : this.now() });
 					}
+   } finally { this.nextDiscoveryAt = this.now() + 250; }
+  });
+  this.discoveryInFlight.set(key, job);
+  this.discoveryQueue = job.catch(() => undefined);
+  try { await job; } finally { if (this.discoveryInFlight.get(key) === job) this.discoveryInFlight.delete(key); }
+ }
+
+	async catalogs(
+		routes: ApiRouteCredential[],
+		refresh = false,
+		forceProbes = false,
+		waitForCapabilities = true,
+		waitForPersistence = true,
+        requestKind?: "oauth" | "api" | "zdr",
+	): Promise<RouteCatalog[]> {
+		this.activeKeys = new Set(routes.map((route) => this.key(route)));
+		return mapWithConcurrency(requestKind ? routes.filter(route => route.kind === requestKind) : routes, 3, async (route) => {
+					const key = this.key(route),
+						cached = this.cache.get(key);
+                    await this.refreshCatalog(route, refresh);
 					const entry = this.cache.get(key);
 					if (route.enabled && entry && !entry.error && this.updateDiscovery) {
 						let pending = this.discoveryUpdates.get(key);
@@ -316,6 +355,7 @@ export class ApiModelRuntime {
 				checkedAt: c?.at ?? 0,
 				error: c?.error ?? true,
  failure: c?.failure,
+ lastSuccessfulAt: c?.lastSuccessfulAt,
 				availableModels: c?.models.map((m) => m.slug) ?? [],
 				entitlements: (c?.models ?? [])
 					.filter((m) =>
