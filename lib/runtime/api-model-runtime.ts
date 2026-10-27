@@ -198,12 +198,18 @@ export class ApiModelRuntime {
   if (!route.enabled || (current?.failure?.retryAt && current.failure.retryAt > this.now()) || (!refresh && current && !current.error && current.at + 300_000 > this.now())) return;
   const existing = this.discoveryInFlight.get(key);
   if (existing) return existing;
-  const job = this.discoveryQueue.then(async () => {
-   const cached = this.cache.get(key);
-   if (!route.enabled || (cached?.failure?.retryAt && cached.failure.retryAt > this.now()) || (!refresh && cached && !cached.error && cached.at + 300_000 > this.now())) return;
+  // Serialize start slots, not network completion: an unhealthy endpoint must
+  // not hold every other credential behind its 15-second timeout.
+  const start = this.discoveryQueue.then(async () => {
    const wait = this.nextDiscoveryAt - this.now();
    if (wait > 0) await new Promise<void>(resolve => setTimeout(resolve, wait));
-   try {
+   this.nextDiscoveryAt = this.now() + 250;
+  });
+  this.discoveryQueue = start.catch(() => undefined);
+  const job = start.then(async () => {
+   const cached = this.cache.get(key);
+   if (!route.enabled || (cached?.failure?.retryAt && cached.failure.retryAt > this.now()) || (!refresh && cached && !cached.error && cached.at + 300_000 > this.now())) return;
+
 					if (
 						route.enabled &&
 						(!cached?.failure?.retryAt || cached.failure.retryAt <= this.now()) &&
@@ -270,10 +276,9 @@ export class ApiModelRuntime {
                         if (transient) models = cached?.models ?? [];
                         this.cache.set(key, { at: this.now(), models, error, failure, lastSuccessfulAt: error ? cached?.lastSuccessfulAt : this.now() });
 					}
-   } finally { this.nextDiscoveryAt = this.now() + 250; }
+
   });
   this.discoveryInFlight.set(key, job);
-  this.discoveryQueue = job.catch(() => undefined);
   try { await job; } finally { if (this.discoveryInFlight.get(key) === job) this.discoveryInFlight.delete(key); }
  }
 
@@ -385,14 +390,27 @@ export class ApiModelRuntime {
 					"model_requires_other_endpoint",
 					"This model uses a media, audio, embedding, or legacy endpoint and cannot serve a Codex Responses turn. Select a text/coding model.",
 				);
-			route = resolveModelRoute(alias, await this.catalogs(routes, false, false, true, false, parseModelRoute(alias).kind), {
+            const settings = {
 				serviceTier:
 					typeof body.service_tier === "string" ? body.service_tier : undefined,
 				reasoningEffort:
 					isRecord(body.reasoning) && typeof body.reasoning.effort === "string"
 						? body.reasoning.effort
 						: undefined,
-			});
+            };
+            // Resolve current policy against fresh evidence before waiting for
+            // unrelated cold catalogs. Never reuse an old policy snapshot.
+            const warmCatalogs: RouteCatalog[] = routes.flatMap(credential => {
+                const cached = this.cache.get(this.key(credential));
+                if (!credential.enabled || !cached || cached.error || cached.at + 300_000 <= this.now()) return [];
+                return [{ id: credential.id, kind: credential.kind, enabled: credential.enabled,
+                    priority: credential.priority, visibleModels: credential.visibleModels,
+                    models: cached.models.map(model => withRouteMetadata(model, credential)) }];
+            });
+            route = resolveModelRoute(alias, warmCatalogs, settings);
+            if (!route.candidates.length) {
+                route = resolveModelRoute(alias, await this.catalogs(routes, false, false, true, false, parseModelRoute(alias).kind), settings);
+            }
 		} catch {
 			return this.failure(400, "invalid_model_route");
 		}

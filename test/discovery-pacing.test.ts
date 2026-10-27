@@ -44,6 +44,50 @@ describe("discovery recovery", () => {
   await vi.advanceTimersByTimeAsync(0);
   try {expect(completed).toBe(true);} finally {release();await vi.runAllTimersAsync();await Promise.all([blocked,warm]);}
  });
+ it("sends a request through a warm route without waiting for another route's discovery", async () => {
+  vi.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+   if (init?.method === "POST") return Response.json({ id: "fixture-response" });
+   if (new Headers(init?.headers).get("authorization") === "Bearer fixture-cold") await gate;
+   return catalog();
+  });
+  const runtime = new ApiModelRuntime(fetcher as typeof fetch);
+  await runtime.catalogs([route()]);
+  let completed = false;
+  const request = runtime.request("api/example", {}, [route("cold"), route()]).then(response => { completed = response.ok; });
+  await vi.advanceTimersByTimeAsync(500);
+  try { expect(completed).toBe(true); }
+  finally { release(); await vi.runAllTimersAsync(); await request; }
+ });
+ it("paces a healthy region's discovery start without awaiting a stalled region", async () => {
+  vi.useFakeTimers();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const starts: number[] = [];
+  const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+   starts.push(Date.now());
+   if (new Headers(init?.headers).get("authorization") === "Bearer fixture-cold") await gate;
+   return catalog();
+  });
+  const runtime = new ApiModelRuntime(fetcher as typeof fetch);
+  const cold = runtime.catalogs([route("cold")]);
+  let completed = false;
+  const healthy = runtime.catalogs([{...route(), region:"us"}]).then(() => { completed = true; });
+  await vi.advanceTimersByTimeAsync(250);
+  try { expect(completed).toBe(true); expect(starts[1]! - starts[0]!).toBeGreaterThanOrEqual(250); }
+  finally { release(); await vi.runAllTimersAsync(); await Promise.all([cold,healthy]); }
+ });
+ it.each(["disabled", "hidden", "pool"])("does not let a warm catalog bypass current %s policy", async change => {
+  const fetcher = vi.fn(async () => catalog());
+  const runtime = new ApiModelRuntime(fetcher as typeof fetch);
+  await runtime.catalogs([route()]);
+  const changed = {...route(), ...(change === "disabled" ? {enabled:false} : change === "hidden" ? {visibleModels:[]} : {kind:"psp" as const})};
+  const response = await runtime.request("api/example", {}, [changed]);
+  expect(response.ok).toBe(false);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+ });
  it.each([401,403])("removes routing evidence on HTTP %s and never exposes the response body", async status => {
   vi.useFakeTimers();
   const fetcher=vi.fn().mockResolvedValueOnce(catalog()).mockResolvedValueOnce(new Response("secret fixture",{status}));
@@ -70,7 +114,7 @@ describe("discovery recovery", () => {
   expect((await loadModelInventory())?.entries[0]).toMatchObject(value.entries[0]!);
  });
  it("labels stale catalog data and prints a safe failure reason", () => {
-  const text = formatModelInventory({version:1,checkedAt:1000,entries:[{label:"one",kind:"api",enabled:true,checkedAt:1000,error:true,models:["example"],visibleModels:["example"],failure:{kind:"http",status:429},lastSuccessfulAt:500}]} as any,1000).join("\n");
+  const text = formatModelInventory({version:1,checkedAt:1000,entries:[{id:"api:fixture-discovery",label:"one",kind:"api",enabled:true,checkedAt:1000,error:true,models:["example"],visibleModels:["example"],failure:{kind:"http",status:429},lastSuccessfulAt:500} ]},1000).join("\n");
   expect(text).toContain("HTTP 429"); expect(text).toContain("stale"); expect(text).toContain("example");
  });
 });
