@@ -46,7 +46,7 @@ const entrySchema = z.object({
  changes:z.object({observedAt:z.number(),added:z.array(printable).max(10000),removed:z.array(printable).max(10000),capabilities:z.array(printable).max(10000)}).optional(),
  lastSuccessful:z.object({models:z.array(printable).max(10000),entitlements:z.array(entitlementSchema).max(1000).optional()}).optional(),
 	label: printable,
-	kind: z.enum(["oauth", "api", "zdr"]),
+	kind: z.enum(["oauth", "api", "zdr", "psp"]),
 	enabled: z.boolean(),
 	checkedAt: z.number(),
 	error: z.boolean(),
@@ -357,7 +357,7 @@ export async function refreshAndPrintModelInventory(
 			if (proxyClientVersion)
 				url.searchParams.set("client_version", proxyClientVersion);
    const clientApiKey = binding.state.clientApiKey;
-   const current = await withCheckProgress("Refreshing workspace catalogs and API/ZDR probes", async () => {
+   const current = await withCheckProgress("Refreshing workspace catalogs and API/ZDR/PSP probes", async () => {
 			const response = await (deps.fetchImpl ?? fetch)(url, {
 				headers: { authorization: `Bearer ${clientApiKey}` },
 				redirect: "error",
@@ -381,7 +381,7 @@ export async function refreshAndPrintModelInventory(
 			for (const line of formatModelInventory(withInventoryChanges(current,previous))) log(line);
 			return true;
 		}
-  const value = await withCheckProgress("Discovering workspace models and API/ZDR capabilities", async () => {
+  const value = await withCheckProgress("Discovering workspace models and API/ZDR/PSP capabilities", async () => {
         let apiConfigurationUnavailable = false;
 		const value = await discoverModelInventory(
 			await (deps.loadAccounts ?? loadAccounts)(),
@@ -448,7 +448,7 @@ function inventoryHighlights(inventory: ModelInventory): string[] {
   if(change.removed.length) lines.push(paint(`  No longer advertised on ${entry.label} (${stamp}): ${change.removed.join(", ")}`, "warning"));
   if(change.capabilities.length) lines.push(paint(`  CHANGED capabilities on ${entry.label} (${stamp}): ${change.capabilities.join(", ")}`, "accent"));
  }
- for(const kind of ["oauth","api","zdr"] as const) {
+ for(const kind of ["oauth","api","zdr","psp"] as const) {
   const enabled=inventory.entries.filter(e=>e.kind===kind && e.enabled);
   const successful=enabled.filter(e=>!e.error);
   if(enabled.length<2) continue;

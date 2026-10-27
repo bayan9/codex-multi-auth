@@ -37,7 +37,7 @@ const routeSchema = z.object({
 		.min(1)
 		.max(80)
 		.regex(/^[^\x00-\x1f\x7f]+$/),
-	kind: z.enum(["api", "zdr"]),
+	kind: z.enum(["api", "zdr", "psp"]),
  region: z.enum(["global", "us"]).optional(),
 	apiKey: z.string().min(1).max(1024).regex(/^\S+$/),
 	enabled: z.boolean(),

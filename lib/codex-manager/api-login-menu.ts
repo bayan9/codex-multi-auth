@@ -261,12 +261,13 @@ export async function runApiLoginMenu(
 				}
 				const kind = await d.select(
 					[
-						{ label: "API", value: "api" },
+						{ label: "Regular API", value: "api" },
 						{ label: "ZDR (operator-confirmed approval; not detected from the key)", value: "zdr" },
+                        { label: "PSP — Private Safety Processing (operator-confirmed enrollment; not detected from the key)", value: "psp" },
 					],
-					"Choose the routing pool (ZDR is operator-declared)",
+					"Choose the routing pool (ZDR and PSP are operator-declared)",
 				);
-				if (kind !== "api" && kind !== "zdr") continue;
+				if (kind !== "api" && kind !== "zdr" && kind !== "psp") continue;
 				const region = await chooseRegion(d);
  if (!region) continue;
  const apiKey = await d.secret();
@@ -347,7 +348,7 @@ export async function runApiLoginMenu(
 				: [...routes, edited];
 			routes = await d.save(next, routes);
 			d.log(
-				"Saved. Choose an API or ZDR model explicitly in Codex. Desktop login is unchanged.",
+				"Saved. Choose an API, ZDR, or PSP model explicitly in Codex. Desktop login is unchanged.",
 			);
 		} catch (error) {
             const changed = error instanceof Error && error.message.startsWith("API route configuration changed");

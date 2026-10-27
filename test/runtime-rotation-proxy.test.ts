@@ -5724,7 +5724,7 @@ describe("explicit API model routes",()=>{
 		});
 		expect(posts).toBe(3);
 	});
-	it.each(["api", "zdr"] as const)("records interrupted %s streams as cancellation", async kind => {
+	it.each(["api", "zdr", "psp"] as const)("records interrupted %s streams as cancellation", async kind => {
 		const recorded: Record<string, unknown>[] = [];
 		vi.spyOn(runtimePolicy, "createRuntimeUsageRecorder").mockImplementation(() => ({
 			hasRecorded: () => recorded.length > 0,
@@ -5909,14 +5909,14 @@ describe("native picker refresh",()=>{
 });
 
 describe("API-only credential inventory",()=>{
- it("serves explicit API models with local authentication when no OAuth pool is stored",async()=>{
+ it.each(["api","zdr","psp"] as const)("serves explicit %s models with local authentication when no OAuth pool is stored",async kind=>{
   const manager=new AccountManager(undefined,createStorage(Date.now()));
   const {calls,fetchImpl}=createRecordingFetch(call=>call.url.endsWith("/models")?Response.json({data:[{id:"exclusive"}]}):textEventStream('data: {"type":"response.completed","response":{}}\n\n'));
-  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>null,readApiRoutes:async()=>[{id:"fixture",label:"API fixture",kind:"api",apiKey:"fixture-key",enabled:true,priority:0,visibleModels:["exclusive"]}]}});
-  const result=await postResponses(proxy,{model:"api/exclusive",input:"test"});
+  const proxy=await startProxy({accountManager:manager,fetchImpl,options:{nativeOpenai:true,readNativeAccountStorage:async()=>null,readApiRoutes:async()=>[{id:"fixture",label:"API fixture",kind,apiKey:"fixture-key",enabled:true,priority:0,visibleModels:["exclusive"]}]}});
+  const result=await postResponses(proxy,{model:`${kind}/exclusive`,input:"test"});
   expect(result.status).toBe(200);await result.text();
   expect(calls.every(c=>c.url.startsWith("https://api.openai.com/"))).toBe(true);
-  const stale=await postResponses(proxy,{model:"api/exclusive",input:"test"},"/responses",{authorization:"Bearer access-1"});
+  const stale=await postResponses(proxy,{model:`${kind}/exclusive`,input:"test"},"/responses",{authorization:"Bearer access-1"});
   expect(stale.status).toBe(401);await stale.text();
  });
 });

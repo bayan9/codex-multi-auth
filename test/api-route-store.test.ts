@@ -45,13 +45,13 @@ it("API-only catalog entries need no matching OAuth model", async () => {
 	);
 });
 describe("private API route storage", () => {
-	it("roundtrips explicit model visibility and priority with private file permissions", async () => {
+	it.each(["api", "zdr", "psp"] as const)("roundtrips %s visibility and priority with private permissions", async (kind) => {
 		const file = join(await tempDir(), "routes.json");
 		const routes = [
 			{
 				id: "fixture",
 				label: "Test API",
-				kind: "zdr" as const,
+				kind,
 				apiKey: "fixture-key",
 				enabled: true,
 				priority: 2,

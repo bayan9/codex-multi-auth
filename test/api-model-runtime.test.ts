@@ -3,7 +3,7 @@ import { ApiModelRuntime } from "../lib/runtime/api-model-runtime.js";
 import type { ApiRouteCredential } from "../lib/api-route-store.js";
 const credential = (
 	id: string,
-	kind: "api" | "zdr" = "zdr",
+	kind: "api" | "zdr" | "psp" = "zdr",
 	priority = 0,
 ): ApiRouteCredential => ({
 	id,
@@ -545,4 +545,25 @@ it("does not retain operator metadata after it is cleared on the route", async (
 	expect(model).toMatchObject({ reasoning_levels_known: false, supported_reasoning_levels: [] });
 	expect(model).not.toHaveProperty("capability_metadata_source");
 	expect(model).not.toHaveProperty("available_access_programs");
+});
+
+it.each(["api","zdr","psp"] as const)("keeps %s failover within the selected pool and region",async kind=>{
+ const posts:string[]=[];
+ const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>{
+  if(init?.method!=="POST")return Response.json({data:[{id:"exclusive"}]});
+  const auth=new Headers(init.headers).get("authorization")!;posts.push(auth);
+  return auth==="Bearer test-backup"?Response.json({ok:true}):new Response(null,{status:503});
+ });
+ const routes=[{...credential("first",kind,0),region:"us" as const},{...credential("global",kind,1),region:"global" as const},{...credential("backup",kind,9),region:"us" as const},...(["api","zdr","psp"] as const).filter(k=>k!==kind).map(k=>credential(k,k,0))];
+ const runtime=new ApiModelRuntime(fetcher as typeof fetch);
+ const response=await runtime.request(`${kind}/exclusive`,{},routes);
+ expect(response.status).toBe(200);expect(posts).toEqual(["Bearer test-first","Bearer test-backup"]);
+});
+
+it("keeps a PSP operator profile and literal ultra effort without inferring enrollment",async()=>{
+ const runtime=new ApiModelRuntime(async()=>Response.json({data:[{id:"exclusive"}]}));
+ const route={...credential("profile","psp"),modelProfiles:{exclusive:{slug:"exclusive",display_name:"Fixture",input_modalities:["text","image"],supports_parallel_tool_calls:true}},modelReasoningLevels:{exclusive:["low","ultra"]}};
+ const [catalog]=await runtime.catalogs([route]);
+ expect(catalog?.models[0]).toMatchObject({input_modalities:["text","image"],supports_parallel_tool_calls:true,supported_reasoning_levels:expect.arrayContaining([expect.objectContaining({effort:"ultra"})])});
+ expect(catalog?.models[0]).not.toHaveProperty("available_access_programs");
 });

@@ -18,7 +18,7 @@ export interface WebSocketDisconnectDiagnostic {
  cause: "close" | "transport_error" | "invalid_event" | "buffer_limit" | "send_error";
  stage: "awaiting_first_event" | "streaming";
  closeCode?: number;
- routeKind?: "oauth" | "api" | "zdr";
+ routeKind?: "oauth" | "api" | "zdr" | "psp";
  connectionAgeMs?: number;
  eventCount?: number;
  requestBytes?: number;
@@ -72,7 +72,7 @@ const terminal = new Set([
 ]);
 type Json = Record<string, unknown>;
 type Chain = { body: Json; output: unknown[]; pool: string; bytes: number };
-type Context = { routeKind: "oauth" | "api" | "zdr"; signal: AbortSignal; session: SocketSession; previousId?: string; delta?: unknown; clientBeta?: string };
+type Context = { routeKind: "oauth" | "api" | "zdr" | "psp"; signal: AbortSignal; session: SocketSession; previousId?: string; delta?: unknown; clientBeta?: string };
 /** A thread-scoped hint only; authentication is checked separately before use. */
 function fallbackScope(req: IncomingMessage): string | undefined {
 	// Native clients can share a session across threads. Prefer the conversation

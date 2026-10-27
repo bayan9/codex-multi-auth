@@ -135,7 +135,7 @@ export interface ApiCatalogFailure {
 }
 export interface ApiCatalogStatus {
 	id: string;
-	kind: "api" | "zdr";
+	kind: "api" | "zdr" | "psp";
 	label: string;
 	priority: number;
 	checkedAt: number;
@@ -283,7 +283,7 @@ export class ApiModelRuntime {
 		forceProbes = false,
 		waitForCapabilities = true,
 		waitForPersistence = true,
-        requestKind?: "oauth" | "api" | "zdr",
+        requestKind?: "oauth" | "api" | "zdr" | "psp",
 	): Promise<RouteCatalog[]> {
 		this.activeKeys = new Set(routes.map((route) => this.key(route)));
 		return mapWithConcurrency(requestKind ? routes.filter(route => route.kind === requestKind) : routes, 3, async (route) => {

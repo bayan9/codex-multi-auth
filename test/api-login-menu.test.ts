@@ -8,8 +8,8 @@ function offered(items: { value?: string }[], choice: string | null | undefined)
 	return choice;
 }
 describe("API credential setup", () => {
-	it("requires explicit model choices and keeps credentials out of menu labels", async () => {
-		const choices = ["add", "zdr", "global", "9", "toggle:exclusive", "save", "back"];
+	it.each(["api", "zdr", "psp"] as const)("requires explicit %s model choices and keeps credentials out of menu labels", async (kind) => {
+		const choices = ["add", kind, "global", "9", "toggle:exclusive", "save", "back"];
 		const labels: string[] = [];
 		const saved: ApiRouteCredential[][] = [];
 		const result = await runApiLoginMenu({
@@ -30,7 +30,7 @@ describe("API credential setup", () => {
 		expect(result).toBe(0);
 		expect(saved).toHaveLength(1);
 		expect(saved[0]?.[0]).toMatchObject({
-			kind: "zdr",
+			kind,
 			visibleModels: ["exclusive"],
 			priority: 9,
 		});

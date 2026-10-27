@@ -1567,11 +1567,11 @@ async function handleRequestInner(
 			context.headers.delete("content-encoding");
 			context.headers.delete("content-length");
 		}
-		// Explicit API/ZDR routes never touch the OAuth pool, so they stay available.
+		// Explicit API/ZDR/PSP routes never touch the OAuth pool, so they stay available.
 		// Everything else would route through a manager the store no longer backs.
 		// A 401 would tell the native client its login is bad when the store is what
 		// is missing, so independently authenticated clients get a 503 (#702).
-		if (nativeStorageMissing && !(isResponsesRequest && context.model && /^(api|zdr)\//.test(context.model))) {
+		if (nativeStorageMissing && !(isResponsesRequest && context.model && /^(api|zdr|psp)\//.test(context.model))) {
 			writeJson(res, HTTP_STATUS.SERVICE_UNAVAILABLE, {
 				error: {
 					message: "Account storage is unavailable. Run codex-multi-auth login or check the account store.",
@@ -1701,7 +1701,7 @@ async function handleRequestInner(
 
 		// Explicit API aliases are handled before all OAuth selection. An absent
 		// credential or catalog is a hard failure, never an ordinary-model fallback.
-		if (context.model && /^(api|zdr)\//.test(context.model)) {
+		if (context.model && /^(api|zdr|psp)\//.test(context.model)) {
 			if (!isResponsesRequest) {
 				writeJson(res, 400, { error: { code: "api_route_requires_responses" } });
 				return;
@@ -1731,7 +1731,7 @@ async function handleRequestInner(
 						attemptedCredentialIndex = credentialIndex;
       const credential = apiRoutes[credentialIndex];
       if (credential) recordRuntimeInferenceRequest(`sha256:${modelScopeId(credential.kind, credential.id)}`, state.now());
-						const label = `${context.model?.startsWith("zdr/") ? "ZDR" : "API"} credential ${credentialIndex + 1}`;
+						const label = `${context.model?.startsWith("psp/") ? "PSP" : context.model?.startsWith("zdr/") ? "ZDR" : "API"} credential ${credentialIndex + 1}`;
 						state.status.upstreamRequests++;
 						state.status.lastAccountIndex = null;
 						state.status.lastAccountId = null;
@@ -2185,7 +2185,7 @@ async function handleRequestInner(
 				const forceProbes = forceCatalogRefresh && incomingUrl.searchParams.get("force_probes") === "1";
 				const apiRefresh = apiRuntime.catalogs(configuredRoutes, forceCatalogRefresh, forceProbes, forceCatalogRefresh);
 				const pickerSnapshot = () => [
-					...modelCatalog.cachedList(routableKeys).filter(model => !/^(api|zdr)\//.test(model.slug)),
+					...modelCatalog.cachedList(routableKeys).filter(model => !/^(api|zdr|psp)\//.test(model.slug)),
 					...buildVisibleModelUnion(apiRuntime.cachedCatalogs().flatMap(catalog => {
 						const route = configuredRoutes.find(route => route.id === catalog.id && route.enabled);
 						return route ? [{...catalog, visibleModels: route.visibleModels, priority: route.priority}] : [];
@@ -2194,7 +2194,7 @@ async function handleRequestInner(
 				const refresh = (async () => {
 				await oauthRefresh;
 				const apiCatalogs = await apiRefresh;
-				const oauthModels = modelCatalog.cachedList(routableKeys).filter(model => !/^(api|zdr)\//.test(model.slug));
+				const oauthModels = modelCatalog.cachedList(routableKeys).filter(model => !/^(api|zdr|psp)\//.test(model.slug));
 				const models = [...oauthModels, ...buildVisibleModelUnion(apiCatalogs)];
 				if (state.modelCatalog === modelCatalog) {
 					state.catalogOAuthModels = oauthModels;
@@ -2269,7 +2269,7 @@ async function handleRequestInner(
                 // A completed failed fetch is still unknown, not a successful
                 // empty catalog. Never replace native subscription entries with
                 // an API-only success while a routable catalog is unknown.
-                if (!forceCatalogRefresh && !models.some(model => !/^(api|zdr)\//.test(model.slug)) &&
+                if (!forceCatalogRefresh && !models.some(model => !/^(api|zdr|psp)\//.test(model.slug)) &&
                     routableKeys.some(key => !modelCatalog.hasUsablePickerSnapshot(key))) models = [];
 				res.setHeader("etag", setCatalogEtag(state, models));
 
@@ -3132,7 +3132,7 @@ async function handleRequestInner(
 				// same redirect — cooling + rotating here would drain the pool on
 				// one endpoint fault. This also covers the WebSocket httpFetch
 				// fallback: SocketSession preserves init, so a refused-upgrade
-				// turn on API/ZDR credentials can reject this way. Fail the
+				// turn on API/ZDR/PSP credentials can reject this way. Fail the
 				// request in place and leave account state untouched.
 				if (isRedirectRejection(error)) {
 					writeJson(res, 502, {

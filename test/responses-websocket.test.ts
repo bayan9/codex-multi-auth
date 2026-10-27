@@ -255,13 +255,13 @@ it.each([undefined, false, true])("preserves caller permission metadata over Web
 	expect(f.calls[0]?.client_metadata).toEqual(clientMetadata);
 });
 
-it("rejects unknown or cross-pool continuations without sending them upstream", async () => {
+it.each(["api","zdr","psp"] as const)("rejects unknown or cross-pool %s continuations without sending them upstream", async kind => {
 	const f = await fixture();
 	const ws = await f.connect();
 	expect(
 		(
 			await turn(ws, {
-				model: "zdr/shared",
+				model: `${kind}/shared`,
 				previous_response_id: "unknown",
 				input: [],
 			})
@@ -270,7 +270,7 @@ it("rejects unknown or cross-pool continuations without sending them upstream", 
 		type: "error",
 		error: { code: "previous_response_not_found" },
 	});
-	await turn(ws, { model: "zdr/shared", input: [] });
+	await turn(ws, { model: `${kind}/shared`, input: [] });
 	expect(
 		(
 			await turn(ws, {
@@ -420,7 +420,7 @@ it("does not replay after generation starts and the upstream disconnects", async
 	expect(events.at(-1)?.error).toMatchObject({ message: expect.stringContaining("Upstream WebSocket") });
 	expect(f.calls).toHaveLength(1);
 });
-it.each(["oauth", "api", "zdr"] as const)("records sanitized %s close context without replaying generation", async (routeKind) => {
+it.each(["oauth", "api", "zdr", "psp"] as const)("records sanitized %s close context without replaying generation", async (routeKind) => {
  const f = await fixture(ws => { ws.close(1011, "secret fixture reason"); return true; });
  const ws = await f.connect();
  const before = Date.now();
@@ -599,6 +599,7 @@ it("cancels queued creates as well as the streaming turn without blocking new wo
 async function customGateway(options: {
 	upstream: Server;
 	apiRetry?: boolean;
+ apiKind?: "api" | "zdr" | "psp";
 	auth?: (req: IncomingMessage) => number | null;
 	outboundHeaders?: Record<string, string>;
 	maxPayloadBytes?: number;
@@ -629,7 +630,7 @@ async function customGateway(options: {
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(Buffer.from(chunk));
 			const response = options.apiRetry
-				? await runtime.request("api/shared", JSON.parse(Buffer.concat(chunks).toString()), [{id:"fixture",label:"Fixture",kind:"api",priority:0,enabled:true,apiKey:"fixture-upstream",visibleModels:["shared"]}])
+				? await runtime.request(`${options.apiKind ?? "api"}/shared`, JSON.parse(Buffer.concat(chunks).toString()), [{id:"fixture",label:"Fixture",kind:options.apiKind ?? "api",priority:0,enabled:true,apiKey:"fixture-upstream",visibleModels:["shared"]}])
 				: await gateway.fetch(`${upstreamUrl}/responses`, {
 				method: "POST",
 				headers: { authorization: "Bearer fixture-upstream", "content-type": "application/json", ...options.outboundHeaders },
@@ -684,7 +685,7 @@ function rejectingUpstream(status: number, headers: Record<string, string>, onPo
 	return upstream;
 }
 
-it("keeps the local socket open while retrying a rejected upstream create", async () => {
+it.each(["api","zdr","psp"] as const)("keeps the local %s socket open while retrying a rejected upstream create", async kind => {
 	const upstream=createServer(); const wss=new WebSocketServer({server:upstream});
 	let creates=0; const received:Record<string,unknown>[]=[];
 	wss.on("connection",ws=>ws.on("message",raw=>{
@@ -693,7 +694,7 @@ it("keeps the local socket open while retrying a rejected upstream create", asyn
 			? {type:"error",status:429,headers:{"retry-after":"2"},error:{code:"rate_limit_exceeded"}}
 			: {type:"response.completed",response:{id:"resp_recovered",output:[]}}));
 	}));
-	const g=await customGateway({upstream,apiRetry:true});
+	const g=await customGateway({upstream,apiRetry:true,apiKind:kind});
 	cleanups.push(async()=>{for(const ws of wss.clients)ws.terminate();wss.close();});
 	const ws=await g.connect();
 	vi.useFakeTimers({toFake:["Date","setTimeout","clearTimeout"]});
@@ -704,7 +705,7 @@ it("keeps the local socket open while retrying a rejected upstream create", asyn
 		const result=fakeTimeout(...args);if(args[1]===2000)parked();return result;
 	}) as typeof setTimeout);
 	try {
-		const result=turn(ws,{model:"api/shared",input:[],reasoning:{effort:"ultra"}});
+		const result=turn(ws,{model:`${kind}/shared`,input:[],reasoning:{effort:"ultra"}});
 		expect(await Promise.race([waiting.then(()=>"parked"),result])).toBe("parked");
 		await vi.advanceTimersByTimeAsync(1999);expect(creates).toBe(1);expect(ws.readyState).toBe(WebSocket.OPEN);
 		await vi.advanceTimersByTimeAsync(1);
