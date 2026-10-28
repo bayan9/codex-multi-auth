@@ -107,6 +107,51 @@ describe("discovery recovery", () => {
   expect(sent).toEqual(["Bearer fixture-one","Bearer fixture-backup"]);
   expect(discovered).toEqual(["Bearer fixture-one","Bearer fixture-backup"]);
  });
+ it.each(["recovery", "deadline", "cancel"])("does not let stalled backups block %s", async mode => {
+  vi.useFakeTimers({toFake:["setTimeout","clearTimeout","Date","performance"]});
+  let release!:()=>void; const gate=new Promise<void>(r=>{release=r;});
+  let attempts=0;
+  const fetcher=vi.fn(async (_url:string|URL|Request,init?:RequestInit)=>{
+   const key=new Headers(init?.headers).get("authorization");
+   if(init?.method!=="POST"){if(key==="Bearer fixture-backup")await gate;return catalog();}
+   attempts++;return attempts===1?Response.json({error:{code:"rate_limit_exceeded"}},{status:429,headers:{"retry-after":mode==="recovery"?"1":"60"}}):Response.json({id:"ok"});
+  });
+  const runtime=new ApiModelRuntime(fetcher as typeof fetch,Date.now,undefined,undefined,undefined,2000);
+  await runtime.catalogs([route()]);
+  const controller=new AbortController();let status:number|string|undefined;
+  const pending=runtime.request("api/example",{},[route(),route("backup")],controller.signal).then(r=>{status=r.status;},()=>{status="cancelled";});
+  await vi.advanceTimersByTimeAsync(500);
+  if(mode==="cancel")controller.abort();
+  await vi.advanceTimersByTimeAsync(mode==="recovery"?800:1600);
+  try {expect(status).toBe(mode==="recovery"?200:mode==="cancel"?"cancelled":429);expect(attempts).toBe(mode==="recovery"?2:1);}
+  finally {release();await vi.runAllTimersAsync();await pending;}
+ });
+ it("keeps the full catalog visible during backup enrichment callbacks", async()=>{
+  vi.useFakeTimers();const views:string[][]=[];
+  const fetcher=vi.fn(async (_url:string|URL|Request,init?:RequestInit)=>init?.method==="POST"?new Response(null,{status:new Headers(init.headers).get("authorization")==="Bearer fixture-one"?503:200}):catalog());
+  const runtime=new ApiModelRuntime(fetcher as typeof fetch,Date.now,undefined,async models=>models,()=>{views.push(runtime.cachedCatalogs().map(c=>c.id).sort());});
+  const warm=runtime.catalogs([route(),{...route("other"),kind:"zdr"}]);await vi.runAllTimersAsync();await warm;views.length=0;
+  const pending=runtime.request("api/example",{},[route(),route("backup"),{...route("other"),kind:"zdr"}]);await vi.runAllTimersAsync();expect((await pending).status).toBe(200);
+  expect(views.length).toBeGreaterThan(0);expect(views.every(ids=>ids.includes("one")&&ids.includes("other"))).toBe(true);
+ });
+ it("uses a ready backup without waiting for a stalled sibling or reviving removed routes",async()=>{
+  vi.useFakeTimers({toFake:["setTimeout","clearTimeout","Date","performance"]});
+  let release!:()=>void;const gate=new Promise<void>(r=>{release=r;});
+  const views:string[][]=[];
+  const fetcher=vi.fn(async (_url:string|URL|Request,init?:RequestInit)=>{
+   const key=new Headers(init?.headers).get("authorization");
+   if(init?.method!=="POST"){if(key==="Bearer fixture-stalled")await gate;return catalog();}
+   return new Response(null,{status:key==="Bearer fixture-one"?503:200});
+  });
+  const runtime=new ApiModelRuntime(fetcher as typeof fetch,Date.now,undefined,async models=>models,()=>{views.push(runtime.cachedCatalogs().map(c=>c.id));});
+  await runtime.catalogs([route()]);let status:number|undefined;
+  const pending=runtime.request("api/example",{},[route(),route("stalled"),route("ready")]).then(r=>{status=r.status;});
+  await vi.advanceTimersByTimeAsync(500);
+  try {expect(status).toBe(200);await runtime.catalogs([route()]);views.length=0;}
+  finally {release();await vi.runAllTimersAsync();await pending;}
+  expect(runtime.cachedCatalogs().map(c=>c.id)).toEqual(["one"]);
+  expect(views.every(ids=>!ids.includes("stalled"))).toBe(true);
+ });
  it.each([401,403])("removes routing evidence on HTTP %s and never exposes the response body", async status => {
   vi.useFakeTimers();
   const fetcher=vi.fn().mockResolvedValueOnce(catalog()).mockResolvedValueOnce(new Response("secret fixture",{status}));

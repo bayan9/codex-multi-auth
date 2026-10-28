@@ -289,8 +289,9 @@ export class ApiModelRuntime {
 		waitForCapabilities = true,
 		waitForPersistence = true,
         requestKind?: "oauth" | "api" | "zdr" | "psp",
+        updateActiveKeys = true,
 	): Promise<RouteCatalog[]> {
-		this.activeKeys = new Set(routes.map((route) => this.key(route)));
+		if (updateActiveKeys) this.activeKeys = new Set(routes.map((route) => this.key(route)));
 		return mapWithConcurrency(requestKind ? routes.filter(route => route.kind === requestKind) : routes, 3, async (route) => {
 					const key = this.key(route),
 						cached = this.cache.get(key);
@@ -382,6 +383,9 @@ export class ApiModelRuntime {
 		signal?: AbortSignal,
 		onAttempt?: (credentialIndex: number) => void,
 	): Promise<Response> {
+		await Promise.resolve();
+        if (signal?.aborted) throw new ClientCancellationError();
+        this.activeKeys = new Set(routes.map(credential => this.key(credential)));
 		let route;
 		try {
 			if (isNonResponsesModel(parseModelRoute(alias).upstreamModel))
@@ -435,6 +439,7 @@ export class ApiModelRuntime {
 		const admissionDeadline = performance.now() + Math.max(0, Math.min(60_000, this.admissionWaitMs));
 		let waits = 0;
         let discoveredBackups = false;
+        const pendingBackups = new Map<string, Promise<{id: string; catalogs: RouteCatalog[]}>>();
 		for (;;) {
 		let retryWaitMs = Infinity;
 		let deferred = false;
@@ -569,21 +574,33 @@ export class ApiModelRuntime {
                 credential.kind === route.kind &&
                 (selectedRegion === undefined || (credential.region ?? "global") === selectedRegion) &&
                 !route.candidates.some(candidate => candidate.id === credential.id));
-            if (backups.length) {
-                if (signal?.aborted) throw new ClientCancellationError();
-                const catalogs = await this.catalogs(backups, false, false, true, false, route.kind);
-                this.activeKeys = new Set(routes.map(credential => this.key(credential)));
-                if (signal?.aborted) throw new ClientCancellationError();
-                const resolved = resolveModelRoute(alias, catalogs, {
-                    serviceTier: route.serviceTier,
-                    reasoningEffort: isRecord(body.reasoning) && typeof body.reasoning.effort === "string" ? body.reasoning.effort : undefined,
-                });
-                if (resolved.candidates.length) {
-                    route.candidates.push(...resolved.candidates);
-                    continue;
-                }
+            for (const backup of backups) {
+                // A subset lookup must never replace the configured catalog set.
+                const pending = this.catalogs([backup], false, false, true, false, route.kind, false)
+                    .then(catalogs => ({id: backup.id, catalogs}), () => ({id: backup.id, catalogs: []}));
+                pendingBackups.set(backup.id, pending);
             }
         }
+        if (pendingBackups.size) {
+            const remaining = admissionDeadline - performance.now();
+            if (remaining > 0) {
+                const ready = await this.waitForBackup(
+                    Promise.race(pendingBackups.values()),
+                    Math.min(remaining, deferred ? retryWaitMs : Infinity), signal);
+                if (ready) {
+                    pendingBackups.delete(ready.id);
+                    const resolved = resolveModelRoute(alias, ready.catalogs, {
+                        serviceTier: route.serviceTier,
+                        reasoningEffort: isRecord(body.reasoning) && typeof body.reasoning.effort === "string" ? body.reasoning.effort : undefined,
+                    });
+                    route.candidates.push(...resolved.candidates);
+                }
+                // Retry recovery as soon as its cooldown expires, even if no
+                // catalog completed. Discovery cannot extend admission time.
+                continue;
+            }
+        }
+
 		if (deferred && Number.isFinite(retryWaitMs) && waits < 32 && retryWaitMs <= admissionDeadline - performance.now()) {
 			waits++;
 			await this.waitForAdmission(retryWaitMs, signal);
@@ -596,6 +613,16 @@ export class ApiModelRuntime {
 		return this.failure(lastStatus === 401 || lastStatus === 403 ? 503 : lastStatus, "model_route_pool_unavailable");
 		}
 	}
+    private waitForBackup<T>(pending: Promise<T>, ms: number, signal?: AbortSignal): Promise<T | undefined> {
+        if (signal?.aborted) return Promise.reject(new ClientCancellationError());
+        return new Promise((resolve, reject) => {
+            const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); };
+            const abort = () => { cleanup(); reject(new ClientCancellationError()); };
+            const timer = setTimeout(() => { cleanup(); resolve(undefined); }, Math.max(0, ms));
+            signal?.addEventListener("abort", abort, {once:true});
+            void pending.then(value => { cleanup(); resolve(value); }, error => { cleanup(); reject(error); });
+        });
+    }
 	private waitForAdmission(ms: number, signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted) return Promise.reject(new ClientCancellationError());
 		return new Promise((resolve, reject) => {

@@ -165,6 +165,8 @@ describe("coordinated API backoff", () => {
    return new Headers(init.headers).get("authorization")?.endsWith("one") && JSON.parse(String(init.body)).model === "exclusive" ? limited("120") : new Response("ok");
   });
   expect((await request(runtime)).status).toBe(429);
+  // A zero admission budget cannot wait for discovery; make the backup immediately usable.
+  await runtime.catalogs([route(), {...route("backup"),priority:2}]);
   expect((await request(runtime,[route(), {...route("backup"),priority:2}])).status).toBe(200);
   expect((await request(runtime,[route()],"other")).status).toBe(200);
   expect((await request(runtime,[route(), {...route("us"),region:"us",priority:2}])).status).toBe(429);
