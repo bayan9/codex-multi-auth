@@ -145,6 +145,7 @@ import {
 	DEFAULT_AUTH_FAILURE_COOLDOWN_MS,
 	ensureFreshAccessToken,
 	redirectRuntimeRefreshCommits,
+	withRuntimeCredentialLock,
 	resolveRuntimeRefreshTarget,
 } from "./runtime/rotation-token-refresh.js";
 import { SessionAffinityStore } from "./session-affinity.js";
@@ -1412,10 +1413,16 @@ async function handleRequestInner(
 		// empty pool: that would discard the live manager's learned state and hide
 		// the cause behind catalog/403 errors.
 		let nativeStorageMissing = false;
+		let nativeStorageUnavailable = false;
         let nativeOAuthResult: boolean | undefined;
 		const nativeOAuth = async (): Promise<boolean> =>
 			(nativeOAuthResult ??= !!(state.nativeOpenai && bearer && await isNativeClientToken(bearer, state.now())));
-		if (state.nativeOpenai && state.readNativeAccountStorage) {
+		// Provider-bound routers are long-lived too: login/refresh in another
+		// process replaces credentials without changing the client API key. Sync
+		// before selection so an obsolete auth-invalid marker cannot veto re-login.
+		// Provider mode must authenticate its local key before reading the store;
+		// accepting managed OAuth bearers remains exclusive to native mode.
+		if (state.readNativeAccountStorage && (state.nativeOpenai || apiKeyClient)) {
 			// Screen the caller before account storage can reshape the manager: a
 			// request with no credential never reads disk, and a bearer that matches
 			// nothing we hold (in memory or on disk) is refused before any credential
@@ -1424,7 +1431,9 @@ async function handleRequestInner(
 				writeUnauthorized(res);
 				return;
 			}
-			const snapshot = await state.readNativeAccountStorage();
+			const readStorage = state.readNativeAccountStorage;
+			await withRuntimeCredentialLock(state.activeAccountManager, async () => {
+			const snapshot = await readStorage();
             const disk = snapshot.storage ?? {version: 3 as const, accounts: [], activeIndex: 0, activeIndexByFamily: {}};
             managedStorageVerified = snapshot.verified && snapshot.storage !== null;
             // A concurrent request may have replaced the manager while this read waited.
@@ -1436,10 +1445,7 @@ async function handleRequestInner(
 				writeUnauthorized(res);
 				return;
 			}
-			if (snapshot.transientFailure && snapshot.routingAvailable === false && (apiKeyClient || await nativeOAuth())) {
-                writeJson(res, 503, {error:{code:"native_account_storage_unavailable",message:"Account storage is temporarily unavailable. Retry when it is readable."}});
-                return;
-            }
+			nativeStorageUnavailable = snapshot.transientFailure === true && snapshot.routingAvailable === false;
             nativeStorageMissing = snapshot.storage === null && !snapshot.transientFailure;
             if (snapshot.verified && snapshot.storage !== null) {
 			const accounts = accountManager.getAccountsSnapshot();
@@ -1490,6 +1496,8 @@ async function handleRequestInner(
                 state.modelCatalogs?.clear();
 			}
             }
+			});
+			if (res.writableEnded) return;
 		}
 		// Decide against the synced manager, so a credential revoked or disabled on
 		// disk is refused even though it passed the screen above.
@@ -1570,10 +1578,12 @@ async function handleRequestInner(
 		// Everything else would route through a manager the store no longer backs.
 		// A 401 would tell the native client its login is bad when the store is what
 		// is missing, so independently authenticated clients get a 503 (#702).
-		if (nativeStorageMissing && !(isResponsesRequest && context.model && /^(api|zdr)\//.test(context.model))) {
+		if ((nativeStorageMissing || nativeStorageUnavailable) && !(isResponsesRequest && context.model && /^(api|zdr)\//.test(context.model))) {
 			writeJson(res, HTTP_STATUS.SERVICE_UNAVAILABLE, {
 				error: {
-					message: "Account storage is unavailable. Run codex-multi-auth login or check the account store.",
+					message: nativeStorageUnavailable
+						? "Account storage is temporarily unavailable. Retry when it is readable."
+						: "Account storage is unavailable. Run codex-multi-auth login or check the account store.",
 					code: "native_account_storage_unavailable",
 				},
 			});
@@ -2906,6 +2916,14 @@ async function handleRequestInner(
 			}
 			if (!refreshed.ok) {
 				refundConsumedPoolToken(selected);
+				if (!refreshed.selectionRestart && refreshed.coordinationFailed) {
+					writeJson(res, HTTP_STATUS.SERVICE_UNAVAILABLE, { error: {
+						code: "refresh_coordination_unavailable",
+						message: "OAuth refresh is blocked by local lease coordination. Check the refresh lease before retrying; do not reuse a possibly consumed token.",
+					} });
+					await usageRecorder.record({outcome: "failure", statusCode: HTTP_STATUS.SERVICE_UNAVAILABLE, errorCode: "refresh_coordination_unavailable", account: selected});
+					return;
+				}
 				if (refreshed.selectionRestart) {
 					// The credential row vanished while refresh was in flight. The manager
 					// swap above already cleared request-local attempt state; restart selection
@@ -3001,8 +3019,9 @@ async function handleRequestInner(
 				continue;
 			}
 
-			if (state.nativeOpenai && state.readNativeAccountStorage) {
-				const latestSnapshot = await state.readNativeAccountStorage();
+			if (state.readNativeAccountStorage) {
+				const readStorage = state.readNativeAccountStorage;
+				const latestSnapshot = await withRuntimeCredentialLock(state.activeAccountManager, readStorage);
                 const latest = latestSnapshot.storage;
                 const retained = latestSnapshot.transientFailure && latestSnapshot.routingAvailable === true && (apiKeyClient || await nativeOAuth())
                     ? state.activeAccountManager.getAccountsSnapshot().find(item => item.recordId === refreshed.account.recordId)
