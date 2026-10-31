@@ -49,7 +49,7 @@ export interface RuntimeRotationProxyStatus {
 
 export interface RuntimeRotationProxyOptions {
 	nativeOpenai?: boolean;
-	/** Override the native credential reader for embedded hosts and tests. */
+	/** Override the credential reader for native or provider-bound hosts and tests. */
 	readNativeAccountStorage?: () => Promise<AccountStorageV3 | null>;
 	readApiRoutes?: () => Promise<ApiRouteCredential[]>;
 	readSubscriptionQuota?: () => Promise<QuotaCacheData | null>;
